@@ -958,6 +958,16 @@ fn captured_selection_controls_membership_but_never_off_or_failed_policy() {
         Started::Named(vec!["api=tcp:old:1".to_owned(), "gone=ping:".to_owned()]),
         Started::Resumed(vec!["api=tcp:old:1".to_owned(), "gone=ping:".to_owned()]),
         Started::Default,
+        Started::relative(
+            &ServeToml {
+                services: Some(vec!["api=tcp:old:1".into(), "excluded=stdin:".into()]),
+                ..ServeToml::default()
+            },
+            &["gone=ping:".into()],
+            &["excluded".into()],
+            Path::new("/captured"),
+        )
+        .unwrap(),
     ] {
         let scratch = Scratch::new("selection-policy-matrix");
         let original = started.entries();
@@ -995,6 +1005,29 @@ fn captured_selection_controls_membership_but_never_off_or_failed_policy() {
             held.take(&path, Ok(Some((off, None))), None);
         }
         assert!(!watcher.is_enabled(&service(&first)));
+        {
+            let mut held = watcher.lock();
+            let accepted = held.file.clone();
+            held.take(
+                &path,
+                Ok(Some((
+                    ServeToml {
+                        services: Some(vec!["bad=ping:80".into()]),
+                        ..ServeToml::default()
+                    },
+                    None,
+                ))),
+                None,
+            );
+            assert_eq!(
+                held.file, accepted,
+                "invalid grammar cannot clear off policy"
+            );
+            assert!(matches!(held.policy, super::LivePolicy::Failed));
+        }
+        for name in started.names() {
+            assert!(!watcher.is_enabled(&service(&name)));
+        }
         {
             let mut held = watcher.lock();
             held.take(

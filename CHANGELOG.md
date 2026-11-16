@@ -48,6 +48,11 @@ All notable changes to swoosh, newest first.
   them, repairs the saved list, or turns a service back on. A bare `swoosh serve` serves the saved list,
   or `ping` and `speed` if none is saved. The banner says which, and shows a saved service that differs from
   the one running.
+- **`swoosh serve --with <service>` and `--without <service>` change the saved services for that run only.** Both
+  repeat. `--with ssh` adds a service, `--without ping` omits one, and with none saved the starting list is
+  `ping` and `speed`. Nothing is saved, and later saved changes do not alter the running selection. A name
+  already saved is accepted with the same target and refused with a different one; omitting a name that is not
+  in the list is refused. They cannot be combined with service definitions.
 - **A service definition is checked in full before `serve` or `service add` starts anything.** A refusal
   names the entry's position and the kind of problem, such as an invalid name or target, and does not
   repeat what you typed.

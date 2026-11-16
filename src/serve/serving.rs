@@ -3,8 +3,14 @@
 //! Explicit service constructors select only this invocation; they do not change saved services or
 //! clear `off` names. Bare `serve` uses the saved list, or `ping` and `speed` when no list is saved.
 //! An explicitly empty saved list stays empty. `service add` and `service rm` edit the saved list.
+//!
+//! `--with DEF` and `--without NAME` add to or omit from the saved services (or ping and speed) for this run.
+//! Later saved service additions, removals and target changes do not change this process's selection.
+//! Off changes affect new admissions; existing streams may continue. Each restart, including a
+//! supervisor restart, captures the then-current saved/default selection again. Launch changes neither
+//! saved services nor off settings.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::DEFAULT_SERVICES;
@@ -20,6 +26,36 @@ pub enum ServingError {
     /// The services typed on this command line cannot be one list.
     #[error(transparent)]
     Mistyped(#[from] Mistyped),
+    /// An exclusion name is invalid.
+    #[error("--without #{index} is not a valid service name")]
+    InvalidExclusion {
+        /// The operand's one-based position.
+        index: usize,
+    },
+    /// An exclusion is absent from the captured base.
+    #[error("--without #{index} is not in the saved/default selection")]
+    MissingExclusion {
+        /// The operand's one-based position.
+        index: usize,
+    },
+    /// An exclusion repeats a normalized name.
+    #[error("--without #{index} repeats an earlier --without")]
+    DuplicateExclusion {
+        /// The operand's one-based position.
+        index: usize,
+    },
+    /// An addition is also excluded.
+    #[error("--with #{index} is also named by --without")]
+    ExcludedAddition {
+        /// The operand's one-based position.
+        index: usize,
+    },
+    /// An addition conflicts with a captured base target.
+    #[error("--with #{index} has a different target than the saved/default one")]
+    ConflictingAddition {
+        /// The operand's one-based position.
+        index: usize,
+    },
 }
 
 /// Why the services typed on one command line cannot be one list: a usage error, found before anything is read, written or bound.
@@ -101,7 +137,7 @@ pub enum Added {
 /// The user services selected at startup and whether selection came from this invocation or saved policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Started {
-    /// Explicit constructors for this invocation, with paths made absolute; never saved by launch.
+    /// Invocation-selected services with anchored paths; launch does not save them.
     Named(Vec<String>),
     /// The saved list used by a bare start; an explicitly empty list selects no user services.
     Resumed(Vec<String>),
@@ -133,6 +169,76 @@ impl Started {
             Operand::Positional,
             Some(cwd),
         )?))
+    }
+
+    /// Validate the complete saved/default base and operands against the supplied absolute cwd, then select a fixed service list for this invocation without preparing services or changing saved policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a categorical operand/index error for invalid definitions, exclusions or name conflicts.
+    pub fn relative(
+        kept: &ServeToml,
+        additions: &[String],
+        exclusions: &[String],
+        cwd: &Path,
+    ) -> Result<Self, ServingError> {
+        let defaults;
+        let base = match &kept.services {
+            Some(entries) => entries,
+            None => {
+                defaults = DEFAULT_SERVICES
+                    .iter()
+                    .map(|entry| (*entry).to_owned())
+                    .collect();
+                &defaults
+            }
+        };
+        // Both lists pass the same complete, pure grammar before any membership is removed. In
+        // particular, exclusion cannot hide malformed saved syntax or prepare an excluded backend.
+        let base = ValidatedDefinition::list(base, Operand::Base, Some(cwd))?;
+        let additions = ValidatedDefinition::list(additions, Operand::Addition, Some(cwd))?;
+        // Keyed by name text, as the neighbouring lists are: a service name has no order of its own.
+        let base_targets: BTreeMap<String, String> = base
+            .iter()
+            .map(|definition| (definition.name.to_string(), definition.entry()))
+            .collect();
+        let mut excluded = BTreeSet::new();
+        for (index, name) in exclusions.iter().enumerate() {
+            let index = index + 1;
+            let name = crate::names::service(name)
+                .map_err(|_| ServingError::InvalidExclusion { index })?;
+            if !excluded.insert(name.to_string()) {
+                return Err(ServingError::DuplicateExclusion { index });
+            }
+            if !base_targets.contains_key(name.as_str()) {
+                return Err(ServingError::MissingExclusion { index });
+            }
+        }
+        let mut fresh = BTreeMap::new();
+        for (index, definition) in additions.into_iter().enumerate() {
+            let index = index + 1;
+            if excluded.contains(definition.name.as_str()) {
+                return Err(ServingError::ExcludedAddition { index });
+            }
+            let entry = definition.entry();
+            match base_targets.get(definition.name.as_str()) {
+                Some(held) if *held != entry => {
+                    return Err(ServingError::ConflictingAddition { index });
+                }
+                Some(_) => {}
+                None => {
+                    fresh.insert(definition.name.to_string(), entry);
+                }
+            }
+        }
+        let mut selected: Vec<_> = base
+            .into_iter()
+            .filter(|definition| !excluded.contains(definition.name.as_str()))
+            .map(|definition| definition.entry())
+            .collect();
+        // Base order is retained; new names have a stable order independent of flag placement.
+        selected.extend(fresh.into_values());
+        Ok(Self::Named(selected))
     }
 
     /// The services a bare `serve` would start from the saved list, or the default when no list is saved.
@@ -269,6 +375,9 @@ fn target<'a>(entry: &'a str, name: &str) -> Option<&'a str> {
         .and_then(|(held, target)| (held == name).then_some(target))
 }
 
+#[cfg(test)]
+#[path = "relative_tests.rs"]
+mod relative_tests;
 #[cfg(test)]
 #[path = "serve_serving_tests.rs"]
 mod serving_tests;
