@@ -28,6 +28,7 @@ use swoosh::serve::{
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
+use tightbeam::duration::Lifetime;
 use tightbeam::enabled::{AllEnabled, EnabledServices as _};
 use tightbeam::tunnel::{
     CancellationToken, ManifestEntry, Metering, Posture, RawSource, Router, ServiceCatalog,
@@ -35,8 +36,8 @@ use tightbeam::tunnel::{
 };
 
 use super::{
-    Keeper, ReachKind, keeper_line, reach_section, render_banner, serving_block, supervised,
-    waiting_warnings,
+    Keeper, ReachKind, expire, keeper_line, reach_section, render_banner, serving_block,
+    supervised, waiting_warnings,
 };
 
 #[path = "serve_relative_tests.rs"]
@@ -5265,4 +5266,47 @@ fn wide_serving_labels_keep_fixed_words_bounded_and_targets_complete() {
     );
     assert!(out.contains(&format!("  {name}  anyone  ping:\n")), "{out}");
     assert!(out.lines().all(|line| line.len() <= 80), "{out}");
+}
+
+/// `--expires` fires the run's one teardown token once its lifetime passes, and with no lifetime never
+/// does, while the timer itself never ends (so it can never win the run's select).
+#[tokio::test(start_paused = true)]
+async fn expires_cancels_the_run_at_its_deadline_and_never_without_one() {
+    let lifetime: Lifetime = "1h".parse().unwrap();
+    let cancel = CancellationToken::new();
+    let ended = tokio::time::timeout(
+        lifetime.duration() + Duration::from_secs(1),
+        expire(Some(lifetime), cancel.clone()),
+    )
+    .await;
+    assert!(ended.is_err(), "the timer never returns");
+    assert!(cancel.is_cancelled(), "the deadline cancels the run");
+
+    let cancel = CancellationToken::new();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(400 * 24 * 3600),
+        expire(None, cancel.clone()),
+    )
+    .await;
+    assert!(ended.is_err());
+    assert!(!cancel.is_cancelled(), "no lifetime, no cancel");
+}
+
+/// A run that stops before its `--expires` deadline leaves no timer behind: the timer is owned by the run,
+/// so once the run drops it, passing the deadline cancels nothing.
+#[tokio::test(start_paused = true)]
+async fn a_run_stopped_before_its_deadline_leaves_no_timer_behind() {
+    let lifetime: Lifetime = "1h".parse().unwrap();
+    let cancel = CancellationToken::new();
+    let mut expiry = Box::pin(expire(Some(lifetime), cancel.clone()));
+    assert!(futures::poll!(&mut expiry).is_pending());
+    drop(expiry);
+    // Let anything the timer may have started run up to its own sleep before the clock moves.
+    tokio::task::yield_now().await;
+    tokio::time::advance(lifetime.duration() + Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !cancel.is_cancelled(),
+        "a dropped run's timer fired after the run had stopped"
+    );
 }
