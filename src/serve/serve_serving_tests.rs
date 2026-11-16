@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Replaced, ServingError, Started};
+use super::{Added, EditError, Mistyped, Replaced, ServingError, Started};
 use crate::home::Home;
 use crate::serve_toml::ServeToml;
 
@@ -296,4 +296,144 @@ fn a_named_start_replaces_only_what_was_recorded() {
         },
         "a hand-written built-in a named start drops is reported"
     );
+}
+
+#[test]
+fn removing_saved_services_retains_all_off_names() {
+    let path = Path::new("/home/serve.toml");
+    for (listed, removed, remaining) in [
+        (
+            Some(vec!["ping", "ssh", "speed"]),
+            vec!["ssh"],
+            vec!["ping", "speed"],
+        ),
+        (
+            Some(vec!["ping", "ssh", "speed"]),
+            vec!["ping", "ssh"],
+            vec!["speed"],
+        ),
+        (Some(vec!["ssh"]), vec!["ssh"], vec![]),
+        (None, vec!["ping"], vec!["speed"]),
+        (None, vec!["ping", "speed"], vec![]),
+        (Some(vec![]), vec![], vec![]),
+        (None, vec![], vec!["ping", "speed"]),
+    ] {
+        let mut file = ServeToml {
+            services: listed.map(|entries| entries.into_iter().map(str::to_owned).collect()),
+            off: ["ping", "ssh", "speed", "unlisted"]
+                .map(str::to_owned)
+                .into(),
+            ..ServeToml::default()
+        };
+        let off = file.off.clone();
+        let names: Vec<nauthy::Service> = removed
+            .iter()
+            .map(|name| name.parse().expect("a service name"))
+            .collect();
+
+        file.remove(&names, path)
+            .expect("listed names can be removed");
+
+        let expected = named(&remaining);
+        assert_eq!(file.services, Some(expected.clone()), "{removed:?}");
+        assert_eq!(file.off, off, "{removed:?}");
+        assert_eq!(
+            Started::bare(&file, path).expect("a saved list"),
+            Started::Resumed(expected)
+        );
+    }
+}
+
+#[test]
+fn readding_a_removed_service_keeps_it_off() {
+    let path = Path::new("/home/serve.toml");
+    let mut file = ServeToml {
+        services: Some(named(&["ssh"])),
+        off: ["ssh".to_owned(), "unlisted".to_owned()].into(),
+        ..ServeToml::default()
+    };
+    let off = file.off.clone();
+    file.remove(&["ssh".parse().expect("a service name")], path)
+        .expect("ssh is listed");
+    assert_eq!(file.services, Some(vec![]));
+    assert_eq!(file.off, off);
+
+    assert_eq!(
+        file.add(&named(&["ssh"]), Path::new("/"), path)
+            .expect("ssh can be re-added"),
+        [Added::New("ssh".to_owned())]
+    );
+    assert_eq!(file.services, Some(named(&["ssh"])));
+    assert_eq!(file.off, off);
+    assert_eq!(
+        file.add(&named(&["ssh"]), Path::new("/"), path)
+            .expect("adding the same target is idempotent"),
+        [Added::ListedOff("ssh".to_owned())]
+    );
+    assert_eq!(file.off, off);
+}
+
+#[test]
+fn a_missing_or_duplicate_removal_leaves_membership_and_off_unchanged() {
+    let path = Path::new("/home/serve.toml");
+    for listed in [Some(named(&["ping", "ssh"])), None, Some(vec![])] {
+        for removed in [vec!["ping", "missing"], vec!["ping", "ping"]] {
+            let mut file = ServeToml {
+                services: listed.clone(),
+                off: ["ping".to_owned(), "unlisted".to_owned()].into(),
+                ..ServeToml::default()
+            };
+            let before = file.clone();
+            let names: Vec<nauthy::Service> = removed
+                .iter()
+                .map(|name| name.parse().expect("a service name"))
+                .collect();
+
+            let refused = file.remove(&names, path);
+
+            if removed[0] == removed[1] {
+                assert!(matches!(
+                    refused,
+                    Err(EditError::Serving(ServingError::Mistyped(Mistyped::Twice(name))))
+                        if name == "ping"
+                ));
+            } else {
+                let missing = if listed.as_ref().is_some_and(Vec::is_empty) {
+                    "ping"
+                } else {
+                    "missing"
+                };
+                assert!(matches!(refused, Err(EditError::NotListed(name)) if name == missing));
+            }
+            assert_eq!(file, before, "{listed:?}, {removed:?}");
+        }
+    }
+}
+
+#[test]
+fn removal_refuses_a_malformed_or_duplicate_saved_list_without_changes() {
+    let path = Path::new("/home/serve.toml");
+    for invalid in ["--public=ssh", "db", "ssh=sshd:"] {
+        let mut file = ServeToml {
+            services: Some(vec!["ssh=sshd:".to_owned(), invalid.to_owned()]),
+            off: ["ssh".to_owned(), "unlisted".to_owned()].into(),
+            ..ServeToml::default()
+        };
+        let before = file.clone();
+
+        let refused = file.remove(&["ssh".parse().expect("a service name")], path);
+
+        if invalid == "ssh=sshd:" {
+            assert!(matches!(
+                refused,
+                Err(EditError::Serving(ServingError::Twice { name, .. })) if name == "ssh"
+            ));
+        } else {
+            assert!(matches!(
+                refused,
+                Err(EditError::Serving(ServingError::NotAService { line, .. })) if line == invalid
+            ));
+        }
+        assert_eq!(file, before, "{invalid}");
+    }
 }
