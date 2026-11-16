@@ -202,10 +202,11 @@ macro_rules! reaching_verbs {
             /// transport-blind: the concrete transport was chosen once, at the seam below. A verb reads the
             /// ctx fields it needs and ignores the rest; `serve` reads its own attached
             /// [`serve::ExposeContext`] instead.
-            async fn run<T: Transport, D: Discovery>(
+            async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
                 self,
-                node: &Node<T, D>,
+                node: &'n Node<T, D>,
                 ctx: reaching::ReachCtx<'_>,
+                peers: &'p swoosh::peers::Peers<'n, T, D>,
             ) -> eyre::Result<()>
             where
                 T::Session: 'static,
@@ -213,7 +214,7 @@ macro_rules! reaching_verbs {
                 <T::Session as bifrost::Session>::Read: Send + 'static,
             {
                 match self {
-                    $(Self::$verb(cmd) => cmd.run(node, ctx).await,)+
+                    $(Self::$verb(cmd) => cmd.run(node, ctx, peers).await,)+
                 }
             }
         }
@@ -1141,10 +1142,11 @@ async fn stale_device(home: &Home, machine: &Machine) -> Option<bifrost::NodeId>
 /// root asks the machine which root vouches for it ([`swoosh::learn`]), on the verb's own session and
 /// within [`swoosh::learn::DEADLINE`] of asking: a machine that never answers is dropped silently. What it
 /// showed comes back beside the verb's result, to be told once the node is closed.
-async fn run_verb<T: Transport, D: Discovery>(
+async fn run_verb<'n: 'p, 'p, T: Transport, D: Discovery>(
     outward: Outward,
-    node: &Node<T, D>,
+    node: &'n Node<T, D>,
     mut ctx: reaching::ReachCtx<'_>,
+    peers: &'p swoosh::peers::Peers<'n, T, D>,
     dial: &impl swoosh::sync::Dial,
 ) -> (eyre::Result<()>, Option<swoosh::learn::Shown>)
 where
@@ -1180,7 +1182,7 @@ where
             .flatten()?;
         asked.taught(&standing)
     };
-    let verb = async { tokio::join!(outward.run(node, ctx), lookup) };
+    let verb = async { tokio::join!(outward.run(node, ctx, peers), lookup) };
     match device {
         None => verb.await,
         Some(device) => {
@@ -1211,18 +1213,32 @@ where
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
     let home = ctx.home;
-    let (result, shown) = async {
-        if let Some(renew) = renew {
-            let fetch = swoosh::renewal::NodeFetch::new(node);
-            reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
-            match reaching::resolve(renew.credential, node.node_id(), home).await {
-                Ok(resolved) => (ctx.present, ctx.membership) = resolved.into_slots(),
-                Err(error) => return (Err(error), None),
+    let (result, shown) = {
+        // Every borrower and the sweep end inside this scope, before the endpoint's awaited close.
+        let peers = swoosh::peers::Peers::new(node);
+        let run = async {
+            if let Some(renew) = renew {
+                let fetch = swoosh::renewal::NodeFetch::new(&peers);
+                reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
+                match reaching::resolve(renew.credential, node.node_id(), home).await {
+                    Ok(resolved) => (ctx.present, ctx.membership) = resolved.into_slots(),
+                    Err(error) => return (Err(error), None),
+                }
             }
+            run_verb(
+                outward,
+                node,
+                ctx,
+                &peers,
+                &swoosh::sync::NodeDial::new(&peers, home),
+            )
+            .await
+        };
+        tokio::select! {
+            result = run => result,
+            never = peers.sweep() => match never {},
         }
-        run_verb(outward, node, ctx, &swoosh::sync::NodeDial::new(node, home)).await
-    }
-    .await;
+    };
     node.close().await;
     if let Some(shown) = shown {
         learning::tell(

@@ -86,10 +86,11 @@ impl swoosh::reaching::Reaching for ForwardCmd {
     /// Drive the local end: bind a local port and forward each connection, stream to stdout, or the
     /// reserved unix listener, all over the overlay. It reads the resolved `present` badge and `membership`
     /// badge from `ctx`, and the machine resolved before the bind, the same way `ping`/`send` do.
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        _peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as bifrost::Session>::Write: Send + 'static,

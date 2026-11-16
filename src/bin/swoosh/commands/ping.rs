@@ -77,10 +77,11 @@ impl swoosh::reaching::Reaching for PingCmd {
 
     /// Uniform dispatch: unpack the reach context and run. `ping` reads the resolved machine, the
     /// `transport` label, and the resolved `present` badge.
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        _peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         T::Session: 'static,

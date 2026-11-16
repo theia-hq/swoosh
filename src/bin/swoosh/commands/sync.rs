@@ -57,10 +57,11 @@ impl swoosh::reaching::Reaching for SyncCmd {
         })
     }
 
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
@@ -68,11 +69,11 @@ impl swoosh::reaching::Reaching for SyncCmd {
     {
         refuse_unless_device(ctx.home).await?;
         let devices = swoosh::sync::devices(ctx.home, []).await?;
-        let dial = NodeDial::new(node, ctx.home);
+        let dial = NodeDial::new(peers, ctx.home);
         let mut replies = swoosh::sync::round(&dial, &devices, Until::Every, TOTAL).await;
         // Refused for a standing that needs a renewal: pick it up from one of your devices, then exchange
         // again with it.
-        match swoosh::renewal::after_round(ctx.home, &NodeFetch::new(node), &replies).await {
+        match swoosh::renewal::after_round(ctx.home, &NodeFetch::new(peers), &replies).await {
             PickUp::Skipped => {}
             PickUp::Took(renewed) => {
                 println!("{}", took(&renewed));

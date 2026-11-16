@@ -37,7 +37,7 @@ use crate::identity::Identity;
 use crate::standing::{Standing, StandingError};
 use crate::{badge, config, transport};
 
-/// The uniform context every reaching verb runs against, so dispatch is ONE line (`self.run(node, ctx)`)
+/// The uniform context every reaching verb runs against, so dispatch is ONE line (`self.run(node, ctx, peers)`)
 /// instead of a per-verb argument-threading match with a different signature per arm.
 ///
 /// It carries what a reach-outward verb needs and no more: the [`contacts`](Self::contacts) to resolve a
@@ -111,17 +111,18 @@ pub trait Reaching {
     fn bind_role(&self) -> BindRole;
 
     /// Run this verb against the composed node under the uniform [`ReachCtx`]. Every verb takes the same
-    /// context, so the composition root dispatches with ONE line (`cmd.run(node, ctx)`), not a per-verb
+    /// context, so the composition root dispatches with ONE line (`cmd.run(node, ctx, peers)`), not a per-verb
     /// argument-threading match. A verb reads the ctx fields it needs and ignores the rest. The `Send`
     /// bounds on the session halves are stated once here (structured concurrency across `.await`s).
     ///
     /// Written as a returned `impl Future` (RPITIT), not `async fn`, matching the `Handler` trait: an
     /// `async fn` in a trait cannot state its auto-trait bounds and draws the `async_fn_in_trait` lint;
     /// the impls stay plain `async fn`, which coerces to this on the pinned toolchain.
-    fn run<T: Transport, D: Discovery>(
+    fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: ReachCtx<'_>,
+        peers: &'p crate::peers::Peers<'n, T, D>,
     ) -> impl Future<Output = eyre::Result<()>>
     where
         Self: Sized,

@@ -17,6 +17,7 @@ use keystore::{KeyFile, Protection};
 use nauthy::Link;
 use swoosh::contacts::DeviceLabel;
 use swoosh::home::Home;
+use swoosh::peers::Peers;
 use swoosh::renewal::{Fetch as _, NodeFetch};
 use swoosh::roster::{Epoch, Member, RosterDoc, fold};
 use swoosh::serve::{RENEWAL_SERVICE, SYNC_SERVICE};
@@ -154,7 +155,8 @@ fn a_door_peer_reaches_no_other_route() {
         let host_id = host.node_id();
         serve(nas, host);
 
-        let fetched = tokio::time::timeout(BOUND, NodeFetch::new(&laptop).fetch(host_id))
+        let peers = Peers::new(&laptop);
+        let fetched = tokio::time::timeout(BOUND, NodeFetch::new(&peers).fetch(host_id))
             .await
             .expect("the pick-up answers in time")
             .expect("the pick-up runs");
@@ -233,7 +235,8 @@ fn a_stranger_flood_does_not_hold_a_proven_permit() {
             held.push((stranger, session));
         }
 
-        let fetched = tokio::time::timeout(BOUND, NodeFetch::new(&laptop).fetch(host_id))
+        let peers = Peers::new(&laptop);
+        let fetched = tokio::time::timeout(BOUND, NodeFetch::new(&peers).fetch(host_id))
             .await
             .expect("the pick-up answers in time")
             .expect("the pick-up runs");

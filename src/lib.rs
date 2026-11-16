@@ -25,6 +25,7 @@ pub mod node_client;
 pub mod node_signer;
 pub mod passphrase;
 pub mod peer;
+pub mod peers;
 pub mod reach;
 pub mod reach_report;
 pub mod reaching;
