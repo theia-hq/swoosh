@@ -264,11 +264,11 @@ async fn revoke_while_resident_refuses_next_stream() {
         .await;
 }
 
-/// A `serve.toml` deleted while `serve` runs keeps the services it turned off, in the gate and in the
-/// status alike: the stream is still refused, and the status the control socket reports still names the
-/// service off, because both read the one instance the gate asks.
+/// A `serve.toml` deleted while `serve` runs is a failed read, in the gate and in the status alike: the
+/// stream is still refused, and the status the control socket reports says the services off are unknown
+/// rather than name a list the gate does not follow, because both read the one instance the gate asks.
 #[tokio::test]
-async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
+async fn a_deleted_serve_toml_refuses_in_the_gate_and_reports_unknown() {
     use swoosh::node_client::NodeClient as _;
     use swoosh::serve::control_codec::DisabledList;
 
@@ -311,10 +311,9 @@ async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
                 !reach(host_id, &member, &badge).await,
                 "the gate still refuses the service"
             );
-            assert_eq!(
-                reported().await,
-                DisabledList::Known(vec![GATED.to_owned()]),
-                "and the status still reports it off"
+            assert!(
+                matches!(reported().await, DisabledList::Unknown(_)),
+                "and the status reports the services off as unknown"
             );
 
             cancel.cancel();
@@ -326,8 +325,9 @@ async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
 }
 
 /// A `serve.toml` that cannot be read while `serve` runs changes nothing the run holds: damaged, loose
-/// (others can write it) or unreadable, the gate still refuses the service turned off, the status still
-/// reports it, and the run's one watcher still holds the services, the relay and the resolver it read.
+/// (others can write it) or unreadable, the gate still refuses the service turned off, the status reports
+/// the services off as unknown, and the run's one watcher still holds the services, the relay and the
+/// resolver it read.
 #[tokio::test]
 async fn a_read_error_keeps_the_held_settings() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -391,10 +391,9 @@ async fn a_read_error_keeps_the_held_settings() {
                     !reach(host_id, &member, &badge).await,
                     "{spoiled}: the gate still refuses the service"
                 );
-                assert_eq!(
-                    reported().await,
-                    DisabledList::Known(vec![GATED.to_owned()]),
-                    "{spoiled}: the status still reports it off"
+                assert!(
+                    matches!(reported().await, DisabledList::Unknown(_)),
+                    "{spoiled}: the status reports the services off as unknown"
                 );
                 assert_eq!(watch.held(), held, "{spoiled}: every setting is kept");
             }

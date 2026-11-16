@@ -2003,6 +2003,28 @@ fn refusal_against(args: &[&str], serves: &[&str], off: &[&str]) -> String {
     cmd.running_refusal(4121, Some(&running))
 }
 
+/// A running node that cannot say which services are off says why, and names no `service on`.
+#[test]
+fn serve_on_a_running_node_that_cannot_read_its_file_says_so() {
+    use clap::Parser as _;
+
+    let Some(crate::Command::Serve(cmd)) = crate::Cli::try_parse_from(["swoosh", "serve", "ssh"])
+        .expect("serve parses")
+        .command
+    else {
+        panic!("serve parses to the serve verb");
+    };
+    let running = crate::commands::service::Running {
+        serves: vec!["ssh".to_owned()],
+        off: None,
+    };
+    assert_eq!(
+        cmd.running_refusal(4121, Some(&running)),
+        "swoosh serve is already running here (pid 4121)\n  It serves ssh.\n  It cannot read its \
+         serve.toml, so it refuses new connections to its services until it can."
+    );
+}
+
 /// A `serve` naming a service the running node does not serve names the `service add` that lists it,
 /// every new entry in one command, as typed; never "A second one needs its own".
 #[test]

@@ -404,6 +404,11 @@ impl ServeCmd {
         if !serves.is_empty() {
             out.push_str(&format!("\n  It serves {}.", serves.join(", ")));
         }
+        if running.is_some_and(Running::off_unknown) {
+            out.push_str(
+                "\n  It cannot read its serve.toml, so it refuses new connections to its services until it can.",
+            );
+        }
         let named = |entry: &String| entry.split_once('=').map(|(name, _)| name.to_owned());
         let off = self
             .services

@@ -132,17 +132,35 @@ fn a_serve_toml_swoosh_did_not_write_is_damaged() {
 /// race never turns a service back on.
 #[test]
 fn a_file_removed_between_stat_and_read_keeps_what_was_held() {
-    let scratch = Scratch::new("removed-mid-read");
-    scratch.only_off("ping");
-    let watcher = LiveServeToml::load(&scratch.home).expect("load");
-    let path = scratch.home.serve_toml();
-    let statted = nauthy::FileStamp::of(&std::fs::metadata(&path).unwrap());
-    std::fs::remove_file(&path).unwrap();
-    {
-        let mut state = watcher.shared.state.lock().unwrap();
-        state.take(&path, super::read_stamped(&path), statted);
+    for initially_absent in [true, false] {
+        let scratch = Scratch::new("removed-mid-read");
+        if !initially_absent {
+            scratch.only_off("ping");
+        }
+        let watcher = LiveServeToml::load(&scratch.home).expect("load");
+        watcher.serving(&bare(&scratch));
+        let accepted = watcher.held();
+        let path = scratch.home.serve_toml();
+        scratch.only_off("ping");
+        let statted = nauthy::FileStamp::of(&std::fs::metadata(&path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        {
+            let mut state = watcher.lock();
+            state.take(&path, super::read_stamped(&path), statted);
+            state.last_stat = Some(std::time::Instant::now());
+        }
+        assert_eq!(watcher.held(), accepted, "the raced read changes no data");
+        assert_bound_decisions(
+            &watcher,
+            &[("ping", "ping:", true), ("speed", "speed:", true)],
+            &["ping", "speed"],
+        );
+        watcher.lock().last_stat = None;
+        assert!(
+            !watcher.is_enabled(&service("speed")),
+            "continued absence cannot recover a failed observed read"
+        );
     }
-    assert_eq!(watcher.held().off, ["ping".to_owned()].into(), "still off");
 }
 
 /// A damaged file is read once and then held as read until it changes, so a running `serve` does not
@@ -286,6 +304,445 @@ fn local_detail_waits_for_one_atomic_watcher_update() {
     assert!(snapshot.get("b").unwrap().refused());
 }
 
+/// Assert decisions through the real gate and both observation APIs, including original bound targets.
+fn assert_bound_decisions(watcher: &LiveServeToml, bound: &[(&str, &str, bool)], refused: &[&str]) {
+    let snapshot = watcher.local_service_snapshot().unwrap();
+    assert_eq!(snapshot.len(), bound.len(), "refresh constructs no routes");
+    assert_eq!(watcher.refused(), refused, "the refused set matches policy");
+    for &(name, target, denied) in bound {
+        assert_eq!(
+            watcher.is_enabled(&service(name)),
+            !denied,
+            "the admission guard must distinguish failure for {name}"
+        );
+        let entry = snapshot
+            .get(name)
+            .expect("the bound service remains visible");
+        assert_eq!(entry.target().as_str(), target, "no target substitution");
+        assert_eq!(
+            entry.refused(),
+            denied,
+            "detail agrees with the gate for {name}"
+        );
+    }
+}
+
+#[test]
+fn initial_absence_is_not_later_deletion() {
+    let scratch = Scratch::new("initial-absence");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[("ping", "ping:", false), ("speed", "speed:", false)],
+        &[],
+    );
+    scratch.only_off("ping");
+    watcher.lock().last_stat = None;
+    assert!(!watcher.is_enabled(&service("ping")));
+    assert!(watcher.is_enabled(&service("speed")));
+    let accepted = watcher.held();
+    std::fs::remove_file(scratch.home.serve_toml()).unwrap();
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[("ping", "ping:", true), ("speed", "speed:", true)],
+        &["ping", "speed"],
+    );
+    assert_eq!(watcher.held(), accepted);
+    assert_eq!(watcher.off(), ["ping"], "failure invents no off mark");
+    assert!(
+        !scratch.home.serve_toml().exists(),
+        "the reader writes nothing"
+    );
+}
+
+#[test]
+fn an_unstamped_initial_read_is_not_absence() {
+    let scratch = Scratch::new("unstamped-initial");
+    list(&scratch, &["api=tcp:old:1", "off=ping:"]);
+    scratch.only_off("off");
+    let path = scratch.home.serve_toml();
+    let accepted = ServeToml::read(&scratch.home).unwrap();
+    let started = bare(&scratch);
+    let watcher = LiveServeToml::from_read(path.clone(), Some((accepted.clone(), None)));
+    assert!(matches!(watcher.lock().policy, super::LivePolicy::Accepted));
+    assert!(watcher.lock().stamp.is_none());
+    assert_eq!(watcher.first_read(), &accepted);
+    assert!(watcher.is_enabled(&service("api")));
+    assert!(!watcher.is_enabled(&service("off")));
+
+    std::fs::remove_file(&path).unwrap();
+    watcher.serving(&started);
+    assert_bound_decisions(
+        &watcher,
+        &[("api", "tcp:old:1", true), ("off", "ping:", true)],
+        &["api", "off"],
+    );
+    assert_eq!(watcher.held(), accepted);
+    assert_eq!(watcher.off(), ["off"]);
+}
+
+#[test]
+fn an_unstamped_valid_read_recovers_policy() {
+    let scratch = Scratch::new("unstamped-recovery");
+    list(&scratch, &["api=tcp:old:1", "gone=ping:", "off=ping:"]);
+    scratch.only_off("off");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    let path = scratch.home.serve_toml();
+    std::fs::write(&path, "off = 3\n").unwrap();
+    watcher.lock().last_stat = None;
+    assert!(!watcher.is_enabled(&service("api")), "reach failed policy");
+
+    std::fs::write(
+        &path,
+        "services = ['api=tcp:next:2', 'off=ping:', 'added=ping:']\noff = ['api']\n",
+    )
+    .unwrap();
+    let (accepted, _) = super::read_stamped(&path)
+        .unwrap()
+        .expect("existing policy");
+    {
+        let mut state = watcher.lock();
+        state.take(&path, Ok(Some((accepted.clone(), None))), None);
+        state.last_stat = Some(std::time::Instant::now());
+        assert!(matches!(state.policy, super::LivePolicy::Accepted));
+        assert!(
+            state.stamp.is_none(),
+            "no stamp means retry, not read failure"
+        );
+    }
+    assert_bound_decisions(
+        &watcher,
+        &[
+            ("api", "tcp:old:1", true),
+            ("gone", "ping:", true),
+            ("off", "ping:", false),
+        ],
+        &["api", "gone"],
+    );
+    assert_eq!(watcher.held(), accepted);
+    assert_eq!(watcher.off(), ["api"]);
+    assert_eq!(watcher.waiting().added, ["added"]);
+    assert_eq!(watcher.waiting().changed, ["api"]);
+    assert!(!watcher.local_service_snapshot().unwrap().contains("added"));
+
+    scratch.only_off("off");
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[
+            ("api", "tcp:old:1", false),
+            ("gone", "ping:", true),
+            ("off", "ping:", true),
+        ],
+        &["gone", "off"],
+    );
+}
+
+#[test]
+fn stat_failure_requires_a_valid_read_to_recover() {
+    let scratch = Scratch::new("stat-failure");
+    list(&scratch, &["api=tcp:old:1", "off=ping:"]);
+    scratch.only_off("off");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    let accepted = watcher.held();
+    let running = watcher.lock().running.clone();
+    let stamp = watcher.lock().stamp;
+    // A non-directory parent deterministically fails stat without relying on effective UID permissions.
+    let parked = scratch.dir.with_extension("parked");
+    std::fs::rename(&scratch.dir, &parked).unwrap();
+    std::fs::write(&scratch.dir, b"not a directory").unwrap();
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[("api", "tcp:old:1", true), ("off", "ping:", true)],
+        &["api", "off"],
+    );
+    assert_eq!(watcher.held(), accepted);
+    assert_eq!(watcher.lock().running, running);
+    assert_eq!(watcher.off(), ["off"]);
+    assert!(
+        watcher.lock().stamp.is_none(),
+        "stat failure must retry a read"
+    );
+    std::fs::remove_file(&scratch.dir).unwrap();
+    std::fs::rename(&parked, &scratch.dir).unwrap();
+    assert_eq!(
+        nauthy::FileStamp::of(&std::fs::metadata(scratch.home.serve_toml()).unwrap()),
+        stamp,
+        "stat recovery need not change the file stamp"
+    );
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[("api", "tcp:old:1", false), ("off", "ping:", true)],
+        &["off"],
+    );
+}
+
+/// Only a file that is absent serves the defaults with no file: a stat that fails for any other reason,
+/// with no file ever read, refuses every service the run serves, as a failed read of a file does.
+#[test]
+fn a_failed_stat_after_initial_absence_refuses_what_the_run_serves() {
+    let scratch = Scratch::new("absent-stat-failure");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    watcher.lock().last_stat = None;
+    assert!(
+        watcher.is_enabled(&service("ping")),
+        "absence serves the defaults"
+    );
+    // A non-directory parent deterministically fails stat without relying on effective UID permissions.
+    let parked = scratch.dir.with_extension("parked");
+    std::fs::rename(&scratch.dir, &parked).unwrap();
+    std::fs::write(&scratch.dir, b"not a directory").unwrap();
+    watcher.lock().last_stat = None;
+    let ping = watcher.is_enabled(&service("ping"));
+    let speed = watcher.is_enabled(&service("speed"));
+    let control = watcher.is_enabled(&service("control.stop"));
+    std::fs::remove_file(&scratch.dir).unwrap();
+    std::fs::rename(&parked, &scratch.dir).unwrap();
+    assert!(!ping, "a failed stat is not absence");
+    assert!(!speed, "every service the run serves is refused");
+    assert!(control, "the node's own routes stay open");
+}
+
+/// A writer the log is captured into, so a test can count the lines a run logs.
+struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A read that keeps failing is logged once, when it starts to fail, and once when the file reads again:
+/// a failure retried at every stat never logs at every stat.
+#[test]
+fn a_failing_read_is_logged_once_and_its_recovery_once() {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = std::sync::Arc::clone(&log);
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || LogCapture(std::sync::Arc::clone(&writer)))
+        .finish();
+    let _capturing = tracing::subscriber::set_default(subscriber);
+
+    let scratch = Scratch::new("logged-once");
+    list(&scratch, &["api=tcp:old:1"]);
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    let parked = scratch.dir.with_extension("parked");
+    std::fs::rename(&scratch.dir, &parked).unwrap();
+    std::fs::write(&scratch.dir, b"not a directory").unwrap();
+    for _ in 0..3 {
+        watcher.lock().last_stat = None;
+        assert!(!watcher.is_enabled(&service("api")), "each stat fails");
+    }
+    std::fs::remove_file(&scratch.dir).unwrap();
+    std::fs::rename(&parked, &scratch.dir).unwrap();
+    watcher.lock().last_stat = None;
+    assert!(watcher.is_enabled(&service("api")), "a good read recovers");
+
+    let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+    let count = |what: &str| log.lines().filter(|line| line.contains(what)).count();
+    assert_eq!(count("serve.toml cannot be read"), 1, "{log}");
+    assert_eq!(count("serve.toml can be read again"), 1, "{log}");
+}
+
+// `core::io::ErrorKind` is still unstable, as in `read_stamped`.
+#[allow(clippy::std_instead_of_core)]
+#[test]
+fn read_failure_retains_data_and_retries_the_same_stamp() {
+    let scratch = Scratch::new("read-failure");
+    list(&scratch, &["api=tcp:old:1", "off=ping:"]);
+    scratch.only_off("off");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    let accepted = watcher.held();
+    let path = scratch.home.serve_toml();
+    {
+        let mut state = watcher.lock();
+        let stamp = state.stamp;
+        state.take(
+            &path,
+            Err(super::ServeTomlError::Io {
+                path: path.clone(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            }),
+            stamp,
+        );
+        state.last_stat = Some(std::time::Instant::now());
+        assert!(
+            state.stamp.is_none(),
+            "I/O failure must not cache the attempted stamp"
+        );
+    }
+    assert_bound_decisions(
+        &watcher,
+        &[("api", "tcp:old:1", true), ("off", "ping:", true)],
+        &["api", "off"],
+    );
+    assert_eq!(watcher.held(), accepted);
+    assert_eq!(ServeToml::read(&scratch.home).unwrap(), accepted);
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[("api", "tcp:old:1", false), ("off", "ping:", true)],
+        &["off"],
+    );
+}
+
+#[test]
+fn invalid_policy_is_not_empty_or_default_policy() {
+    let scratch = Scratch::new("invalid-policy");
+    list(&scratch, &["api=tcp:old:1", "off=ping:"]);
+    scratch.only_off("off");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    let accepted = watcher.held();
+    let running = watcher.lock().running.clone();
+    for text in [
+        "not toml\n",
+        "off = 3\n",
+        "relay = 'not a url'\n",
+        "services = ['--public']\n",
+    ] {
+        std::fs::write(scratch.home.serve_toml(), text).unwrap();
+        watcher.lock().last_stat = None;
+        assert_bound_decisions(
+            &watcher,
+            &[("api", "tcp:old:1", true), ("off", "ping:", true)],
+            &["api", "off"],
+        );
+        assert_eq!(watcher.held(), accepted);
+        assert_eq!(watcher.lock().running, running);
+        assert_eq!(watcher.off(), ["off"]);
+        let stamp = nauthy::FileStamp::of(&std::fs::metadata(scratch.home.serve_toml()).unwrap());
+        assert_eq!(
+            watcher.lock().stamp,
+            stamp,
+            "rejected contents are marked read"
+        );
+        watcher.lock().last_stat = None;
+        assert!(
+            !watcher.is_enabled(&service("api")),
+            "unchanged damage remains denied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.home.serve_toml()).unwrap(),
+            text
+        );
+    }
+}
+
+#[test]
+fn failed_policy_preserves_saved_and_bound_targets_separately() {
+    let scratch = Scratch::new("failed-targets");
+    list(&scratch, &["api=tcp:old:1", "off=ping:"]);
+    scratch.only_off("off");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    list(&scratch, &["api=tcp:next:2", "off=ping:", "added=ping:"]);
+    watcher.lock().last_stat = None;
+    let accepted = watcher.held();
+    let waiting = watcher.waiting();
+    assert_eq!(waiting.added, ["added"]);
+    assert_eq!(waiting.changed, ["api"]);
+    std::fs::write(scratch.home.serve_toml(), "off = 3\n").unwrap();
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[("api", "tcp:old:1", true), ("off", "ping:", true)],
+        &["api", "off"],
+    );
+    assert_eq!(
+        watcher.held(),
+        accepted,
+        "saved targets remain independently inspectable"
+    );
+    assert_eq!(watcher.waiting(), waiting);
+    assert_eq!(watcher.off(), ["off"], "refusal is not a saved off edit");
+}
+
+#[test]
+fn valid_policy_recovers_off_and_removal_without_constructing_routes() {
+    let scratch = Scratch::new("valid-recovery");
+    list(&scratch, &["api=tcp:old:1", "gone=ping:", "off=ping:"]);
+    scratch.only_off("off");
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    std::fs::write(scratch.home.serve_toml(), "off = 3\n").unwrap();
+    watcher.lock().last_stat = None;
+    assert!(
+        !watcher.is_enabled(&service("api")),
+        "reach the failed-policy guard first"
+    );
+    std::fs::write(
+        scratch.home.serve_toml(),
+        "services = ['api=tcp:next:2', 'off=ping:', 'added=ping:']\noff = ['api']\n",
+    )
+    .unwrap();
+    watcher.lock().last_stat = None;
+    assert_bound_decisions(
+        &watcher,
+        &[
+            ("api", "tcp:old:1", true),
+            ("gone", "ping:", true),
+            ("off", "ping:", false),
+        ],
+        &["api", "gone"],
+    );
+    assert_eq!(watcher.off(), ["api"]);
+    assert_eq!(watcher.waiting().added, ["added"]);
+    assert_eq!(watcher.waiting().changed, ["api"]);
+    assert!(!watcher.local_service_snapshot().unwrap().contains("added"));
+    assert_eq!(watcher.held(), ServeToml::read(&scratch.home).unwrap());
+}
+
+#[test]
+fn failed_user_policy_leaves_internal_routes_enabled() {
+    for entries in [&[][..], &["a=ping:"][..], &["a=ping:", "b=ping:"][..]] {
+        let scratch = Scratch::new("internal-exemption");
+        list(&scratch, entries);
+        let watcher = LiveServeToml::load(&scratch.home).unwrap();
+        watcher.serving(&bare(&scratch));
+        std::fs::write(scratch.home.serve_toml(), "off = 3\n").unwrap();
+        watcher.lock().last_stat = None;
+        assert_eq!(watcher.refused().len(), entries.len());
+        for name in [
+            "control.stop",
+            "control.services",
+            "control.reach",
+            "control.pickup",
+        ] {
+            assert!(
+                watcher.is_enabled(&service(name)),
+                "internal route {name} remains enabled"
+            );
+        }
+        let snapshot = watcher.local_service_snapshot().unwrap();
+        assert_eq!(snapshot.len(), entries.len());
+        for entry in entries {
+            let (name, _) = entry.split_once('=').unwrap();
+            assert!(
+                !watcher.is_enabled(&service(name)),
+                "only bound user routes are denied"
+            );
+            assert!(snapshot.get(name).unwrap().refused());
+        }
+    }
+}
+
 /// Write `services` as the file's list, through the writer `serve` uses, keeping every other field.
 fn list(scratch: &Scratch, services: &[&str]) {
     ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
@@ -352,10 +809,11 @@ fn an_emptied_services_refuses_every_service_it_served() {
     assert_eq!(watcher.refused(), ["ping", "speed"]);
 }
 
-/// A `services` that lists a service that is not one is a read that keeps what was held, as a damaged file
-/// is: it never reads as every service removed.
+/// A `services` that lists a service that is not one is a failed read, as a damaged file is: the list held
+/// is kept rather than read as every service removed, and the services the run serves are refused until a
+/// read succeeds.
 #[test]
-fn a_services_entry_that_is_not_a_service_keeps_what_was_held() {
+fn a_services_entry_that_is_not_a_service_refuses_what_the_run_serves() {
     let scratch = Scratch::new("not-a-service");
     list(&scratch, &["files=recv:"]);
     let watcher = LiveServeToml::load(&scratch.home).expect("load");
@@ -363,7 +821,10 @@ fn a_services_entry_that_is_not_a_service_keeps_what_was_held() {
 
     list(&scratch, &["--public"]);
     past_the_debounce();
-    assert!(watcher.is_enabled(&service("files")), "still served");
+    assert!(
+        !watcher.is_enabled(&service("files")),
+        "invalid policy denies new admissions despite retaining the list"
+    );
     assert_eq!(
         watcher.held().services.as_deref(),
         Some(&["files=recv:".to_owned()][..]),

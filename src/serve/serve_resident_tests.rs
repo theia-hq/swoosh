@@ -1481,3 +1481,37 @@ fn disabled_read_is_bounded() {
         DisabledList::Unknown(reason) => panic!("a many-name file above the count cap: {reason}"),
     }
 }
+
+/// While `serve.toml` cannot be read the status reports the services off as unknown, never as a list
+/// the gate does not follow, and a good read reports the list again.
+#[test]
+fn an_unreadable_serve_toml_reports_the_services_off_as_unknown() {
+    let dir = scratch_dir("unreadable");
+    let path = dir.join("serve.toml");
+    let past_the_debounce = nauthy::STAT_DEBOUNCE + core::time::Duration::from_millis(50);
+    std::fs::write(&path, "off = [\"speed\"]\n").expect("write serve.toml");
+    let resident = resident_over(&dir, CancellationToken::new());
+    assert_eq!(
+        resident.disabled_names(),
+        DisabledList::Known(vec!["speed".to_owned()])
+    );
+
+    std::fs::write(&path, "off = 3\n").expect("damage serve.toml");
+    std::thread::sleep(past_the_debounce);
+    assert!(
+        matches!(resident.disabled_names(), DisabledList::Unknown(_)),
+        "a failed read is reported as unknown"
+    );
+    assert!(
+        resident.menu().encode().is_ok(),
+        "the unknown reason fits the reply"
+    );
+
+    std::fs::write(&path, "off = [\"speed\"]\n").expect("repair serve.toml");
+    std::thread::sleep(past_the_debounce);
+    assert_eq!(
+        resident.disabled_names(),
+        DisabledList::Known(vec!["speed".to_owned()])
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

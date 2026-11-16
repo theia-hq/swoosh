@@ -91,4 +91,9 @@ impl Running {
     pub fn has_off(&self, name: &str) -> bool {
         self.off.as_ref().is_some_and(|off| off.contains(name))
     }
+
+    /// Whether it could not say which services are off: it cannot read its `serve.toml`.
+    pub fn off_unknown(&self) -> bool {
+        self.off.is_none()
+    }
 }
