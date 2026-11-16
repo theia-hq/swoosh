@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: installer shell fixtures
+        run: sh scripts/tests/install.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
