@@ -2,6 +2,7 @@
 //! the real serve path, the injected slow-loris timeout, the oversized-frame EOF contract, and the
 //! stop-Ack ordering.
 
+use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::{Context, Poll};
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use bifrost::NodeId;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
-use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
 use crate::serve::control_codec::{
@@ -76,14 +77,13 @@ fn resident_over(dir: &std::path::Path, cancel: CancellationToken) -> Resident {
 /// Poll until the resident holds `want` permits, bounded: the accept loop drains slots
 /// asynchronously, so a test waits for the drain rather than assuming it.
 async fn wait_for_permits(resident: &Resident, want: usize) {
-    let deadline = tokio::time::Instant::now() + core::time::Duration::from_secs(5);
-    while resident.semaphore().available_permits() != want {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the resident never settled at {want} permits"
-        );
-        tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+    for _ in 0..1024 {
+        if resident.semaphore().available_permits() == want {
+            return;
+        }
+        tokio::task::yield_now().await;
     }
+    panic!("the resident never settled at {want} permits");
 }
 
 #[tokio::test]
@@ -225,7 +225,7 @@ async fn detail_checks_accepted_credentials_before_reading_or_capturing() {
     }
     for checker in [foreign_uid as fn(i32) -> std::io::Result<u32>, failed_uid] {
         let resident = detail_resident();
-        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (mut client, server, observed) = observed_pair(WriteMode::Ready);
         Request::LocalServiceDetail
             .write(&mut client)
             .await
@@ -233,6 +233,9 @@ async fn detail_checks_accepted_credentials_before_reading_or_capturing() {
         resident
             .serve_checked_with(server, checker, READ_TIMEOUT)
             .await;
+        assert_eq!(observed.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(observed.writes.load(Ordering::Relaxed), 0);
+        assert_eq!(observed.drops.load(Ordering::Relaxed), 1);
         assert_eq!(resident.served(), 0);
         let mut byte = [0];
         assert!(matches!(client.read(&mut byte).await, Ok(0) | Err(_)));
@@ -652,7 +655,7 @@ async fn accepts_own_uid_refuses_foreign_uid() {
 /// one-shot client stays queued at the listener (neither a reply nor EOF in the bounded window),
 /// and freeing one slot admits it. This drives `Resident::serve`, so deleting the slot gate is not
 /// silently green.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn control_flood_queues_rather_than_drops() {
     let dir = scratch_dir("flood");
     let socket = dir.join("control.sock");
@@ -665,7 +668,7 @@ async fn control_flood_queues_rather_than_drops() {
         async move { this.serve(listener).await }
     });
 
-    // Every slot held by a connected-but-silent client: each serve task parks on the read timeout.
+    // Every slot held by a connected-but-silent client: each handler parks on the read timeout.
     let mut silent = Vec::new();
     for _ in 0..MAX_CONTROL_CONNS {
         silent.push(
@@ -686,13 +689,8 @@ async fn control_flood_queues_rather_than_drops() {
         .await
         .expect("queued request writes");
     let mut first_byte = [0u8; 1];
-    let early = tokio::time::timeout(
-        core::time::Duration::from_millis(100),
-        queued.read_exact(&mut first_byte),
-    )
-    .await;
     assert!(
-        early.is_err(),
+        futures::poll!(core::pin::pin!(queued.read_exact(&mut first_byte))).is_pending(),
         "past the cap the request queues, no reply yet"
     );
 
@@ -933,6 +931,522 @@ async fn recoverable_accept_error_waits_one_bounded_backoff() {
     )
     .await
     .expect("the backoff is bounded and completes");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lone_client_is_answered_while_the_next_accept_is_pending() {
+    let socket = scratch_dir("lone").join("control.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let resident = Arc::new(test_resident());
+    let serving = Arc::clone(&resident).serve(listener);
+    tokio::pin!(serving);
+    assert!(futures::poll!(&mut serving).is_pending());
+    let mut client = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    Request::Status.write(&mut client).await.unwrap();
+    let reply = tokio::select! {
+        result = &mut serving => panic!("serve ended before answering: {result:?}"),
+        reply = tokio::time::timeout(READ_TIMEOUT, Response::read(&mut client)) => {
+            reply.unwrap().unwrap()
+        }
+    };
+    assert!(matches!(reply, Response::Status(_)));
+    assert_eq!(resident.served(), 1);
+    resident.cancel.cancel();
+    serving.await.unwrap();
+    assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_controls_drive_their_timeouts_before_accepting_the_queued_client() {
+    let resident = test_resident();
+    let mut events = Vec::new();
+    let mut silent = Vec::new();
+    for _ in 0..MAX_CONTROL_CONNS {
+        let (client, server, observed) = observed_pair(WriteMode::Ready);
+        silent.push((client, observed));
+        events.push(Ok(server));
+    }
+    let (mut queued, server, queued_observed) = observed_pair(WriteMode::Ready);
+    Request::Status.write(&mut queued).await.unwrap();
+    events.push(Ok(server));
+    let (accept, attempts) = scripted_accept(events);
+    let serving = resident.serve_accepting(accept);
+    tokio::pin!(serving);
+    drive_until(serving.as_mut(), || {
+        silent
+            .iter()
+            .all(|(_, observed)| observed.reads.load(Ordering::Relaxed) > 0)
+    })
+    .await;
+    assert_eq!(resident.semaphore().available_permits(), 0);
+    assert_eq!(attempts.load(Ordering::Relaxed), MAX_CONTROL_CONNS as u32);
+    assert_eq!(queued_observed.reads.load(Ordering::Relaxed), 0);
+    let mut byte = [0];
+    assert!(futures::poll!(core::pin::pin!(queued.read(&mut byte))).is_pending());
+
+    tokio::time::advance(READ_TIMEOUT).await;
+    drive_until(serving.as_mut(), || {
+        queued_observed.drops.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    assert!(
+        silent
+            .iter()
+            .all(|(_, observed)| observed.drops.load(Ordering::Relaxed) == 1)
+    );
+    assert!(matches!(
+        Response::read(&mut queued).await.unwrap(),
+        Response::Status(_)
+    ));
+    assert_eq!(resident.served(), (MAX_CONTROL_CONNS + 1) as u64);
+    resident.cancel.cancel();
+    serving.await.unwrap();
+    assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_accept_survives_multiple_control_completions() {
+    let resident = test_resident();
+    let (mut first, server, first_observed) = observed_pair(WriteMode::Ready);
+    let (mut second, second_server, second_observed) = observed_pair(WriteMode::Ready);
+    let (accept, attempts) = scripted_accept([Ok(server), Ok(second_server)]);
+    let serving = resident.serve_accepting(accept);
+    tokio::pin!(serving);
+    drive_until(serving.as_mut(), || {
+        first_observed.reads.load(Ordering::Relaxed) > 0
+            && second_observed.reads.load(Ordering::Relaxed) > 0
+    })
+    .await;
+    assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    Request::Status.write(&mut first).await.unwrap();
+    drive_until(serving.as_mut(), || {
+        first_observed.drops.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    Request::Status.write(&mut second).await.unwrap();
+    drive_until(serving.as_mut(), || {
+        second_observed.drops.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    resident.cancel.cancel();
+    serving.await.unwrap();
+    assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_permit_keeps_its_queue_position_while_controls_complete() {
+    let resident = test_resident();
+    let mut events = Vec::new();
+    let mut clients = Vec::new();
+    for _ in 0..=MAX_CONTROL_CONNS {
+        let (client, server, observed) = observed_pair(WriteMode::Ready);
+        clients.push((client, observed));
+        events.push(Ok(server));
+    }
+    let (accept, attempts) = scripted_accept(events);
+    let serving = resident.serve_accepting(accept);
+    tokio::pin!(serving);
+    drive_until(serving.as_mut(), || {
+        clients[..MAX_CONTROL_CONNS]
+            .iter()
+            .all(|(_, observed)| observed.reads.load(Ordering::Relaxed) > 0)
+    })
+    .await;
+    assert_eq!(attempts.load(Ordering::Relaxed), MAX_CONTROL_CONNS as u32);
+    let semaphore = resident.semaphore();
+    let mut later = Box::pin(semaphore.acquire());
+    assert!(futures::poll!(&mut later).is_pending());
+    Request::Status.write(&mut clients[0].0).await.unwrap();
+    drive_until(serving.as_mut(), || {
+        clients[MAX_CONTROL_CONNS].1.reads.load(Ordering::Relaxed) > 0
+    })
+    .await;
+    assert!(futures::poll!(&mut later).is_pending());
+    assert_eq!(
+        attempts.load(Ordering::Relaxed),
+        (MAX_CONTROL_CONNS + 1) as u32
+    );
+    drop(later);
+    resident.cancel.cancel();
+    serving.await.unwrap();
+    assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_partial_frame_deadline_releases_its_control_permit() {
+    let resident = test_resident();
+    let (mut client, server, observed) = observed_pair(WriteMode::Ready);
+    client.write_all(&MAGIC[..1]).await.unwrap();
+    let (accept, _) = scripted_accept([Ok(server)]);
+    let serving = resident.serve_accepting(accept);
+    tokio::pin!(serving);
+    drive_until(serving.as_mut(), || {
+        observed.reads.load(Ordering::Relaxed) > 0
+    })
+    .await;
+    // One handler owns a slot and the pending next accept owns another.
+    assert_eq!(
+        resident.semaphore().available_permits(),
+        MAX_CONTROL_CONNS - 2
+    );
+    tokio::time::advance(READ_TIMEOUT).await;
+    drive_until(serving.as_mut(), || {
+        observed.drops.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    assert_eq!(
+        resident.semaphore().available_permits(),
+        MAX_CONTROL_CONNS - 1
+    );
+    let mut byte = [0];
+    assert_eq!(client.read(&mut byte).await.unwrap(), 0);
+    assert!(!resident.cancel.is_cancelled());
+    resident.cancel.cancel();
+    serving.await.unwrap();
+    assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_responses_release_permits_and_stop_waits_for_its_ack_deadline() {
+    for request in [Request::Status, Request::Stop] {
+        let resident = test_resident();
+        let stop = matches!(request, Request::Stop);
+        let (mut client, server, observed) = observed_pair(WriteMode::Stalled);
+        request.write(&mut client).await.unwrap();
+        let (accept, _) = scripted_accept([Ok(server)]);
+        let serving = resident.serve_accepting(accept);
+        tokio::pin!(serving);
+        drive_until(serving.as_mut(), || {
+            observed.writes.load(Ordering::Relaxed) > 0
+        })
+        .await;
+        assert!(!resident.cancel.is_cancelled());
+        assert_eq!(resident.stop_source.first(), None);
+        assert_eq!(
+            resident.semaphore().available_permits(),
+            MAX_CONTROL_CONNS - 2
+        );
+        tokio::time::advance(READ_TIMEOUT - core::time::Duration::from_millis(1)).await;
+        assert!(futures::poll!(&mut serving).is_pending());
+        assert_eq!(observed.drops.load(Ordering::Relaxed), 0);
+        assert!(!resident.cancel.is_cancelled());
+        tokio::time::advance(core::time::Duration::from_millis(1)).await;
+        if stop {
+            serving.await.unwrap();
+            assert_eq!(resident.stop_source.first(), Some(super::StopKind::Socket));
+        } else {
+            drive_until(serving.as_mut(), || {
+                observed.drops.load(Ordering::Relaxed) == 1
+            })
+            .await;
+            assert!(!resident.cancel.is_cancelled());
+            assert_eq!(
+                resident.semaphore().available_permits(),
+                MAX_CONTROL_CONNS - 1
+            );
+            resident.cancel.cancel();
+            serving.await.unwrap();
+        }
+        assert_eq!(observed.drops.load(Ordering::Relaxed), 1);
+        assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn controls_progress_during_backoff_without_restarting_its_deadline() {
+    let resident = test_resident();
+    let (mut first, server, first_observed) = observed_pair(WriteMode::Ready);
+    let (mut second, second_server, second_observed) = observed_pair(WriteMode::Ready);
+    let (accept, attempts) = scripted_accept([
+        Ok(server),
+        Ok(second_server),
+        Err(std::io::Error::from_raw_os_error(libc::EMFILE)),
+    ]);
+    let serving = resident.serve_accepting(accept);
+    tokio::pin!(serving);
+    drive_until(serving.as_mut(), || {
+        first_observed.reads.load(Ordering::Relaxed) > 0
+    })
+    .await;
+    assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        resident.semaphore().available_permits(),
+        MAX_CONTROL_CONNS - 2
+    );
+    let half = super::ACCEPT_BACKOFF / 2;
+    tokio::time::advance(half).await;
+    Request::Status.write(&mut first).await.unwrap();
+    drive_until(serving.as_mut(), || {
+        first_observed.drops.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    assert!(matches!(
+        Response::read(&mut first).await.unwrap(),
+        Response::Status(_)
+    ));
+    assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    tokio::time::advance(half - core::time::Duration::from_millis(1)).await;
+    Request::Services.write(&mut second).await.unwrap();
+    drive_until(serving.as_mut(), || {
+        second_observed.drops.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    assert!(matches!(
+        Response::read(&mut second).await.unwrap(),
+        Response::Catalog(_)
+    ));
+    assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    tokio::time::advance(core::time::Duration::from_millis(1)).await;
+    drive_until(serving.as_mut(), || attempts.load(Ordering::Relaxed) == 4).await;
+    resident.cancel.cancel();
+    serving.await.unwrap();
+    assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_the_outer_serve_drops_controls_without_firing_its_token() {
+    // Exercise all three pending waits. At accept and backoff the accepted Stop is held in its
+    // reply; at acquisition the entire pool is held by silent clients, with one partial Stop.
+    for wait in [
+        ControlWait::Permit,
+        ControlWait::Accept,
+        ControlWait::Backoff,
+    ] {
+        let resident = test_resident();
+        let mut events = Vec::new();
+        let mut clients = Vec::new();
+        let count = if matches!(wait, ControlWait::Permit) {
+            MAX_CONTROL_CONNS
+        } else {
+            1
+        };
+        for index in 0..count {
+            let (mut client, server, observed) = observed_pair(WriteMode::Stalled);
+            if index == 0 {
+                if matches!(wait, ControlWait::Permit) {
+                    client.write_all(b"SWC1\x03").await.unwrap();
+                } else {
+                    Request::Stop.write(&mut client).await.unwrap();
+                }
+            }
+            clients.push((client, observed));
+            events.push(Ok(server));
+        }
+        if matches!(wait, ControlWait::Backoff) {
+            events.push(Err(std::io::Error::from_raw_os_error(libc::ENOBUFS)));
+        }
+        let (accept, attempts) = scripted_accept(events);
+        let mut serving = Box::pin(resident.serve_accepting(accept));
+        drive_until(serving.as_mut(), || {
+            clients
+                .iter()
+                .all(|(_, observed)| observed.reads.load(Ordering::Relaxed) > 0)
+                && (matches!(wait, ControlWait::Permit)
+                    || clients[0].1.writes.load(Ordering::Relaxed) > 0)
+        })
+        .await;
+        let expected_attempts = match wait {
+            ControlWait::Permit => MAX_CONTROL_CONNS as u32,
+            ControlWait::Accept | ControlWait::Backoff => 2,
+        };
+        assert_eq!(attempts.load(Ordering::Relaxed), expected_attempts);
+        assert!(!resident.cancel.is_cancelled());
+        drop(serving);
+        // These assertions precede any yield: teardown cannot depend on scheduled task cleanup.
+        assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+        assert!(
+            clients
+                .iter()
+                .all(|(_, observed)| observed.drops.load(Ordering::Relaxed) == 1)
+        );
+        for (mut client, _) in clients {
+            let mut byte = [0];
+            assert!(matches!(client.read(&mut byte).await, Ok(0) | Err(_)));
+        }
+        tokio::time::advance(READ_TIMEOUT * 2).await;
+        tokio::task::yield_now().await;
+        assert!(!resident.cancel.is_cancelled());
+        assert_eq!(resident.stop_source.first(), None);
+        assert_eq!(attempts.load(Ordering::Relaxed), expected_attempts);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_remains_responsive_at_every_control_wait() {
+    for wait in [
+        ControlWait::Permit,
+        ControlWait::Accept,
+        ControlWait::Backoff,
+    ] {
+        let resident = test_resident();
+        let mut events = Vec::new();
+        let mut clients = Vec::new();
+        let count = if matches!(wait, ControlWait::Permit) {
+            MAX_CONTROL_CONNS
+        } else {
+            1
+        };
+        for index in 0..count {
+            let (mut client, server, observed) = observed_pair(WriteMode::Stalled);
+            if index == 0 {
+                Request::Stop.write(&mut client).await.unwrap();
+            }
+            clients.push((client, observed));
+            events.push(Ok(server));
+        }
+        if matches!(wait, ControlWait::Backoff) {
+            events.push(Err(std::io::Error::from_raw_os_error(libc::EMFILE)));
+        }
+        let (accept, _) = scripted_accept(events);
+        let serving = resident.serve_accepting(accept);
+        tokio::pin!(serving);
+        drive_until(serving.as_mut(), || {
+            clients
+                .iter()
+                .all(|(_, observed)| observed.reads.load(Ordering::Relaxed) > 0)
+                && clients[0].1.writes.load(Ordering::Relaxed) > 0
+        })
+        .await;
+        resident.cancel.cancel();
+        assert!(matches!(futures::poll!(&mut serving), Poll::Ready(Ok(()))));
+        assert_eq!(resident.semaphore().available_permits(), MAX_CONTROL_CONNS);
+        assert!(
+            clients
+                .iter()
+                .all(|(_, observed)| observed.drops.load(Ordering::Relaxed) == 1)
+        );
+        assert_eq!(resident.stop_source.first(), None);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ControlWait {
+    Permit,
+    Accept,
+    Backoff,
+}
+
+// Bounded cooperative polls let the reactor deliver socket readiness without advancing the paused
+// clock. A missing handler poll fails here instead of quietly reaching its read deadline.
+async fn drive_until<F: Future>(mut serving: Pin<&mut F>, ready: impl Fn() -> bool) {
+    for _ in 0..1024 {
+        assert!(
+            futures::poll!(serving.as_mut()).is_pending(),
+            "serve ended unexpectedly"
+        );
+        if ready() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("control state did not progress without advancing time");
+}
+
+fn scripted_accept(
+    events: impl IntoIterator<Item = std::io::Result<ObservedStream>>,
+) -> (
+    impl FnMut() -> futures::future::LocalBoxFuture<'static, std::io::Result<ObservedStream>>,
+    Arc<AtomicU32>,
+) {
+    let mut events: std::collections::VecDeque<_> = events.into_iter().collect();
+    let attempts = Arc::new(AtomicU32::new(0));
+    let observed = Arc::clone(&attempts);
+    let accept = move || {
+        observed.fetch_add(1, Ordering::Relaxed);
+        let next = events.pop_front();
+        let future: futures::future::LocalBoxFuture<'static, std::io::Result<ObservedStream>> =
+            Box::pin(async move {
+                match next {
+                    Some(result) => result,
+                    None => core::future::pending().await,
+                }
+            });
+        future
+    };
+    (accept, attempts)
+}
+
+#[derive(Clone, Copy)]
+enum WriteMode {
+    Ready,
+    Stalled,
+}
+
+#[derive(Default)]
+struct StreamObservation {
+    reads: AtomicU32,
+    writes: AtomicU32,
+    drops: AtomicU32,
+}
+
+struct ObservedStream {
+    stream: tokio::net::UnixStream,
+    write: WriteMode,
+    observed: Arc<StreamObservation>,
+}
+
+fn observed_pair(
+    write: WriteMode,
+) -> (
+    tokio::net::UnixStream,
+    ObservedStream,
+    Arc<StreamObservation>,
+) {
+    let (client, stream) = tokio::net::UnixStream::pair().unwrap();
+    let observed = Arc::new(StreamObservation::default());
+    let server = ObservedStream {
+        stream,
+        write,
+        observed: Arc::clone(&observed),
+    };
+    (client, server, observed)
+}
+
+impl std::os::fd::AsRawFd for ObservedStream {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        std::os::fd::AsRawFd::as_raw_fd(&self.stream)
+    }
+}
+
+impl AsyncRead for ObservedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.observed.reads.fetch_add(1, Ordering::Relaxed);
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ObservedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.observed.writes.fetch_add(1, Ordering::Relaxed);
+        match self.write {
+            WriteMode::Ready => Pin::new(&mut self.stream).poll_write(cx, buf),
+            WriteMode::Stalled => Poll::Pending,
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+impl Drop for ObservedStream {
+    fn drop(&mut self) {
+        self.observed.drops.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// m1/m2: the services off a status reports are bounded: a home with no `serve.toml` reports an empty

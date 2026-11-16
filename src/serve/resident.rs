@@ -4,13 +4,16 @@
 //! snapshot, the live list of services off the gate reads, and a CLONE of the node's teardown token (the exposer stays
 //! the single teardown owner; this arm only REQUESTS the stop, never tears anything down itself).
 
+use core::future::Future;
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
-use std::os::unix::io::AsRawFd as _;
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use bifrost::NodeId;
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
 use nauthy::VerifyKey;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::AsyncWriteExt as _;
@@ -60,7 +63,7 @@ pub struct Resident {
     cancel: CancellationToken,
     /// How the node stopped, once a path fires the token (ctrl-c, expires, wire stop, socket stop).
     stop_source: Arc<StopSource>,
-    /// The concurrency cap the accept loop acquires BEFORE spawning a task.
+    /// The concurrency cap the accept loop acquires before accepting a connection.
     conns: Arc<Semaphore>,
     /// Connections served so far (the BLOCKER-3 oracle: a disable must move ZERO control traffic).
     served: Arc<AtomicU64>,
@@ -184,38 +187,46 @@ impl Resident {
     /// Serve the bound std listener until the teardown token fires: the third arm of the serve
     /// select. A slot is taken BEFORE each accept, so at the cap the loop parks on the semaphore and
     /// connections stay queued at the listener (the `MAX_SESSIONS` backpressure pattern) rather than
-    /// being accepted and dropped: a one-shot client cannot lose the race to a same-uid flood. Each
-    /// accepted connection is uid-checked BEFORE a byte is read, served one-shot under the read
-    /// timeout, then closed.
+    /// being accepted and dropped. Each accepted connection is uid-checked BEFORE a byte is read,
+    /// served one-shot under the read timeout, then closed.
     pub async fn serve(
         self: Arc<Self>,
         listener: std::os::unix::net::UnixListener,
     ) -> eyre::Result<()> {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
+        self.serve_accepting(|| async { listener.accept().await.map(|(stream, _)| stream) })
+            .await
+    }
+
+    // Inject accept outcomes without exhausting process-wide descriptors in tests. Neither the
+    // listener nor its streams need to outlive this arm or cross an executor boundary.
+    async fn serve_accepting<A, F, S>(&self, mut accept: A) -> eyre::Result<()>
+    where
+        A: FnMut() -> F,
+        F: Future<Output = std::io::Result<S>>,
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRawFd + Unpin,
+    {
+        // The set owns every accepted socket and permit. Dropping this arm drops them immediately,
+        // including when a sibling wins the caller's select without firing the teardown token.
+        let mut handlers = FuturesUnordered::new();
         loop {
-            // Acquire BEFORE accepting: the acquire future doubles as the wake-up when a slot frees
-            // (a gated `available_permits() > 0` check would need a separate wake and could park at
-            // the cap forever), and the cancel token stays a sibling arm so a stop never waits on
-            // the listener.
-            let permit = tokio::select! {
-                () = self.cancel.cancelled() => return Ok(()),
-                permit = self.conns.clone().acquire_owned() => match permit {
-                    Ok(permit) => permit,
-                    // The semaphore is never closed; an unexpected close is the teardown signal.
-                    Err(_) => return Ok(()),
-                },
+            // Acquire BEFORE accepting, but keep driving the handlers that release these slots.
+            // An unexpected semaphore close ends the arm just like cancellation.
+            let Some(Ok(permit)) = self
+                .wait_with_handlers(&mut handlers, self.conns.acquire())
+                .await
+            else {
+                return Ok(());
             };
-            let accepted = tokio::select! {
-                () = self.cancel.cancelled() => return Ok(()),
-                accepted = listener.accept() => accepted,
+            let Some(accepted) = self.wait_with_handlers(&mut handlers, accept()).await else {
+                return Ok(());
             };
             match accepted {
-                Ok((stream, _)) => {
-                    let this = Arc::clone(&self);
-                    tokio::spawn(async move {
+                Ok(stream) => {
+                    handlers.push(async move {
                         let _permit = permit;
-                        this.serve_one(stream).await;
+                        self.serve_one(stream).await;
                     });
                 }
                 Err(error) if accept_error_fatal(&error) => {
@@ -225,20 +236,49 @@ impl Resident {
                     return Err(eyre::eyre!("control listener failed: {error}"));
                 }
                 Err(error) => {
-                    // A recoverable error (fd pressure: EMFILE/ENFILE/ENOBUFS) would re-fire
-                    // immediately and spin the same runtime the exposer serves on, so wait one
-                    // short bounded backoff before the next accept. The loop re-checks the
-                    // cancel token after it, so a stop during the backoff lands promptly.
+                    // Recoverable fd pressure must not spin accept or suspend active controls.
                     tracing::warn!(%error, "control accept failed; backing off");
                     drop(permit);
-                    accept_backoff_wait().await;
+                    if self
+                        .wait_with_handlers(&mut handlers, accept_backoff_wait())
+                        .await
+                        .is_none()
+                    {
+                        return Ok(());
+                    }
                 }
             }
         }
     }
 
+    // Keep the exact pending acquisition, accept or timer across completions: recreating it can
+    // lose semaphore queue position or restart a backoff indefinitely. An empty set is immediately
+    // ready with None, so its completion branch must be disabled rather than repeatedly polled.
+    async fn wait_with_handlers<F, H>(
+        &self,
+        handlers: &mut FuturesUnordered<H>,
+        wait: F,
+    ) -> Option<F::Output>
+    where
+        F: Future,
+        H: Future<Output = ()>,
+    {
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return None,
+                output = &mut wait => return Some(output),
+                _ = handlers.next(), if !handlers.is_empty() => {}
+            }
+        }
+    }
+
     /// Serve one accepted connection under the production peer-credential check and read deadline.
-    async fn serve_one(&self, stream: tokio::net::UnixStream) {
+    async fn serve_one<S>(&self, stream: S)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRawFd + Unpin,
+    {
         self.serve_checked_with(stream, real_peer_uid, READ_TIMEOUT)
             .await;
     }
@@ -251,12 +291,14 @@ impl Resident {
     /// A `Stop` is acked BEFORE [`fire_stop`](Self::fire_stop) cancels the node: the write is the
     /// last thing between the request and the process teardown the request itself triggers, so the
     /// confirm can never lose the race to exit.
-    async fn serve_checked_with(
+    async fn serve_checked_with<S>(
         &self,
-        stream: tokio::net::UnixStream,
+        stream: S,
         checker: fn(i32) -> std::io::Result<u32>,
         timeout: Duration,
-    ) {
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRawFd + Unpin,
+    {
         let fd = stream.as_raw_fd();
         match peer_uid(fd, checker) {
             Ok(uid) if uid == euid() => {}
@@ -270,7 +312,7 @@ impl Resident {
             }
         }
         self.served.fetch_add(1, Ordering::Relaxed);
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut reader = tokio::io::BufReader::new(reader);
         let mut observed = None;
         let request =
