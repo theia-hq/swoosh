@@ -53,6 +53,12 @@ All notable changes to swoosh, newest first.
   `ping` and `speed`. Nothing is saved, and later saved changes do not alter the running selection. A name
   already saved is accepted with the same target and refused with a different one; omitting a name that is not
   in the list is refused. They cannot be combined with service definitions.
+- **`swoosh service` shows a relative saved path as written.** Only a hand edit of `serve.toml` can save one
+  (`service add` stores the full path); the row says it resolves where `swoosh serve` starts. `status` and
+  `service on`, `off` and `rm` no longer depend on the current directory.
+- **`swoosh share <service>` refuses a relative saved path when no `serve` is running.** It makes no link;
+  start `swoosh serve`, then share.
+- **`service add` shows the path it stored.** `Added public to the saved list as file:/a/public.`
 - **A service definition is checked in full before `serve` or `service add` starts anything.** A refusal
   names the entry's position and the kind of problem, such as an invalid name or target, and does not
   repeat what you typed.

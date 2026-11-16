@@ -53,9 +53,26 @@ fn render(state: &ServiceState, out: &mut impl io::Write) -> eyre::Result<()> {
             let (name, configured) = entry.split_once('=')?;
             let bound = snapshot.as_ref().and_then(|snapshot| snapshot.get(name));
             let target = bound.map_or(configured, |pair| pair.target().as_str());
-            let next = (target != configured).then_some(configured);
             let off = state.off.contains(name);
-            let state = match (next, snapshot.is_some() && bound.is_none(), off) {
+            let unbound = snapshot.is_some() && bound.is_none();
+            // A relative path names a directory only where `serve` starts, which this reader cannot know:
+            // it is shown as written beside any bound target, never compared with it.
+            if state.started.is_relative(name) {
+                let saved = bound.is_some().then_some(configured);
+                let state = match (unbound, off) {
+                    (true, false) => State::Relative("from the next start,", saved),
+                    (true, true) => State::Relative("off, from the next start,", saved),
+                    (false, false) => State::Relative("on,", saved),
+                    (false, true) => State::Relative("off,", saved),
+                };
+                return Some(Row {
+                    name,
+                    target,
+                    state,
+                });
+            }
+            let next = (target != configured).then_some(configured);
+            let state = match (next, unbound, off) {
                 (Some(next), _, false) => State::Next("on,", next),
                 (Some(next), _, true) => State::Next("off,", next),
                 (None, true, false) => State::Fixed("from the next start"),
@@ -106,6 +123,14 @@ fn render(state: &ServiceState, out: &mut impl io::Write) -> eyre::Result<()> {
                     line.span(Span::Target(next))?;
                     line.words("from the next start")?;
                 }
+                State::Relative(prefix, saved) => {
+                    line.words(prefix)?;
+                    if let Some(saved) = saved {
+                        line.words("saved")?;
+                        line.span(Span::Target(saved))?;
+                    }
+                    line.words(RESOLVES)?;
+                }
             }
             line.finish()?;
         }
@@ -137,13 +162,18 @@ impl Row<'_> {
 enum State<'a> {
     Fixed(&'static str),
     Next(&'static str, &'a str),
+    /// A saved relative path: the saved text when a bound target fills the target column.
+    Relative(&'static str, Option<&'a str>),
 }
+
+/// Where a saved relative path resolves: no observer can say which directory that is.
+const RESOLVES: &str = "resolves where swoosh serve starts";
 
 impl State<'_> {
     fn ascii(self) -> bool {
         match self {
-            Self::Fixed(_) => true,
-            Self::Next(_, next) => next.is_ascii(),
+            Self::Fixed(_) | Self::Relative(_, None) => true,
+            Self::Next(_, next) | Self::Relative(_, Some(next)) => next.is_ascii(),
         }
     }
 
@@ -159,6 +189,10 @@ impl fmt::Display for State<'_> {
             Self::Next(prefix, next) => {
                 write!(f, "{prefix} {} from the next start", EscapedComplete(next))
             }
+            Self::Relative(prefix, Some(saved)) => {
+                write!(f, "{prefix} saved {} {RESOLVES}", EscapedComplete(saved))
+            }
+            Self::Relative(prefix, None) => write!(f, "{prefix} {RESOLVES}"),
         }
     }
 }

@@ -1680,3 +1680,30 @@ async fn a_share_to_an_unsaved_key_says_the_key_whole() {
     );
     assert_eq!(lines[1], format!("  {key}"));
 }
+
+/// With no `serve` running, a saved relative path has no directory yet: only a start resolves it, at its own
+/// working directory. The share refuses before any key, link or ledger row exists, and a relative neighbour
+/// does not block another service. A running `serve` reports the target it bound, which the share signs.
+#[tokio::test]
+async fn a_saved_relative_target_is_shared_only_from_a_running_serve() {
+    let home = scratch("relative").await;
+    serving(&home, &["site=file:./site", "demo=echo:"]);
+    std::fs::remove_file(home.key()).unwrap();
+    let refusal = refuses_unchanged(&home, "site").await;
+    assert!(refusal.contains("swoosh serve"), "{refusal}");
+    assert!(!home.key().exists(), "the refusal provisions no key");
+    assert!(!home.links().exists(), "the refusal writes no ledger row");
+    share(&home, &["demo", "anyone"]).await.made();
+    let home = scratch("relative-live").await;
+    serving(&home, &["site=file:./site"]);
+    let _live = Live::start(
+        &home,
+        detail("site", "file:/srv/site", false),
+        TestNode::seeded(OWN).node_id(),
+    );
+    share(&home, &["site", "anyone"]).await.made();
+    assert_eq!(
+        rows(&home).await[0].serves.as_ref().unwrap().as_str(),
+        "file:/srv/site"
+    );
+}

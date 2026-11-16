@@ -910,6 +910,7 @@ fn serving_block(
         .map(|entries| service_pairs(entries).collect());
     let selection = match started {
         Started::Named(_) => "this run only (not saved)",
+        Started::Adjusted(_) => "saved services, adjusted for this run",
         Started::Resumed(_) => "saved services",
         Started::Default => "default services",
     };
@@ -959,7 +960,7 @@ fn serving_block(
         serving_fact(
             &mut out,
             "saved services",
-            "apply to the next bare serve",
+            "apply to the next bare or --with/--without serve",
             names,
         )?;
     }

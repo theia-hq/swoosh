@@ -15,6 +15,7 @@
 
 use clap::Args;
 use nauthy::Service;
+use swoosh::escape::EscapedComplete;
 use swoosh::home::{Home, HomeWrite};
 use swoosh::serve::{Added, EditError, Mistyped, ServingError, as_typed};
 use swoosh::serve_toml::ServeToml;
@@ -89,12 +90,10 @@ impl ServiceRmCmd {
     /// written.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
         let names = self.checked_names()?;
-        let cwd = std::env::current_dir()?;
         let home_lock = HomeWrite::take(home).await?;
-        let removed = ServeToml::try_update(&home_lock, home, |file| {
-            swoosh::serve::Started::bare_at(file, &cwd)?;
-            file.remove(&names)
-        })?;
+        // `remove` validates the saved list as written, never anchored at this cwd, so a removed cwd
+        // cannot block it.
+        let removed = ServeToml::try_update(&home_lock, home, |file| file.remove(&names))?;
         drop(home_lock);
         removed.map_err(|error| refused(&error, names.len(), "removed"))?;
         for name in &names {
@@ -108,6 +107,10 @@ impl ServiceRmCmd {
 fn added_line(found: &Added, running: Option<&Running>) -> String {
     match found {
         Added::New(name) => format!("Added {name} to the saved list."),
+        Added::NewAnchored { name, target } => format!(
+            "Added {name} to the saved list as {}.",
+            EscapedComplete(target)
+        ),
         Added::Listed(name) if running.is_some_and(|running| !running.serves(name)) => {
             format!("{name} is already in the saved list.")
         }

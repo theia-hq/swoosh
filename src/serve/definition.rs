@@ -222,6 +222,20 @@ impl ValidatedDefinition {
         Ok(self)
     }
 
+    /// Whether the target holds a relative path, which means a directory only once a cwd anchors it.
+    pub(super) fn is_relative(&self) -> bool {
+        match &self.target {
+            // Anchoring changes only a relative path tail and keeps every other target byte-identical,
+            // so a change under a fixed root is the grammar's own answer. A refusal to anchor also means
+            // a path tail that needed a directory.
+            Target::Primitive(spec) => !spec
+                .anchored(Path::new(ANY_ROOT))
+                .is_ok_and(|anchored| anchored == *spec),
+            Target::Receive(Receive::Path(path)) => !path.is_absolute(),
+            _ => false,
+        }
+    }
+
     pub(super) fn entry(&self) -> String {
         let target = match &self.target {
             Target::Primitive(spec) => spec.as_str().to_owned(),
@@ -265,6 +279,12 @@ impl ValidatedDefinition {
             .collect()
     }
 }
+
+/// An absolute directory to anchor at when only whether a path is relative matters, never where it points.
+#[cfg(windows)]
+const ANY_ROOT: &str = r"C:\";
+#[cfg(not(windows))]
+const ANY_ROOT: &str = "/";
 
 fn anchor_receive(path: &Path, cwd: &Path) -> Result<PathBuf, DefinitionCause> {
     if path.is_absolute() {

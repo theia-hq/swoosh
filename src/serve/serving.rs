@@ -128,6 +128,14 @@ pub enum EditError {
 pub enum Added {
     /// Not listed before: it is now.
     New(String),
+    /// Not listed before, and its relative path was made absolute against this edit's cwd: it is now,
+    /// with `target` as stored.
+    NewAnchored {
+        /// The service name.
+        name: String,
+        /// The target as stored, its path absolute.
+        target: String,
+    },
     /// Listed already, with this very target: nothing changed.
     Listed(String),
     /// Listed already, with this very target, and turned off.
@@ -139,6 +147,9 @@ pub enum Added {
 pub enum Started {
     /// Invocation-selected services with anchored paths; launch does not save them.
     Named(Vec<String>),
+    /// The saved/default services with `--with` and `--without` applied, captured once for this
+    /// invocation with anchored paths; launch does not save them.
+    Adjusted(Vec<String>),
     /// The saved list used by a bare start; an explicitly empty list selects no user services.
     Resumed(Vec<String>),
     /// Nothing named and no list recorded: the default, `ping` and `speed`.
@@ -238,7 +249,7 @@ impl Started {
             .collect();
         // Base order is retained; new names have a stable order independent of flag placement.
         selected.extend(fresh.into_values());
-        Ok(Self::Named(selected))
+        Ok(Self::Adjusted(selected))
     }
 
     /// The services a bare `serve` would start from the saved list, or the default when no list is saved.
@@ -272,12 +283,26 @@ impl Started {
     /// The service forms this run binds.
     pub fn entries(&self) -> Vec<String> {
         match self {
-            Self::Named(entries) | Self::Resumed(entries) => entries.clone(),
+            Self::Named(entries) | Self::Adjusted(entries) | Self::Resumed(entries) => {
+                entries.clone()
+            }
             Self::Default => DEFAULT_SERVICES
                 .iter()
                 .map(|&entry| entry.to_owned())
                 .collect(),
         }
+    }
+
+    /// Whether `name`'s target holds a relative path. Unanchored, as a bare start reads saved text, such a
+    /// path has no directory until a `serve` starts and anchors it at its own cwd. An entry that does not
+    /// parse counts as relative, so a caller that refuses relative targets refuses it too.
+    pub fn is_relative(&self, name: &str) -> bool {
+        self.entries()
+            .iter()
+            .filter(|entry| target(entry, name).is_some())
+            .any(|entry| {
+                !ValidatedDefinition::parse(entry).is_ok_and(|parsed| !parsed.is_relative())
+            })
     }
 
     /// The names this run's services are bound under, in their order.
@@ -297,13 +322,15 @@ impl ServeToml {
     /// An entry or the saved list is invalid, or a listed name has another target.
     pub fn add(&mut self, entries: &[String], cwd: &Path) -> Result<Vec<Added>, EditError> {
         let additions = normalized(entries, Operand::Positional, Some(cwd))?;
+        // The same entries as typed, to tell which of them anchoring changed.
+        let typed = normalized(entries, Operand::Positional, None)?;
         // Held entries are compared in the form this edit's cwd gives them, as the additions are, but
         // written back as saved: an edit rewrites no entry it was not given.
         let held = Started::bare_at(self, cwd)?.entries();
         let mut list = self.services.clone().unwrap_or_else(|| held.clone());
         let mut found = Vec::new();
         let mut fresh = Vec::new();
-        for entry in additions {
+        for (entry, typed) in additions.into_iter().zip(typed) {
             let Some((name, asked)) = entry.split_once('=') else {
                 continue;
             };
@@ -321,13 +348,23 @@ impl ServeToml {
                     });
                 }
                 None => {
-                    found.push(Added::New(name.to_owned()));
+                    found.push(if entry == typed {
+                        Added::New(name.to_owned())
+                    } else {
+                        Added::NewAnchored {
+                            name: name.to_owned(),
+                            target: asked.to_owned(),
+                        }
+                    });
                     fresh.push(entry);
                 }
             }
         }
         list.extend(fresh);
-        if found.iter().any(|added| matches!(added, Added::New(_))) {
+        if found
+            .iter()
+            .any(|added| matches!(added, Added::New(_) | Added::NewAnchored { .. }))
+        {
             self.services = Some(list);
         }
         Ok(found)

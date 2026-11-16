@@ -266,6 +266,11 @@ fn explicit_origin_is_not_inferred_from_saved_target_equality() {
     let entries = vec!["ping=ping:".to_owned()];
     for (started, origin) in [
         (Started::Named(entries.clone()), "this run only (not saved)"),
+        // Kept saved entries are saved: a relative start is never called unsaved.
+        (
+            Started::Adjusted(entries.clone()),
+            "saved services, adjusted for this run",
+        ),
         (Started::Resumed(entries.clone()), "saved services"),
         (Started::Default, "default services"),
     ] {
@@ -277,7 +282,7 @@ fn explicit_origin_is_not_inferred_from_saved_target_equality() {
         .unwrap();
         assert!(out.contains(&format!("  selection  {origin}\n")));
         assert!(!out.contains("saved for bare start"));
-        assert!(!out.contains("apply to the next bare serve"));
+        assert!(!out.contains("apply to the next bare or --with/--without serve"));
     }
 }
 
@@ -289,7 +294,10 @@ fn an_explicit_start_on_a_fresh_home_shows_no_defaults_as_saved() {
     let started = Started::Named(vec!["ssh=sshd:".to_owned()]);
     let out = serving_block(&started, Some(&Started::Default), &default_manifest()).unwrap();
     assert!(!out.contains("saved for bare start"), "{out}");
-    assert!(!out.contains("apply to the next bare serve"), "{out}");
+    assert!(
+        !out.contains("apply to the next bare or --with/--without serve"),
+        "{out}"
+    );
     assert!(
         out.contains("  selection  this run only (not saved)\n"),
         "{out}"
@@ -308,14 +316,14 @@ fn serving_rows_keep_bound_only_and_adjacent_saved_alternatives() {
     let out = serving_block(&started, Some(&saved), &manifest).unwrap();
     assert_eq!(
         out,
-        "serving\n  selection       this run only (not saved)\n  web             your devices          tcp:bound:1\n  web             saved for bare start  tcp:saved:2\n  logs            anyone                file:/bound logs\n  ping            saved for bare start  ping:\n  saved services  apply to the next bare serve\n"
+        "serving\n  selection       this run only (not saved)\n  web             your devices          tcp:bound:1\n  web             saved for bare start  tcp:saved:2\n  logs            anyone                file:/bound logs\n  ping            saved for bare start  ping:\n  saved services  apply to the next bare or --with/--without serve\n"
     );
     let values = [
         "this run only",
         "your devices",
         "saved for bare start",
         "anyone",
-        "apply to the next bare serve",
+        "apply to the next bare or --with/--without serve",
     ];
     let columns: Vec<_> = out
         .lines()
@@ -2022,6 +2030,22 @@ fn serve_once(scratch: &ProcessScratch, args: &[&str]) -> std::process::Output {
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME");
     run_binary_with_deadline(&mut command, Duration::from_secs(60))
+}
+
+/// A `--with` definition that cannot be one service is refused for itself, before the running one is found:
+/// the refusal reads the same whether or not a `serve` runs here.
+#[test]
+fn a_bad_with_definition_is_refused_before_the_running_check() {
+    let scratch = ProcessScratch::new("bad-with");
+    let _running = Running::start(&scratch, &["--local", "--quiet", "ping"]);
+    let second = serve_once(&scratch, &["--with", "bad=ping:80"]);
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(!second.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("invalid service definition at index 1"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("already running"), "{stderr}");
 }
 
 /// One `serve` per home: a second one refuses, exit 1, with the running one's pid and what it serves,
@@ -5200,7 +5224,7 @@ fn waiting_warnings_include_the_prefix_in_the_width_and_never_split_names() {
 
     assert!(waiting_warnings(&Waiting::default()).is_empty());
     let prefix = "warning: saved service ";
-    let suffix = " applies to the next bare serve";
+    let suffix = " applies to the next bare or --with/--without serve";
     let boundary = 80 - prefix.len() - suffix.len();
     for size in [
         boundary - 1,
@@ -5246,8 +5270,8 @@ fn waiting_warnings_include_the_prefix_in_the_width_and_never_split_names() {
         concat!(
             "warning: the changed relay in serve.toml takes effect at the next start\n",
             "warning: the changed resolver in serve.toml takes effect at the next start\n",
-            "warning: saved service one applies to the next bare serve\n",
-            "warning: saved service two applies to the next bare serve\n",
+            "warning: saved service one applies to the next bare or --with/--without serve\n",
+            "warning: saved service two applies to the next bare or --with/--without serve\n",
         )
     );
 }

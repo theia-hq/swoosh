@@ -133,6 +133,37 @@ async fn service_add_records_and_names_the_next_start() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
+/// A relative path is stored anchored at the directory the add ran in, and the line prints what was stored,
+/// escaped, so the directory a later start uses is visible now.
+#[tokio::test]
+async fn service_add_of_a_relative_path_prints_the_stored_target() {
+    let home = temp_home("anchored");
+    list(&home, &["site=file:./site"]);
+    add(&["public=file:./public"])
+        .run(&home)
+        .await
+        .expect("add public");
+    let cwd = std::env::current_dir().unwrap();
+    assert_eq!(
+        listed(&home),
+        Some(vec![
+            "site=file:./site".to_owned(),
+            format!("public=file:{}/./public", cwd.display())
+        ])
+    );
+    assert_eq!(
+        added_line(
+            &Added::NewAnchored {
+                name: "public".to_owned(),
+                target: "file:/a/public\u{1b}".to_owned()
+            },
+            None
+        ),
+        "Added public to the saved list as file:/a/public\\u{1b}."
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
 /// Listed-name reports distinguish saved membership and off policy.
 #[test]
 fn service_add_of_a_listed_name_says_where_it_stands() {
