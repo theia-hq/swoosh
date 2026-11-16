@@ -191,14 +191,17 @@ impl ServeToml {
     /// An entry or the saved list is invalid, or a listed name has another target.
     pub fn add(&mut self, entries: &[String], cwd: &Path) -> Result<Vec<Added>, EditError> {
         let additions = normalized(entries, Operand::Positional, Some(cwd))?;
-        let mut list = Started::bare_at(self, cwd)?.entries();
+        // Held entries are compared in the form this edit's cwd gives them, as the additions are, but
+        // written back as saved: an edit rewrites no entry it was not given.
+        let held = Started::bare_at(self, cwd)?.entries();
+        let mut list = self.services.clone().unwrap_or_else(|| held.clone());
         let mut found = Vec::new();
         let mut fresh = Vec::new();
         for entry in additions {
             let Some((name, asked)) = entry.split_once('=') else {
                 continue;
             };
-            match list.iter().find_map(|held| target(held, name)) {
+            match held.iter().find_map(|held| target(held, name)) {
                 Some(held) if held == asked => found.push(if self.off.contains(name) {
                     Added::ListedOff(name.to_owned())
                 } else {
@@ -232,16 +235,19 @@ impl ServeToml {
     pub fn remove(&mut self, names: &[nauthy::Service]) -> Result<(), EditError> {
         Mistyped::check_names(names.iter().map(nauthy::Service::as_str))
             .map_err(ServingError::from)?;
-        let mut list = Started::bare(self)?.entries();
+        // Each kept entry is written back as saved; its validated form only finds its name.
+        let forms = Started::bare(self)?.entries();
+        let saved = self.services.clone().unwrap_or_else(|| forms.clone());
+        let mut list: Vec<(String, String)> = forms.into_iter().zip(saved).collect();
         for name in names {
             let name = name.as_str();
             let before = list.len();
-            list.retain(|entry| target(entry, name).is_none());
+            list.retain(|(form, _)| target(form, name).is_none());
             if list.len() == before {
                 return Err(EditError::NotListed(name.to_owned()));
             }
         }
-        self.services = Some(list);
+        self.services = Some(list.into_iter().map(|(_, saved)| saved).collect());
         Ok(())
     }
 }

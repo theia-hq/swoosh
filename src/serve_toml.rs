@@ -304,6 +304,7 @@ struct Serving {
     /// The names its services are bound under, each with its target. Only these are refused for leaving
     /// `services`: the node's own routes are bound by no entry.
     bound: BTreeMap<String, String>,
+    /// Where its services came from, which decides whether leaving `services` refuses them.
     selection: Selection,
     /// The relay the file held once the run saved what it was told, which is the one it bound.
     relay: Option<RelayUrl>,
@@ -311,9 +312,12 @@ struct Serving {
     resolver: Option<ResolverUrl>,
 }
 
+/// Where a run's services came from.
 #[derive(Clone, Copy)]
 enum Selection {
+    /// Named on the command line: fixed for the run, whatever `services` later holds.
     Invocation,
+    /// The saved list or the defaults: a service that leaves `services` is refused.
     Saved,
 }
 
@@ -335,6 +339,23 @@ impl Waiting {
     /// Whether nothing waits.
     pub fn is_empty(&self) -> bool {
         !self.relay && !self.resolver && self.added.is_empty() && self.changed.is_empty()
+    }
+
+    /// What waits now that did not wait in `said`: each fact is named when it starts to wait, never again
+    /// while it goes on waiting.
+    fn since(&self, said: &Self) -> Self {
+        let new = |now: &[String], said: &[String]| {
+            now.iter()
+                .filter(|name| !said.contains(name))
+                .cloned()
+                .collect()
+        };
+        Self {
+            relay: self.relay && !said.relay,
+            resolver: self.resolver && !said.resolver,
+            added: new(&self.added, &said.added),
+            changed: new(&self.changed, &said.changed),
+        }
     }
 }
 
@@ -391,9 +412,9 @@ struct Held {
     cwd: PathBuf,
     /// The file, as the last good read found it.
     file: ServeToml,
-    /// The last accepted saved/default service targets, not the invocation-selected targets.
-    /// None when no valid service list is available; explicit launch never repairs it.
-    running: Option<BTreeMap<String, String>>,
+    /// The last accepted saved/default service targets, not the invocation-selected targets. A load
+    /// refuses an invalid list and a failed read keeps the last accepted one, so there is always one.
+    running: BTreeMap<String, String>,
     /// Captured startup targets and selection origin, absent until routes bind.
     serving: Option<Serving>,
     /// Admission follows read health, never a fabricated change to the accepted file.
@@ -455,7 +476,7 @@ impl LiveServeToml {
             None => (ServeToml::default(), None, LivePolicy::Absent),
         };
         let started = Started::bare_at(&file, cwd)?;
-        let running = Some(targets(&started));
+        let running = targets(&started);
         Ok(Self {
             shared: Arc::new(Watched {
                 first: file.clone(),
@@ -551,9 +572,6 @@ impl LiveServeToml {
             .serving
             .as_ref()
             .ok_or(LocalDetailError::MissingStartup)?;
-        held.running
-            .as_ref()
-            .ok_or(LocalDetailError::InconsistentState)?;
         LocalServiceSnapshot::capture(
             serving
                 .bound
@@ -575,14 +593,12 @@ impl LiveServeToml {
             added: held
                 .running
                 .iter()
-                .flatten()
                 .filter(|(name, _)| !serving.bound.contains_key(*name))
                 .map(|(name, _)| name.clone())
                 .collect(),
             changed: held
                 .running
                 .iter()
-                .flatten()
                 .filter(|(name, target)| {
                     serving
                         .bound
@@ -594,19 +610,20 @@ impl LiveServeToml {
         }
     }
 
-    /// Check the file every [`CHECK_EVERY`], for as long as the run lasts, and hand `say` what waits each
-    /// time that changes, so a change the run cannot apply is named once, when it is made.
+    /// Check the file every [`CHECK_EVERY`], for as long as the run lasts, and hand `say` only what newly
+    /// waits each time, so a change the run cannot apply is named once, when it is made.
     pub async fn watch(&self, mut say: impl FnMut(&Waiting)) {
-        let mut said = Waiting::default();
+        // What already differs at the start is the selection the banner shows, never a change: an explicit
+        // start differs from the saved list, or the defaults, from its first moment.
+        let mut said = self.waiting();
         loop {
             tokio::time::sleep(CHECK_EVERY).await;
             let waiting = self.waiting();
-            if waiting != said {
-                if !waiting.is_empty() {
-                    say(&waiting);
-                }
-                said = waiting;
+            let news = waiting.since(&said);
+            if !news.is_empty() {
+                say(&news);
             }
+            said = waiting;
         }
     }
 
@@ -684,7 +701,7 @@ impl Held {
         match read {
             Ok(Some((file, running, stamp))) => {
                 self.file = file;
-                self.running = Some(running);
+                self.running = running;
                 self.stamp = stamp;
                 if self.policy == LivePolicy::Failed {
                     tracing::warn!(path = %EscapedPath(path), "serve.toml can be read again");
@@ -752,10 +769,7 @@ impl Held {
                 serving.bound.contains_key(name)
                     && (self.policy == LivePolicy::Failed
                         || matches!(serving.selection, Selection::Saved)
-                            && !self
-                                .running
-                                .as_ref()
-                                .is_some_and(|running| running.contains_key(name)))
+                            && !self.running.contains_key(name))
             })
     }
 }

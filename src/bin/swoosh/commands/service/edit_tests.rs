@@ -202,7 +202,7 @@ async fn service_add_ssh_requires_compiled_support_and_preserves_off_policy() {
             assert!(error.downcast_ref::<Usage>().is_some());
             assert_eq!(
                 error.to_string(),
-                "invalid positional service definition at index 1: unsupported target scheme"
+                "invalid service definition at index 1: unsupported target scheme"
             );
             assert_eq!(std::fs::read(home.serve_toml()).unwrap(), before);
             assert_eq!(std::fs::read_dir(home.dir()).unwrap().count(), 1);
@@ -322,7 +322,7 @@ async fn a_name_typed_twice_is_a_usage_error() {
     assert!(error.downcast_ref::<Usage>().is_some(), "exit 2: {error:#}");
     assert_eq!(
         format!("{error:#}"),
-        "invalid positional service definition at index 2: service name already used"
+        "invalid service definition at index 2: service name already used"
     );
     let error = rm(&["web", "web"]).run(&home).await.expect_err("web twice");
     assert!(error.downcast_ref::<Usage>().is_some(), "exit 2: {error:#}");
@@ -337,11 +337,11 @@ async fn an_entry_with_no_name_or_target_is_a_usage_error() {
     for (entry, line) in [
         (
             "db",
-            "invalid positional service definition at index 1: invalid target form",
+            "invalid service definition at index 1: invalid target form",
         ),
         (
             "tcp:localhost:3000",
-            "invalid positional service definition at index 1: invalid target form",
+            "invalid service definition at index 1: invalid target form",
         ),
     ] {
         let error = add(&[entry]).run(&home).await.expect_err("refused");
@@ -370,8 +370,9 @@ async fn an_emptied_list_survives_a_write_and_read() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// No writer keeps a list that names one service twice: a file edited to hold one is refused, naming the
-/// file, by `add`, `rm` and a bare start alike, and the file is left as it is.
+/// No writer keeps a list that names one service twice: a file edited to hold one is refused, as a saved
+/// definition by its index and never by its path, by `add`, `rm` and a bare start alike, and the file is
+/// left as it is.
 #[tokio::test]
 async fn no_writer_keeps_a_duplicate_name() {
     let home = temp_home("duplicate");
@@ -394,8 +395,8 @@ async fn no_writer_keeps_a_duplicate_name() {
 }
 
 /// No writer keeps a list holding an entry that is not a service: a file edited to hold a name with no
-/// target, or a target with no name, is refused, exit 1, naming the file, by `add`, `rm` and a bare start
-/// alike, never as a usage error, and the file is left as it is.
+/// target, or a target with no name, is refused, exit 1, as a saved definition by its index, by `add`, `rm`
+/// and a bare start alike, never as a usage error, and the file is left as it is.
 #[tokio::test]
 async fn no_writer_keeps_an_entry_that_is_not_a_service() {
     for (tag, entry) in [("no-target", "db"), ("no-name", "tcp:localhost:3000")] {
@@ -446,7 +447,7 @@ async fn add_cli_never_echoes_credentials_or_writes_a_valid_prefix() {
     assert!(error.downcast_ref::<Usage>().is_some());
     assert_eq!(
         error.to_string(),
-        "invalid positional service definition at index 3: invalid proxy origin"
+        "invalid service definition at index 3: invalid proxy origin"
     );
     for cause in error.chain() {
         let text = format!("{cause:?} {cause}");
@@ -501,7 +502,7 @@ async fn service_add_refuses_reserved_names_before_home_writes() {
         assert!(error.downcast_ref::<Usage>().is_some());
         assert_eq!(
             error.to_string(),
-            "invalid positional service definition at index 1: invalid service name"
+            "invalid service definition at index 1: invalid service name"
         );
         assert_eq!(std::fs::read(home.serve_toml()).unwrap(), original);
         assert_eq!(

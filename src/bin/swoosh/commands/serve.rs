@@ -66,7 +66,7 @@ pub struct ServeCmd {
     #[arg(
         value_name = "service",
         long_help = "Serve exactly these for this run, without saving them\n\
-                     With none named, use saved services; no saved list means ping and speed.\n\
+                     With none named, it serves the saved services, or ping and speed if none are saved.\n\
                      \n\
                      Built in, served under their own names:\n\
                      \x20 ssh                     a shell on this machine\n\
@@ -858,7 +858,10 @@ fn serving_block(
     use std::io::Write as _;
 
     let entries = started.entries();
-    let saved_entries = saved.map(Started::entries);
+    // A home that never saved a list holds no saved services, so its defaults are never shown as saved.
+    let saved_entries = saved
+        .filter(|saved| !matches!(saved, Started::Default))
+        .map(Started::entries);
     let bound: BTreeMap<_, _> = service_pairs(&entries).collect();
     let saved_targets: Option<BTreeMap<_, _>> = saved_entries
         .as_ref()

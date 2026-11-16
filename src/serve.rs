@@ -185,27 +185,6 @@ pub const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 /// `swoosh serve ssh ping` is `ssh=sshd: ping=ping:`.
 const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("ssh", "sshd:")];
 
-/// A service name and target that passed complete syntax validation. This does not establish backend availability.
-///
-/// # Errors
-///
-/// Identifies an invalid definition by operand, one-based index, and finite cause. Contains no definition text or underlying parser error.
-pub fn service_entry(entry: &str) -> Result<String, DefinitionError> {
-    ValidatedDefinition::parse(entry)
-        .map(|definition| definition.entry())
-        .map_err(|cause| DefinitionError {
-            operand: Operand::Positional,
-            index: 1,
-            cause,
-        })
-}
-
-/// Whether `text` is a port and nothing else: ASCII digits only. A port is never a service's name, so an
-/// entry or a target that is one is refused naming the TCP form it needs.
-pub fn is_port(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 /// `entry` (as the service-entry parser gives it) the way a person types it: a built-in by its bare name
 /// (`ssh=sshd:` is `ssh`), a proxy named `proxy` or a receiver named `recv` by its target (`proxy:<url>`,
 /// `recv:<dir>`), any other as it is. What a line that hands an entry back to the person prints, so the
@@ -339,10 +318,6 @@ pub fn diagnostics(router: Router, public: &[Service]) -> eyre::Result<Router> {
     let router = bind_speed(router, speed, public)?;
     Ok(router.public(public.iter().cloned()))
 }
-
-/// The scheme a receive service names, so the sink-dir extraction matches `recv:<dir>` on the ONE literal
-/// (the same literal the extraction and the banner gloss match), not a re-typed string that could drift.
-pub const RECV_SCHEME: &str = Scheme::Recv.as_str();
 
 /// One de-merged receive service: its served NAME (the wire name `swoosh send --service` requests, e.g. the
 /// default `recv`) and ONLY its own output directory. Because each receive service holds its own [`Recv`]
@@ -542,8 +517,8 @@ impl ProxyService {
 /// own origin scope) here, then binds one engine instance per name by value.
 ///
 /// A pure edge adapter over the raw request strings. A `name=proxy:<url>` is a named, origin-scoped proxy.
-/// A `name=proxy:` (no origin) would be an open egress relay; [`service_entry`] refuses it before an entry
-/// gets here, and this refuses it again for an entry from anywhere else, so no [`ProxyService`] holds an
+/// A `name=proxy:` (no origin) would be an open egress relay; definition validation refuses it before an
+/// entry gets here, and this refuses it again for an entry from anywhere else, so no [`ProxyService`] holds an
 /// unconstrained scope and the binder has only the scoped engine to build. An entry without `=` names no
 /// service and is a teaching error, mirroring tightbeam's grammar. A malformed origin fails HERE, at expose
 /// time, not at dial time.

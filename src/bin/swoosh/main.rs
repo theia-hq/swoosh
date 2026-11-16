@@ -2433,7 +2433,7 @@ mod tests {
             ));
             assert_eq!(
                 error.to_string(),
-                "invalid positional service definition at index 1: invalid service name"
+                "invalid service definition at index 1: invalid service name"
             );
         }
         let Some(Command::Serve(mut cmd)) =

@@ -66,10 +66,7 @@ fn complete_invalid_off_clearing_update_retains_accepted_data_and_recovers_witho
     assert!(held.policy == super::LivePolicy::Accepted);
     assert!(!held.refuses("api"));
     assert_eq!(held.file, recovered, "accepted text is not rewritten");
-    assert_eq!(
-        held.running.as_ref().unwrap()["api"],
-        "file:/captured/./cwd/./next"
-    );
+    assert_eq!(held.running["api"], "file:/captured/./cwd/./next");
     assert_eq!(held.serving.as_ref().unwrap().bound["api"], "echo:");
 }
 
@@ -316,7 +313,7 @@ fn local_detail_preserves_startup_targets_across_saved_refresh() {
 }
 
 #[test]
-fn local_detail_distinguishes_missing_empty_and_inconsistent_startup() {
+fn local_detail_distinguishes_missing_and_empty_startup() {
     use crate::serve::control_codec::LocalDetailError;
     let scratch = Scratch::new("detail-state");
     list(&scratch, &[]);
@@ -327,11 +324,6 @@ fn local_detail_distinguishes_missing_empty_and_inconsistent_startup() {
     ));
     watcher.serving(&bare(&scratch));
     assert!(watcher.local_service_snapshot().unwrap().is_empty());
-    watcher.lock().running = None;
-    assert!(matches!(
-        watcher.local_service_snapshot(),
-        Err(LocalDetailError::InconsistentState)
-    ));
 }
 
 #[test]
@@ -379,7 +371,7 @@ fn local_detail_waits_for_one_atomic_watcher_update() {
     ready.wait();
     assert!(recv.try_recv().is_err());
     held.file.off.insert("a".to_owned());
-    held.running.as_mut().unwrap().remove("b");
+    held.running.remove("b");
     drop(held);
     let snapshot = recv.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
     reader.join().unwrap();
@@ -936,6 +928,29 @@ fn invocation_selection_is_admitted_without_replacing_saved_services() {
     assert_eq!(bare(&scratch).entries(), ["ping=ping:"]);
 }
 
+/// A saved change made while an explicit start runs is named by itself, once: what differed at the start,
+/// and what was named before, is not named again.
+#[test]
+fn a_saved_change_during_an_explicit_start_is_named_once_by_itself() {
+    let scratch = Scratch::new("named-once");
+    list(&scratch, &["ping=ping:"]);
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&Started::Named(vec!["files=recv:".to_owned()]));
+    let startup = watcher.waiting();
+
+    list(&scratch, &["ping=ping:", "web=echo:"]);
+    watcher.lock().last_stat = None;
+    let now = watcher.waiting();
+    let news = now.since(&startup);
+    assert_eq!(news.added, ["web"]);
+    assert!(news.changed.is_empty() && !news.relay && !news.resolver);
+    assert!(watcher.waiting().since(&now).is_empty(), "named once");
+
+    list(&scratch, &["ping=ping:", "web=echo:", "db=echo:"]);
+    watcher.lock().last_stat = None;
+    assert_eq!(watcher.waiting().since(&now).added, ["db"]);
+}
+
 #[test]
 fn captured_selection_controls_membership_but_never_off_or_failed_policy() {
     use crate::serve::Started;
@@ -1128,7 +1143,7 @@ fn unsupported_ssh_cannot_establish_or_replace_accepted_policy() {
         held.take(&path, Ok(Some((unsupported, None))), None);
         assert!(matches!(held.policy, super::LivePolicy::Failed));
         assert_eq!(held.file, accepted);
-        assert_eq!(held.running.as_ref().unwrap()["api"], "echo:");
+        assert_eq!(held.running["api"], "echo:");
     }
 }
 

@@ -277,6 +277,21 @@ fn explicit_origin_is_not_inferred_from_saved_target_equality() {
     }
 }
 
+/// A home that never saved a list holds no saved services: the defaults a bare start would serve are not
+/// shown as saved beside an explicit selection.
+#[test]
+fn an_explicit_start_on_a_fresh_home_shows_no_defaults_as_saved() {
+    use swoosh::serve::Started;
+    let started = Started::Named(vec!["ssh=sshd:".to_owned()]);
+    let out = serving_block(&started, Some(&Started::Default), &default_manifest()).unwrap();
+    assert!(!out.contains("saved for bare start"), "{out}");
+    assert!(!out.contains("apply to the next bare serve"), "{out}");
+    assert!(
+        out.contains("  selection  this run only (not saved)\n"),
+        "{out}"
+    );
+}
+
 #[test]
 fn serving_rows_keep_bound_only_and_adjacent_saved_alternatives() {
     use swoosh::serve::Started;
@@ -435,7 +450,7 @@ fn invalid_targets_have_finite_safe_errors() {
         );
         assert_eq!(
             format!("{error:#}"),
-            format!("invalid positional service definition at index 1: {words}")
+            format!("invalid service definition at index 1: {words}")
         );
         for source in error.chain() {
             assert!(!format!("{source} {source:?}").contains(entry));
@@ -541,7 +556,7 @@ fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
         let _ = scheme;
         assert_eq!(
             message,
-            "invalid positional service definition at index 1: invalid target form"
+            "invalid service definition at index 1: invalid target form"
         );
         assert!(!message.contains(entry));
     }
@@ -2285,7 +2300,7 @@ fn service_and_serve_usage_errors_exit_2() {
         ),
         (
             &["service", "add", "db"][..],
-            "error: invalid positional service definition at index 1: invalid target form\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &[
@@ -2294,15 +2309,15 @@ fn service_and_serve_usage_errors_exit_2() {
                 "web=tcp:localhost:1",
                 "web=tcp:localhost:2",
             ][..],
-            "error: invalid positional service definition at index 2: service name already used\n",
+            "error: invalid service definition at index 2: service name already used\n",
         ),
         (
             &["serve", "--local", "tcp:localhost:3000"][..],
-            "error: invalid positional service definition at index 1: invalid target form\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["serve", "--local", "db"][..],
-            "error: invalid positional service definition at index 1: invalid target form\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
     ] {
         let out = swoosh_once(&scratch, args);
@@ -2326,19 +2341,19 @@ fn serve_a_bare_port_refuses_and_names_a_service_name() {
     for (args, head) in [
         (
             &["serve", "--local", "3000"][..],
-            "error: invalid positional service definition at index 1: invalid target form\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["service", "add", "3000"][..],
-            "error: invalid positional service definition at index 1: invalid target form\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["serve", "--local", "app=3000"][..],
-            "error: invalid positional service definition at index 1: invalid target form\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["service", "add", "app=3000"][..],
-            "error: invalid positional service definition at index 1: invalid target form\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
     ] {
         let out = swoosh_once(&scratch, args);
@@ -2367,7 +2382,7 @@ fn recv_with_a_dir_names_itself_recv() {
     let listed = std::fs::read_to_string(scratch.home_dir.join("serve.toml")).expect("the list");
     assert!(listed.contains("\"recv=recv:/tmp/x\""), "{listed}");
     assert_eq!(
-        swoosh::serve::service_entry("recv:").expect("recv: alone parses"),
+        definition("recv:").expect("recv: alone parses"),
         "recv=recv:"
     );
     assert_eq!(swoosh::serve::as_typed("recv=recv:/tmp/x"), "recv:/tmp/x");
@@ -2413,11 +2428,11 @@ fn quiet_serve_prints_no_banner_and_no_activity() {
     );
 }
 
-/// A list edited by hand to hold an entry that is not a service stops a bare `serve` with exit 1, naming the
-/// file: nothing was typed, so it is never a usage error, which a service manager would restart on forever
-/// with a usage line about a command line no one wrote.
+/// A list edited by hand to hold an entry that is not a service stops a bare `serve` with exit 1, as a saved
+/// definition by its index and without the entry's text: nothing was typed, so it is never a usage error,
+/// which a service manager would restart on forever with a usage line about a command line no one wrote.
 #[test]
-fn a_hand_edited_list_with_a_non_service_exits_1_naming_the_file() {
+fn a_hand_edited_list_with_a_non_service_exits_1_as_a_saved_definition() {
     let scratch = ProcessScratch::new("not-a-service");
     for entry in ["db", "tcp:localhost:3000"] {
         std::fs::write(
@@ -3770,7 +3785,7 @@ fn assert_reserved_serve_entries(entries: &[&str]) {
         ])
         .expect("definition validation occurs after clap without raw operand echo");
         assert!(matches!(
-            swoosh::serve::service_entry(entry),
+            definition(entry),
             Err(swoosh::serve::DefinitionError {
                 operand: swoosh::serve::Operand::Positional,
                 index: 1,
@@ -3782,7 +3797,7 @@ fn assert_reserved_serve_entries(entries: &[&str]) {
         assert!(
             String::from_utf8(output.stderr)
                 .unwrap()
-                .contains("invalid positional service definition at index 1: invalid service name")
+                .contains("invalid service definition at index 1: invalid service name")
         );
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(
@@ -3795,7 +3810,7 @@ fn assert_reserved_serve_entries(entries: &[&str]) {
 
 #[test]
 fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
-    use swoosh::serve::{Mistyped, service_entry};
+    use swoosh::serve::Mistyped;
 
     for (entry, expected) in [
         ("Me=ping:", "me=ping:"),
@@ -3810,12 +3825,12 @@ fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
         ),
         ("Web=tcp:localhost:3000", "web=tcp:localhost:3000"),
     ] {
-        assert_eq!(service_entry(entry).unwrap(), expected);
+        assert_eq!(definition(entry).unwrap(), expected);
         assert!(<crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).is_ok());
     }
     #[cfg(feature = "ssh")]
     {
-        assert_eq!(service_entry("SSH").unwrap(), "ssh=sshd:");
+        assert_eq!(definition("SSH").unwrap(), "ssh=sshd:");
         assert_eq!(
             refusal_against(&["SSH"], &["ssh"], &["ssh"]),
             "swoosh serve is already running here (pid 4121)\n  It serves ssh.\n  To turn ssh on:\n    swoosh service on ssh"
@@ -3845,12 +3860,21 @@ fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
         assert!(swoosh::names::service(name).is_ok());
     }
     for entry in ["ssh=sshd:22", "ssh=sshd:+lossy"] {
-        assert!(service_entry(entry).is_err());
+        assert!(definition(entry).is_err());
         assert!(Mistyped::check(&[entry.to_owned()]).is_err());
     }
     for entry in ["tcp:localhost:3000", "3000", "me", "root", "anyone"] {
-        assert!(service_entry(entry).is_err());
+        assert!(definition(entry).is_err());
         assert!(Mistyped::check(&[entry.to_owned()]).is_err());
+    }
+}
+
+/// `entry` as `serve` normalizes it when typed alone, or the refusal it gets there.
+fn definition(entry: &str) -> Result<String, swoosh::serve::DefinitionError> {
+    match swoosh::serve::Started::positional(&[entry.to_owned()], std::path::Path::new("/work")) {
+        Ok(started) => Ok(started.entries().remove(0)),
+        Err(swoosh::serve::ServingError::Definition(error)) => Err(error),
+        Err(error) => panic!("one definition is never a mistyped list: {error}"),
     }
 }
 
@@ -3900,7 +3924,7 @@ fn serve_proxy_without_a_target_is_a_usage_error() {
         let error = swoosh::serve::Mistyped::check(&[entry.to_owned()]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid positional service definition at index 1: invalid proxy origin"
+            "invalid service definition at index 1: invalid proxy origin"
         );
     }
 }
@@ -3944,7 +3968,7 @@ fn a_proxy_url_with_a_path_or_query_is_a_usage_error() {
         let error = swoosh::serve::Mistyped::check(&[entry.to_owned()]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid positional service definition at index 1: invalid proxy origin"
+            "invalid service definition at index 1: invalid proxy origin"
         );
     }
 
@@ -3975,7 +3999,7 @@ fn a_proxy_url_that_is_not_http_or_https_is_a_usage_error() {
         let error = swoosh::serve::Mistyped::check(&[entry.to_owned()]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid positional service definition at index 1: invalid proxy origin"
+            "invalid service definition at index 1: invalid proxy origin"
         );
     }
 }
@@ -3991,7 +4015,7 @@ fn a_proxy_origin_with_userinfo_never_names_the_engine() {
     let line = format!("{error:#}");
     assert_eq!(
         line,
-        "invalid positional service definition at index 1: invalid proxy origin"
+        "invalid service definition at index 1: invalid proxy origin"
     );
     assert!(!line.contains("fetch"), "{line}");
 }
@@ -4039,7 +4063,7 @@ fn bare_proxy_is_refused_with_the_name_addr_teaching_error() {
     };
     assert_eq!(
         error.to_string(),
-        "invalid positional service definition at index 1: invalid proxy origin"
+        "invalid service definition at index 1: invalid proxy origin"
     );
 }
 
@@ -4089,9 +4113,9 @@ fn a_proxy_entry_with_no_origin_is_refused_at_the_de_merge() {
             panic!("`{entry}` names no origin and is refused");
         };
         assert!(
-            error.to_string().starts_with(
-                "invalid positional service definition at index 1: invalid proxy origin"
-            ),
+            error
+                .to_string()
+                .starts_with("invalid service definition at index 1: invalid proxy origin"),
             "`{entry}`: {error}"
         );
     }

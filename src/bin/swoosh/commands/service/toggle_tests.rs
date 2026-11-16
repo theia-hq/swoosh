@@ -284,8 +284,8 @@ async fn service_on_of_a_hand_written_built_in_turns_it_on() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// A list a bare `serve` refuses is refused by `on` and `off` alike, exit 1, naming the file, and nothing
-/// is written: no name on it can be trusted as listed.
+/// A list a bare `serve` refuses is refused by `on` and `off` alike, exit 1, as a saved definition by its
+/// index, and nothing is written: no name on it can be trusted as listed.
 #[tokio::test]
 async fn service_toggle_refuses_a_list_that_is_not_services() {
     let home = temp_home("toggle-not-a-service");

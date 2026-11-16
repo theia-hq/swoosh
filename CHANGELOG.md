@@ -44,6 +44,15 @@ All notable changes to swoosh, newest first.
   time `serve` starts. `swoosh service on <service>` and `swoosh service off <service>` turn a listed service
   on or off at once, and one turned off stays off across restarts. All four act on this machine only.
   `swoosh status me/<name>` ends its line with what that device serves: `; serving: ssh, web`.
+- **`swoosh serve <name=target …>` serves exactly those services for that run only.** It no longer saves
+  them, repairs the saved list, or turns a service back on. A bare `swoosh serve` serves the saved list,
+  or `ping` and `speed` if none is saved. The banner says which, and shows a saved service that differs from
+  the one running.
+- **A service definition is checked in full before `serve` or `service add` starts anything.** A refusal
+  names the entry's position and the kind of problem, such as an invalid name or target, and does not
+  repeat what you typed.
+- **The `serve` banner and `service` list share one row layout.** A row that would pass 80 columns is split
+  onto separate lines.
 - **`serve` syncs your device list as it starts, then once an hour.** Until that first sync ends, it refuses a
   stop from another device.
 - **`forward` replaces `reach`, and `proxy` replaces `fetch`.** `swoosh forward <machine> <service> <port | ->`
@@ -89,6 +98,7 @@ All notable changes to swoosh, newest first.
   `the receiver did not answer within 10 minutes; the file may have arrived`. Before, it had no limit.
 
 ### Fixed
+- **`share` refuses a link to a service whose saved definition is invalid.**
 - **Updated SSH and filesystem dependencies** following RUSTSEC-2026-0495 and RUSTSEC-2026-0486.
 - **Updated the QUIC transport dependencies** following RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538.
 - **Local badge expiry refusal uses the effective expiry bound.** Renewal expiry checks include the endpoint. Displayed dates and renewal warnings are unchanged.

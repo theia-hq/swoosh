@@ -8,7 +8,7 @@ use tightbeam::tunnel::{TargetSpec, TargetSyntaxError};
 
 /// Identifies an invalid definition by operand, one-based index, and finite cause. Contains no definition text or underlying parser error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid {operand} service definition at index {index}: {cause}")]
+#[error("invalid {operand}service definition at index {index}: {cause}")]
 pub struct DefinitionError {
     /// The input list containing the invalid definition.
     pub operand: Operand,
@@ -34,10 +34,9 @@ pub enum Operand {
 impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Positional => "positional",
-            Self::Base => "base",
-            Self::Addition => "addition",
-            Self::Saved => "saved",
+            // Only the saved list is named: the others are what was just typed.
+            Self::Positional | Self::Base | Self::Addition => "",
+            Self::Saved => "saved ",
         })
     }
 }
@@ -96,23 +95,35 @@ pub(super) struct ValidatedDefinition {
     pub(super) target: Target,
 }
 
+/// What a validated definition serves, parsed once so binding never reads the target text again.
 #[derive(Clone)]
 pub(super) enum Target {
+    /// A tightbeam primitive target, bound by the router.
     Primitive(TargetSpec),
+    /// The `ping:` engine.
     Ping,
+    /// The `speed:` engine.
     Speed,
+    /// The `sshd:` shell, only in a build with the `ssh` feature.
     #[cfg(feature = "ssh")]
     Sshd,
+    /// A `recv:` receiver and where it saves.
     Receive(Receive),
+    /// A `proxy:` scoped to one HTTP(S) origin.
     Proxy {
+        /// The origin as given, which the entry renders back.
         text: String,
+        /// The parsed origin, the only one the proxy reaches.
         allow: OriginAllowlist,
     },
 }
 
+/// Where a `recv:` receiver saves.
 #[derive(Clone)]
 pub(super) enum Receive {
+    /// `recv:` alone: the inbox, found only when the service is prepared, never at validation.
     Inbox,
+    /// `recv:<dir>`: the directory given, made absolute against the cwd when anchored.
     Path(PathBuf),
 }
 
@@ -130,12 +141,14 @@ impl ValidatedDefinition {
                 _ if entry.contains(':') => return Err(DefinitionCause::Arity),
                 _ => {
                     let name = crate::names::service(entry).map_err(|_| DefinitionCause::Name)?;
-                    let target = match name.as_str() {
-                        "ping" => "ping:",
-                        "speed" => "speed:",
-                        "ssh" => "sshd:",
-                        "proxy" => return Err(DefinitionCause::Origin),
-                        _ => return Err(DefinitionCause::Arity),
+                    if name.as_str() == "proxy" {
+                        return Err(DefinitionCause::Origin);
+                    }
+                    let Some(&(_, target)) = super::BUILT_IN
+                        .iter()
+                        .find(|&&(built_in, _)| built_in == name.as_str())
+                    else {
+                        return Err(DefinitionCause::Arity);
                     };
                     return Self::named(name, target);
                 }

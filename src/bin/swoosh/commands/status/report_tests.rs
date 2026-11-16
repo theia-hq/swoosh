@@ -1524,7 +1524,7 @@ async fn status_leaves_out_a_service_added_or_removed_while_serving() {
     service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &[]).await;
     let _resident = LocalResident::start(&home, &["ssh", "web", "control.stop"], None);
     ServiceAddCmd {
-        entries: vec![swoosh::serve::service_entry("proxy:https://example.com").unwrap()],
+        entries: vec!["proxy:https://example.com".to_owned()],
     }
     .run(&home)
     .await

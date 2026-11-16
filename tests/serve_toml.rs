@@ -275,3 +275,53 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
         "{banner}"
     );
 }
+
+/// An explicit start on a home that never saved a list differs from the defaults from its first moment,
+/// and that is the selection, not a change: neither the banner nor the watch calls the defaults saved.
+/// A real later edit is named once, by itself.
+#[test]
+fn an_explicit_start_on_a_fresh_home_names_only_later_saved_changes() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("fresh-explicit");
+    let home = scratch.0.join("home");
+    let run = scratch.0.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let (_serving, banner, said) = serve(&home, &run, &["ping"]);
+    assert!(!banner.contains("saved for bare start"), "{banner}");
+    let saved = |line: &String| line.contains("saved service");
+    assert!(
+        !said_within(&said, Duration::from_secs(3)).iter().any(saved),
+        "nothing was saved or changed"
+    );
+
+    std::fs::write(
+        home.join("serve.toml"),
+        "services = [\"ping=ping:\", \"speed=speed:\", \"web=tcp:localhost:3000\"]\n",
+    )
+    .unwrap();
+    let line = core::iter::from_fn(|| said.recv_timeout(Duration::from_secs(10)).ok())
+        .find(saved)
+        .expect("the run names the change");
+    assert_eq!(
+        line,
+        "warning: saved service web applies to the next bare serve"
+    );
+    assert!(
+        !said_within(&said, Duration::from_secs(3)).iter().any(saved),
+        "the change is named once"
+    );
+}
+
+/// The lines `said` gives within `wait`, longer than the run's one-second check, so a line it would say
+/// has had time to come.
+fn said_within(said: &std::sync::mpsc::Receiver<String>, wait: Duration) -> Vec<String> {
+    let deadline = std::time::Instant::now() + wait;
+    core::iter::from_fn(|| {
+        said.recv_timeout(deadline.checked_duration_since(std::time::Instant::now())?)
+            .ok()
+    })
+    .collect()
+}

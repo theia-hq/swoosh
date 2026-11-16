@@ -52,7 +52,8 @@ pub enum Slot {
     Service(Service),
     /// Text shaped like a machine (`me/nas`), kept so its refusal can name it.
     Machine(String),
-    /// Identifies an invalid service name by its one-based position in the input list. Contains no input text or underlying parser error.
+    /// Text that is neither: not a service name, or a definition or URL typed where a name goes. Its text
+    /// is not kept, so its refusal cannot repeat it.
     Invalid,
 }
 

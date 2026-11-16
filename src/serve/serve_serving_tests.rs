@@ -135,7 +135,7 @@ fn controls_boundary_spaces_and_unrepresentable_cwd_are_finite_refusals() {
         let error = Started::positional(&entries(&[entry]), Path::new(cwd)).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid positional service definition at index 1: invalid target form"
+            "invalid service definition at index 1: invalid target form"
         );
         assert!(!format!("{error:?}").contains(entry));
     }
@@ -160,7 +160,7 @@ fn removing_saved_services_retains_off_names_and_explicit_empty_membership() {
         (
             Some(entries(&["ping", "speed"])),
             vec!["ping"],
-            vec!["speed=speed:"],
+            vec!["speed"],
         ),
         (Some(entries(&["ping"])), vec!["ping"], vec![]),
         (None, vec!["ping", "speed"], vec![]),
@@ -246,4 +246,29 @@ fn malformed_saved_membership_cannot_be_repaired_by_an_unrelated_edit() {
         assert!(file.add(&entries(&["speed"]), Path::new("/work")).is_err());
         assert_eq!(file, before);
     }
+}
+
+/// `add` writes back every entry it was not given exactly as saved: a relative path keeps the meaning it was
+/// saved with rather than taking the directory this `add` ran in, and a short form stays short.
+#[test]
+fn add_leaves_existing_saved_entries_as_saved() {
+    let saved = entries(&["files=recv:inbox", "Ping", "logs=file:./logs"]);
+    let mut file = ServeToml {
+        services: Some(saved.clone()),
+        ..ServeToml::default()
+    };
+    assert_eq!(
+        file.add(&entries(&["web=echo:"]), Path::new("/work"))
+            .unwrap(),
+        [Added::New("web".into())]
+    );
+    let mut expected = saved;
+    expected.push("web=echo:".to_owned());
+    assert_eq!(file.services, Some(expected));
+    assert_eq!(
+        file.add(&entries(&["files=recv:inbox"]), Path::new("/work"))
+            .unwrap(),
+        [Added::Listed("files".into())],
+        "compared where this add ran, as the entry it was given is"
+    );
 }
