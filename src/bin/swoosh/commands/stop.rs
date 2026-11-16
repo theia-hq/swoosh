@@ -417,10 +417,11 @@ impl swoosh::reaching::Reaching for StopDevice {
     }
 
     /// Uniform dispatch: stop the device with the resolved badge; the rest of the context is unused.
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        _peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as bifrost::Session>::Write: Send + 'static,

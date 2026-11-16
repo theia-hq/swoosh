@@ -411,16 +411,17 @@ impl swoosh::reaching::Reaching for JoinPull {
         })
     }
 
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        _node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        pull(&NodeDial::new(node, ctx.home), self.from).await;
+        pull(&NodeDial::new(peers, ctx.home), self.from).await;
         Ok(())
     }
 }

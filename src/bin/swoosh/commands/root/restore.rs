@@ -124,16 +124,17 @@ impl swoosh::reaching::Reaching for RestoreSync {
         })
     }
 
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        _node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.finish(ctx.home, &NodeDial::new(node, ctx.home), &mut io::stderr())
+        self.finish(ctx.home, &NodeDial::new(peers, ctx.home), &mut io::stderr())
             .await
     }
 }

@@ -314,10 +314,11 @@ impl Reaching for ServeCmd {
 
     /// Uniform dispatch: `serve` reads its OWN [`Claim`] and [`ExposeContext`] (attached by the root before
     /// dispatch), so it ignores every `ReachCtx` field.
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         mut self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         _ctx: ReachCtx<'_>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
@@ -331,14 +332,7 @@ impl Reaching for ServeCmd {
                 "internal: serve reached run without its claim or expose context (composition-root bug)"
             );
         };
-        let ExposeContext {
-            host_seed,
-            gate,
-            cut,
-            home,
-        } = *expose;
-        self.run_serve(node, *claim, host_seed, gate, cut, home)
-            .await
+        self.run_serve(node, peers, *claim, *expose).await
     }
 }
 
@@ -526,19 +520,23 @@ impl ServeCmd {
     /// the update route, and `sshd` under the `ssh` feature) behind the gate the composition root built,
     /// record what it serves, print swoosh's banner, and run the exposer and the control socket with the
     /// live cut wired. A service stays gated unless `--public` opens it.
-    async fn run_serve<T: Transport, D: Discovery>(
+    async fn run_serve<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
         claim: Claim,
-        host_seed: [u8; 32],
-        gate: Gate,
-        cut: AnchorCut,
-        home: Home,
+        expose: ExposeContext,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
+        let ExposeContext {
+            host_seed,
+            gate,
+            cut,
+            home,
+        } = expose;
         // The run's one watcher of `<home>/serve.toml`, the one its claim read: the live enable/disable
         // oracle the exposer's per-stream gate consults, so a service turned off is refused live, and
         // turned back on, both with no restart. The status the control socket reports reads the same one.
@@ -736,8 +734,8 @@ impl ServeCmd {
             });
         }
 
-        let dial = swoosh::sync::NodeDial::new(node, &home);
-        let fetch = swoosh::renewal::NodeFetch::new(node);
+        let dial = swoosh::sync::NodeDial::new(peers, &home);
+        let fetch = swoosh::renewal::NodeFetch::new(peers);
         // Run until a stop, distinguishing a GRACEFUL stop from an ERRORED teardown: a requested stop is
         // SUCCESS (exit 0, so a CI action reads a clean teardown as green); only a genuine error exits
         // non-zero. Beside the run, this node's own exchanges with your devices: they end when the run does.

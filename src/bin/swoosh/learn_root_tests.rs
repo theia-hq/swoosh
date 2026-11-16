@@ -314,12 +314,15 @@ where
     };
     let mut told = Vec::new();
     let started = Instant::now();
-    let (result, shown) = tokio::time::timeout(
-        Duration::from_secs(30),
-        run_verb(outward, node, ctx, &Answering::with(Answer::Same)),
-    )
-    .await
-    .expect("the verb ends");
+    let (result, shown) = {
+        let peers = swoosh::peers::Peers::new(node);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run_verb(outward, node, ctx, &peers, &Answering::with(Answer::Same)),
+        )
+        .await
+        .expect("the verb ends")
+    };
     let took = started.elapsed();
     // Told as the composition root tells it, once the verb is done.
     if let Some(shown) = shown {

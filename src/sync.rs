@@ -34,7 +34,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::SystemTime;
 
-use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
+use bifrost::{Discovery, NodeId, Transport};
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
@@ -447,37 +447,45 @@ pub trait Dial {
     ) -> impl Future<Output = Result<Answer, ExchangeError>>;
 }
 
-/// The [`Dial`] over a bound node: each exchange opens `control.sync` on the device, presenting this
-/// machine's standing as it reads now.
-pub struct NodeDial<'a, T: Transport, D: Discovery> {
-    node: &'a Node<T, D>,
-    home: &'a Home,
+/// The [`Dial`] over the run's Main sessions. Each exchange snapshots this home's badge once and
+/// presents it afresh; neither its admission nor its credentialed connector is cached.
+pub struct NodeDial<'p, 'n, T: Transport, D: Discovery> {
+    peers: &'p crate::peers::Peers<'n, T, D>,
+    home: &'p Home,
 }
 
-impl<'a, T: Transport, D: Discovery> NodeDial<'a, T, D> {
-    /// Exchange over `node`, as the device `home` is.
-    pub fn new(node: &'a Node<T, D>, home: &'a Home) -> Self {
-        Self { node, home }
+impl<'p, 'n, T: Transport, D: Discovery> NodeDial<'p, 'n, T, D> {
+    /// Borrow the run's sessions and the home whose badge each exchange presents.
+    pub fn new(peers: &'p crate::peers::Peers<'n, T, D>, home: &'p Home) -> Self {
+        Self { peers, home }
     }
 }
 
-impl<T: Transport, D: Discovery> NodeDial<'_, T, D> {
+impl<T: Transport, D: Discovery> NodeDial<'_, '_, T, D> {
     /// Open a stream on `peer`'s `control.sync`, presenting this machine's standing as it reads now.
     async fn open(
         &self,
         peer: NodeId,
     ) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin), ExchangeError> {
         let badge = crate::config::load_badge(self.home).await?;
-        let session = connector(peer, badge)?.open_service(self.node).await?;
-        let (writer, reader) = session.open_bi().await.map_err(|error| match error {
-            bifrost::Error::Refused(bifrost::Refusal::NotAdmitted) => ExchangeError::NotAdmitted,
-            other => ExchangeError::Dial(eyre::eyre!(other)),
-        })?;
+        let service = SYNC_SERVICE
+            .parse::<nauthy::Service>()
+            .map_err(|error| eyre::eyre!(error))?;
+        let (writer, reader) = self
+            .peers
+            .open(peer, service, badge)
+            .await
+            .map_err(|error| match error {
+                bifrost::Error::Refused(bifrost::Refusal::NotAdmitted) => {
+                    ExchangeError::NotAdmitted
+                }
+                other => ExchangeError::Dial(eyre::eyre!(other)),
+            })?;
         Ok((reader, writer))
     }
 }
 
-impl<T: Transport, D: Discovery> Dial for NodeDial<'_, T, D> {
+impl<T: Transport, D: Discovery> Dial for NodeDial<'_, '_, T, D> {
     async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
         let (reader, writer) = self.open(peer).await?;
         exchange(self.home, reader, writer).await

@@ -95,10 +95,11 @@ impl swoosh::reaching::Reaching for ProxyCmd {
 
     /// Uniform dispatch: unpack the reach context and run. `proxy` reads `contacts` (to resolve its peer),
     /// the `transport` label, and the resolved `present` badge; it ignores `key`.
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        _peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,

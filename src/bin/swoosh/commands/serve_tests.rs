@@ -4601,9 +4601,10 @@ async fn the_first_sync_round_runs_at_start() {
     let nas = bifrost_mem::MemTransport::bind();
     let home = home_with_a_sibling("start", bifrost::Transport::node_id(&nas)).await;
     let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
     let (dial, fetch) = (
-        swoosh::sync::NodeDial::new(&node, &home),
-        swoosh::renewal::NodeFetch::new(&node),
+        swoosh::sync::NodeDial::new(&peers, &home),
+        swoosh::renewal::NodeFetch::new(&peers),
     );
     let (first_round, _held) = FirstRound::hold_stop(AllEnabled);
     let started = tokio::time::Instant::now();
@@ -4630,9 +4631,10 @@ async fn a_round_that_finds_no_sibling_still_opens_stop() {
     let nas = bifrost_mem::MemTransport::bind();
     let home = home_with_a_sibling("silent", bifrost::Transport::node_id(&nas)).await;
     let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
     let (dial, fetch) = (
-        swoosh::sync::NodeDial::new(&node, &home),
-        swoosh::renewal::NodeFetch::new(&node),
+        swoosh::sync::NodeDial::new(&peers, &home),
+        swoosh::renewal::NodeFetch::new(&peers),
     );
     let (first_round, held) = FirstRound::hold_stop(AllEnabled);
     let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
@@ -4675,9 +4677,10 @@ async fn a_host_that_is_not_your_device_opens_stop_after_its_round() {
     swoosh::config::create_store_dir(&dir).expect("the store dir");
     let home = Home::resolve(Some(dir)).expect("the scratch home resolves");
     let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
     let (dial, fetch) = (
-        swoosh::sync::NodeDial::new(&node, &home),
-        swoosh::renewal::NodeFetch::new(&node),
+        swoosh::sync::NodeDial::new(&peers, &home),
+        swoosh::renewal::NodeFetch::new(&peers),
     );
     let (first_round, held) = FirstRound::hold_stop(AllEnabled);
     let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");

@@ -20,9 +20,8 @@ use core::time::Duration;
 use std::io;
 use std::time::SystemTime;
 
-use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
+use bifrost::{Discovery, NodeId, Transport};
 use nauthy::{Link, Revocations as _, VerifyKey};
-use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, DeviceLabel};
@@ -151,29 +150,27 @@ pub trait Fetch {
     fn fetch(&self, peer: NodeId) -> impl Future<Output = Result<Option<Link>, FetchError>>;
 }
 
-/// The [`Fetch`] over a bound node: each ask opens `control.renewal` on the device, presenting nothing.
-pub struct NodeFetch<'a, T: Transport, D: Discovery> {
-    node: &'a Node<T, D>,
+/// The [`Fetch`] over the run's credential-free Main sessions. No home is borrowed or badge read:
+/// a dead or unreadable badge cannot delay a pick-up or shorten its session's lease.
+pub struct NodeFetch<'p, 'n, T: Transport, D: Discovery> {
+    peers: &'p crate::peers::Peers<'n, T, D>,
 }
 
-impl<'a, T: Transport, D: Discovery> NodeFetch<'a, T, D> {
-    /// Ask over `node`, under the key it is bound to.
-    pub fn new(node: &'a Node<T, D>) -> Self {
-        Self { node }
+impl<'p, 'n, T: Transport, D: Discovery> NodeFetch<'p, 'n, T, D> {
+    /// Borrow only the run's sessions; every ask presents neither credential slot.
+    pub fn new(peers: &'p crate::peers::Peers<'n, T, D>) -> Self {
+        Self { peers }
     }
 }
 
-impl<T: Transport, D: Discovery> Fetch for NodeFetch<'_, T, D> {
+impl<T: Transport, D: Discovery> Fetch for NodeFetch<'_, '_, T, D> {
     async fn fetch(&self, peer: NodeId) -> Result<Option<Link>, FetchError> {
         let service = RENEWAL_SERVICE
             .parse()
             .map_err(|error| eyre::eyre!("{error}"))?;
-        let session = Connector::to_node(peer, service, None)
-            .open_service(self.node)
-            .await?;
         // The route refuses a key it does not know, and every key while its slots are full: to the dialer
-        // that is the same miss as the one byte.
-        let (_writer, reader) = match session.open_bi().await {
+        // that is the same miss as the one byte. No badge lookup belongs on this path, even for a key.
+        let (_writer, reader) = match self.peers.open(peer, service, None).await {
             Ok(stream) => stream,
             Err(bifrost::Error::Refused(_)) => return Ok(None),
             Err(other) => return Err(eyre::eyre!(other).into()),

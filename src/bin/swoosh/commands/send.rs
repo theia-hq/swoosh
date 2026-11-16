@@ -89,10 +89,11 @@ impl swoosh::reaching::Reaching for SendCmd {
 
     /// Uniform dispatch: unpack the reach context and run. `send` reads the resolved `present` badge and
     /// the machine resolved before the bind; it ignores `transport` and `key`.
-    async fn run<T: Transport, D: Discovery>(
+    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
+        _peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         T::Session: 'static,
