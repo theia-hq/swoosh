@@ -176,11 +176,8 @@ impl ServiceToggleCmd {
         let service = self.here(way)?;
         let name = service.as_str();
         let home_lock = HomeWrite::take(home).await?;
-        let cwd = std::env::current_dir()?;
-        let toggled = ServeToml::try_update(&home_lock, home, |file| {
-            Started::bare_at(file, &cwd).map_err(Refused::List)?;
-            toggle(file, name, way)
-        })?;
+        // Membership is read as saved, never anchored at this cwd, so a removed cwd cannot block a toggle.
+        let toggled = ServeToml::try_update(&home_lock, home, |file| toggle(file, name, way))?;
         drop(home_lock);
         let line = match (toggled, way) {
             (Err(Refused::NotListed), Way::On) => eyre::bail!(

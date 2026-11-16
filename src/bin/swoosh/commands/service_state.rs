@@ -42,13 +42,11 @@ pub(super) struct ServiceState {
 impl ServiceState {
     /// Read through the trusted, bounded file opener and the same-UID socket client, never a transport.
     pub async fn read(home: &Home, mode: ReadMode) -> Result<Self, ReadError> {
-        let cwd = std::env::current_dir().map_err(|source| ServeTomlError::Io {
-            path: home.serve_toml(),
-            source,
-        })?;
         let file = ServeToml::read(home)?;
-        // TOML decoding alone does not establish complete definition validity.
-        let started = Started::bare_at(&file, &cwd)?;
+        // TOML decoding alone does not establish complete definition validity. Saved text is validated
+        // as written: a relative path means the directory a `serve` starts in, never this reader's, so
+        // the reader's cwd is never read and a removed one cannot block it.
+        let started = Started::bare(&file)?;
         let client = match ControlClient::resolve(home) {
             Ok(client) => Some(client),
             Err(ControlError::NoResident) => None,
@@ -134,7 +132,7 @@ impl ShareTarget {
     /// Use valid saved services only when initial acquisition reports no resident and the selected home's
     /// serve-lock probe reports free. An absent saved list uses the defaults; an explicitly empty list stays
     /// empty. An unknown saved name does not construct a service. A disabled service retains its target;
-    /// sharing does not enable it.
+    /// sharing does not enable it. A saved relative path is refused there: only a start anchors it.
     pub async fn read(home: &Home, service: &Service) -> eyre::Result<Self> {
         let initial = match ControlClient::resolve(home) {
             Ok(client) => client
@@ -170,9 +168,16 @@ impl ShareTarget {
                 if home.resident_presence().await? != ResidentPresence::Free {
                     eyre::bail!("cannot confirm that no node is serving this home");
                 }
-                let cwd = std::env::current_dir()?;
                 let file = ServeToml::read(home)?;
-                let entries = Started::bare_at(&file, &cwd)?.entries();
+                let started = Started::bare(&file)?;
+                // A relative path has no directory until a start anchors it at its own cwd, so no link
+                // can name what it will serve; refused before any key, link or ledger row exists.
+                if started.is_relative(service.as_str()) {
+                    eyre::bail!(
+                        "saved service {service} has a relative path, so it has no directory until swoosh serve starts\n  Start serving, then share:\n    swoosh serve"
+                    );
+                }
+                let entries = started.entries();
                 let target = entries
                     .iter()
                     .find_map(|entry| {

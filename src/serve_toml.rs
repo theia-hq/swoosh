@@ -372,7 +372,7 @@ impl core::fmt::Display for Waiting {
         }
         for name in self.added.iter().chain(&self.changed) {
             lines.push(format!(
-                "saved service {name} applies to the next bare serve"
+                "saved service {name} applies to the next bare or --with/--without serve"
             ));
         }
         f.write_str(&lines.join("\n"))
@@ -550,7 +550,7 @@ impl LiveServeToml {
         held.serving = Some(Serving {
             bound: targets(started),
             selection: match started {
-                Started::Named(_) => Selection::Invocation,
+                Started::Named(_) | Started::Adjusted(_) => Selection::Invocation,
                 Started::Resumed(_) | Started::Default => Selection::Saved,
             },
             relay: held.file.relay.clone(),

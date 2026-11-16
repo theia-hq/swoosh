@@ -319,3 +319,75 @@ fn a_group_writable_trust_file_is_refused_at_load() {
         format!("error: {path} can be written by others: chmod 600 {path}\n")
     );
 }
+
+/// `swoosh --home <home> <args>` from a working directory removed before it runs: the shell enters `gone`,
+/// removes it, then becomes the binary.
+fn swoosh_from_a_deleted_cwd(gone: &Path, home: &Path, args: &[&str]) -> Output {
+    std::fs::create_dir_all(gone).unwrap();
+    Command::new("sh")
+        .arg("-c")
+        .arg(r#"cd "$1" && rmdir "$1" && shift && exec "$@""#)
+        .arg("sh")
+        .arg(gone)
+        .arg(env!("CARGO_BIN_EXE_swoosh"))
+        .arg("--home")
+        .arg(home)
+        .args(args)
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// What a home saved is read as written, never against the reader's directory: `status`, `service off`,
+/// `service on` and `service rm` run from a working directory that no longer exists, a hand-edited relative path
+/// included.
+#[test]
+fn status_and_service_toggles_run_from_a_deleted_working_directory() {
+    let scratch = Scratch::new("gone-cwd");
+    keyed(&scratch.home());
+    let added = swoosh(
+        &scratch.home(),
+        &["service", "add", "web=tcp:localhost:3000"],
+    );
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    let serve_toml = scratch.home().join("serve.toml");
+    // A hand edit is the only way a relative path is saved; the writer's permissions stay.
+    std::fs::write(
+        &serve_toml,
+        "services = [\"web=tcp:localhost:3000\", \"site=file:./site\"]\n",
+    )
+    .unwrap();
+    let gone = scratch.0.join("gone");
+    let out = swoosh_from_a_deleted_cwd(&gone, &scratch.home(), &["service", "off", "web"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        std::fs::read_to_string(&serve_toml)
+            .unwrap()
+            .contains("off = [\"web\"]"),
+        "web is saved off"
+    );
+    let out = swoosh_from_a_deleted_cwd(&gone, &scratch.home(), &["status"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("web (off), site, when swoosh serve runs"),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = swoosh_from_a_deleted_cwd(&gone, &scratch.home(), &["service", "on", "web"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        !std::fs::read_to_string(&serve_toml)
+            .unwrap()
+            .contains("off = [\"web\"]"),
+        "web is saved on"
+    );
+    let out = swoosh_from_a_deleted_cwd(&gone, &scratch.home(), &["service", "rm", "site"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let saved = std::fs::read_to_string(&serve_toml).unwrap();
+    assert!(
+        saved.contains("web=tcp:localhost:3000") && !saved.contains("site"),
+        "{saved}"
+    );
+}

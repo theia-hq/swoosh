@@ -58,7 +58,7 @@ fn relative_default_empty_and_full_exclusion_do_not_restore_defaults_or_write_po
         Path::new("/work"),
     )
     .unwrap();
-    assert!(matches!(selected, Started::Named(_)));
+    assert!(matches!(selected, Started::Adjusted(_)));
     assert_eq!(file, before);
 }
 

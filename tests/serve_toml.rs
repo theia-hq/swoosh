@@ -203,7 +203,7 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
         "{banner}"
     );
     assert!(
-        banner.contains("  saved services  apply to the next bare serve\n"),
+        banner.contains("  saved services  apply to the next bare or --with/--without serve\n"),
         "{banner}"
     );
     let resolved = swoosh::home::Home::resolve(Some(home.clone())).unwrap();
@@ -229,7 +229,7 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
         .expect("the run names what waits");
     assert_eq!(
         line,
-        "warning: saved service speed applies to the next bare serve"
+        "warning: saved service speed applies to the next bare or --with/--without serve"
     );
     let status = swoosh_in(&home, &run, &["status"]);
     assert!(
@@ -307,7 +307,7 @@ fn an_explicit_start_on_a_fresh_home_names_only_later_saved_changes() {
         .expect("the run names the change");
     assert_eq!(
         line,
-        "warning: saved service web applies to the next bare serve"
+        "warning: saved service web applies to the next bare or --with/--without serve"
     );
     assert!(
         !said_within(&said, Duration::from_secs(3)).iter().any(saved),

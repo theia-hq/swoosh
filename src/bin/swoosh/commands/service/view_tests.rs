@@ -206,6 +206,48 @@ async fn service_names_a_retargets_next_target() {
     assert!(rendered(&row).contains("tcp:LOCALHOST:3000 from the next start"));
 }
 
+/// An absolute saved target compares with the bound one by text, whatever directory the viewer is in: an
+/// entry `service add` anchored where `serve` started reads `on`, with no next-start target.
+#[tokio::test]
+async fn service_compares_an_absolute_saved_target_by_text() {
+    let fixture = Fixture::new();
+    fixture.list(&["site=file:/a/site"], &[]).await;
+    assert_eq!(
+        fixture
+            .output(Some(&[("site", "file:/a/site", false)]))
+            .await,
+        "  site  file:/a/site  on\n"
+    );
+}
+
+/// A relative saved target resolves only where `serve` starts, so it is shown as written, never anchored at
+/// the viewer's directory and never compared: it claims neither a pending change nor none.
+#[tokio::test]
+async fn service_shows_a_relative_saved_target_as_written() {
+    let fixture = Fixture::new();
+    fixture.list(&["site=file:./site"], &[]).await;
+    let down = fixture.output(None).await;
+    assert!(
+        down.starts_with("  site  file:./site  on, resolves where swoosh serve starts\n"),
+        "{down}"
+    );
+    let bound = fixture
+        .output(Some(&[("site", "file:/a/site", false)]))
+        .await;
+    assert_eq!(
+        bound,
+        "  site  file:/a/site  on, saved file:./site resolves where swoosh serve starts\n"
+    );
+    assert!(!bound.contains("next start"), "{bound}");
+    fixture.list(&["site=file:./site"], &["site"]).await;
+    assert_eq!(
+        fixture
+            .output(Some(&[("site", "file:/a/site", true)]))
+            .await,
+        "  site  file:/a/site  off, saved file:./site resolves where swoosh serve starts\n"
+    );
+}
+
 #[tokio::test]
 async fn service_with_serve_down_lists_what_a_bare_serve_starts() {
     let fixture = Fixture::new();
@@ -423,8 +465,9 @@ async fn complete_targets_are_atomic_and_large_rows_do_not_set_padding() {
 
 #[tokio::test]
 async fn compact_boundaries_and_independent_maxima_expand_without_splitting() {
+    // Valid absolute targets: text that does not parse is shown as relative, never compared.
     for (size, compact) in [(71, true), (72, false)] {
-        let target = "x".repeat(size);
+        let target = format!("file:/{}", "x".repeat(size - 6));
         let entry = format!("a={target}");
         let row = state(&[&entry], &[("a", &target, false)]).await;
         let out = rendered(&row);
@@ -432,7 +475,7 @@ async fn compact_boundaries_and_independent_maxima_expand_without_splitting() {
         assert!(out.contains(&target));
         assert!(out.lines().all(|line| line.len() <= 80));
     }
-    let target = "x".repeat(60);
+    let target = format!("file:/{}", "x".repeat(54));
     let entry = format!("a={target}");
     let row = state(
         &[&entry, "abcdefghijklmnopqrst=tcp:x:1"],

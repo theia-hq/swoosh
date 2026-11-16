@@ -976,7 +976,7 @@ fn captured_selection_controls_membership_but_never_off_or_failed_policy() {
         let before = std::fs::read(scratch.home.serve_toml()).unwrap();
         let watcher = LiveServeToml::load(&scratch.home).unwrap();
         watcher.serving(&started);
-        let invocation = matches!(started, Started::Named(_));
+        let invocation = matches!(started, Started::Named(_) | Started::Adjusted(_));
         let path = scratch.home.serve_toml();
         let first = started.names()[0].clone();
         let changed = ServeToml {
@@ -1217,7 +1217,7 @@ fn what_a_running_serve_cannot_apply_is_named() {
     assert!(watcher.is_enabled(&service("ping")), "ping still served");
     assert_eq!(
         waiting.to_string(),
-        "the changed relay in serve.toml takes effect at the next start\nsaved service files applies to the next bare serve\nsaved service speed applies to the next bare serve"
+        "the changed relay in serve.toml takes effect at the next start\nsaved service files applies to the next bare or --with/--without serve\nsaved service speed applies to the next bare or --with/--without serve"
     );
     assert_eq!(
         super::Waiting {
@@ -1311,9 +1311,37 @@ fn a_retarget_of_a_running_name_is_named_and_checked() {
     );
     assert_eq!(
         waiting.to_string(),
-        "saved service ssh applies to the next bare serve"
+        "saved service ssh applies to the next bare or --with/--without serve"
     );
     let links = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.changed)
         .expect("the ledger reads");
     assert!(links.is_some(), "that start would warn of the shell");
+}
+
+/// A running `serve` reads a saved relative path at the directory it started in for every live read, never
+/// the process's directory at the time of the read: an unrelated edit names no change, and a retarget
+/// names one, anchored where the start was.
+#[test]
+fn a_relative_saved_path_is_read_live_at_the_captured_start_directory() {
+    let scratch = Scratch::new("relative-live");
+    list(&scratch, &["site=file:./site"]);
+    let captured = Path::new("/captured");
+    assert_ne!(std::env::current_dir().unwrap(), captured);
+    let watcher = LiveServeToml::load_at(&scratch.home, captured).expect("load");
+    let started = Started::bare_at(watcher.first_read(), captured).expect("the list starts");
+    assert_eq!(started.entries(), ["site=file:/captured/./site"]);
+    watcher.serving(&started);
+
+    scratch.only_off("other");
+    past_the_debounce();
+    let waiting = watcher.waiting();
+    assert!(waiting.is_empty(), "{waiting}");
+
+    list(&scratch, &["site=file:./next"]);
+    past_the_debounce();
+    assert_eq!(watcher.waiting().changed, ["site"]);
+    assert_eq!(
+        watcher.saved_services().expect("valid").entries(),
+        ["site=file:/captured/./next"]
+    );
 }

@@ -272,3 +272,62 @@ fn add_leaves_existing_saved_entries_as_saved() {
         "compared where this add ran, as the entry it was given is"
     );
 }
+
+/// `add` stores a relative path anchored at its one captured cwd and reports the stored entry, so a later
+/// observer anywhere reads the directory it was added in. Every other entry stays byte-identical, a hand-edited
+/// relative one included; a target with no relative path reports nothing extra.
+#[test]
+fn add_anchors_a_relative_path_at_its_cwd_and_reports_the_stored_entry() {
+    let saved = entries(&["site=file:./site", "Ping"]);
+    let mut file = ServeToml {
+        services: Some(saved.clone()),
+        ..ServeToml::default()
+    };
+    assert_eq!(
+        file.add(
+            &entries(&["public=file:./public", "web=echo:"]),
+            Path::new("/a")
+        )
+        .unwrap(),
+        [
+            Added::NewAnchored {
+                name: "public".into(),
+                target: "file:/a/./public".into()
+            },
+            Added::New("web".into())
+        ]
+    );
+    let mut expected = saved;
+    expected.extend(entries(&["public=file:/a/./public", "web=echo:"]));
+    assert_eq!(file.services, Some(expected));
+}
+
+/// Relativity is read from the one grammar: a path tail that is not absolute, in a primitive or a receive
+/// target. Literal `~` is not expanded, so it is relative too.
+#[test]
+fn a_relative_path_is_found_in_every_path_scheme_and_nowhere_else() {
+    let started = Started::Resumed(entries(&[
+        "a=file:./site",
+        "b=unix:db.sock",
+        "c=fifo:pipe+lossy",
+        "d=recv:inbox",
+        "e=file:~/notes",
+        "f=file:/srv/site",
+        "g=recv:/srv/in",
+        "h=recv:",
+        "i=tcp:localhost:80",
+        "j=stdin:+lossy",
+        "k=echo:",
+        "l=ping:",
+        "m=proxy:https://example.com",
+    ]));
+    let relative: Vec<_> = started
+        .names()
+        .into_iter()
+        .filter(|name| started.is_relative(name))
+        .collect();
+    assert_eq!(relative, ["a", "b", "c", "d", "e"]);
+    assert!(!started.is_relative("absent"));
+    // Text that does not parse is never taken for absolute: it fails closed as relative.
+    assert!(Started::Resumed(entries(&["bad=ping:80"])).is_relative("bad"));
+}
