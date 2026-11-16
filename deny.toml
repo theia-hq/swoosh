@@ -4,7 +4,7 @@
 # owns the complementary SUPPLY-CHAIN question it does not: no crate may resolve from an
 # unexpected git host or registry (a typosquat, a hijacked mirror, an accidental `git = "a-fork"`).
 # Sources are limited to crates.io, the theia-hq GitHub organization and listed repository URLs.
-# The NoQ entry permits the noq-proto patch in Cargo.toml. Its exact revision is pinned there;
+# The NoQ entry permits the noq-proto and noq-udp patches in Cargo.toml. Their exact revision is pinned there;
 # scripts/fork-watch.txt records the advisory dispositions and source evidence.
 #
 # bans and licenses stay out of scope. Run: cargo deny check sources advisories
