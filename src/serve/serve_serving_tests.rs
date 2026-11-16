@@ -1,150 +1,99 @@
-//! What a `serve` starts with: the named list, the recorded one, or the default, and how the record is
-//! read and written.
+use std::path::Path;
 
-use std::path::{Path, PathBuf};
-
-use super::{Added, EditError, Mistyped, Replaced, ServingError, Started};
-use crate::home::Home;
+use super::{Added, EditError, Mistyped, ServingError, Started};
+use crate::serve::{DefinitionCause, DefinitionError, Operand};
 use crate::serve_toml::ServeToml;
 
-/// What `home`'s `serve.toml` holds, as a `serve`'s watcher reads it when it claims the home.
-fn kept(home: &Home) -> ServeToml {
-    ServeToml::read(home).expect("read serve.toml")
+fn entries(list: &[&str]) -> Vec<String> {
+    list.iter().map(|text| (*text).to_owned()).collect()
 }
 
-/// A scratch home, removed on drop.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("sw-serving-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch home");
-        Self(dir)
-    }
-
-    fn home(&self) -> Home {
-        Home::resolve(Some(self.0.clone())).expect("the scratch home resolves")
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn named(entries: &[&str]) -> Vec<String> {
-    entries
-        .iter()
-        .map(|entry| super::service_entry(entry).expect("a service form"))
-        .collect()
-}
-
-/// A home that never named services serves `ping` and `speed`, and records nothing.
 #[test]
-fn first_bare_serve_serves_the_default() {
-    let scratch = Scratch::new("default");
-    let home = scratch.home();
-    let started =
-        Started::of(&[], &kept(&home), &home, Path::new("/")).expect("a fresh home starts");
-    assert_eq!(started, Started::Default);
-    assert_eq!(started.entries(), ["ping=ping:", "speed=speed:"]);
-    crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file, &home.serve_toml());
-    })
-    .expect("recording the default is a no-op");
-    assert!(
-        !home.serve_toml().exists(),
-        "a default start writes no list for the next one"
-    );
-}
-
-/// A named start is recorded, and the next bare start serves exactly that list, as a resume.
-#[test]
-fn a_named_list_is_what_the_next_bare_serve_resumes() {
-    let scratch = Scratch::new("resume");
-    let home = scratch.home();
-    let started = Started::of(
-        &named(&["ssh", "ping"]),
-        &kept(&home),
-        &home,
-        Path::new("/"),
-    )
-    .expect("named");
-    crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file, &home.serve_toml());
-    })
-    .expect("recorded");
-
-    let resumed = Started::of(&[], &kept(&home), &home, Path::new("/")).expect("resumed");
-    assert_eq!(
-        resumed,
-        Started::Resumed(vec!["ssh=sshd:".to_owned(), "ping=ping:".to_owned()]),
-        "a bare start after a named one resumes it"
-    );
-}
-
-/// A named start holds what the list held as a bare start reads it: a built-in written by hand as its name
-/// alone (`ping`) was listed, so a start naming it keeps its `off` row. Read the raw entries and `ping`, with
-/// no `=`, counts as new, and the start turns it back on (L7 fails open). A list a bare start refuses holds
-/// nothing that can be read, so every `off` row stays.
-#[test]
-fn a_named_start_keeps_off_for_a_hand_written_built_in() {
-    let path = Path::new("/home/serve.toml");
-    let started = Started::Named(vec!["ping=ping:".to_owned()]);
-    for (listed, why) in [
-        ("ping", "a hand-written built-in is listed"),
-        ("db", "a list a start refuses fails closed"),
-    ] {
-        let mut file = ServeToml {
-            services: Some(vec![listed.to_owned()]),
+fn default_empty_and_exclusive_selection_never_write_saved_policy() {
+    for services in [None, Some(vec![]), Some(entries(&["speed"]))] {
+        let file = ServeToml {
+            services,
             off: ["ping".to_owned()].into(),
             ..ServeToml::default()
         };
-        started.record(&mut file, path);
-        assert!(file.off.contains("ping"), "{why}");
-        assert_eq!(file.services, Some(vec!["ping=ping:".to_owned()]), "{why}");
-    }
-}
-
-/// Every entry of the record goes through the service-entry parser, never the flag parser: an entry that
-/// starts with `-` is refused with the file and the entry named, and nothing is served from it.
-#[test]
-fn resumed_list_is_parsed_as_services_never_flags() {
-    let scratch = Scratch::new("flags");
-    let home = scratch.home();
-    for line in ["--public=ssh", "-q", "not a service"] {
-        std::fs::write(
-            home.serve_toml(),
-            format!("services = [\"ssh=sshd:\", \"{line}\"]\n"),
+        let before = file.clone();
+        let selected = Started::of(
+            &entries(&["PING", "web=tcp:localhost:3000"]),
+            &file,
+            Path::new("/"),
         )
-        .expect("a planted list");
-        let refused = Started::of(&[], &kept(&home), &home, Path::new("/"));
-        let Err(error @ ServingError::NotAService { .. }) = refused else {
-            panic!("a `{line}` line must refuse, not serve: {refused:?}");
-        };
+        .unwrap();
+        assert_eq!(selected.entries(), ["ping=ping:", "web=tcp:localhost:3000"]);
+        let bare = Started::of(&[], &file, Path::new("/")).unwrap();
         assert_eq!(
-            error.to_string(),
-            format!(
-                "{} lists {line}, which is not a service\n  Edit that file to fix or remove the entry.",
-                home.serve_toml().display()
-            ),
-            "the refusal says what it saw and points at the file, naming no command"
+            bare.entries(),
+            match &file.services {
+                None => entries(&["ping=ping:", "speed=speed:"]),
+                Some(list) if list.is_empty() => vec![],
+                Some(_) => entries(&["speed=speed:"]),
+            }
         );
+        assert_eq!(file, before);
     }
 }
 
-/// A path target is recorded absolute, so a service manager started in another directory serves the
-/// same files; a `~/…` path is relative like any other (nothing expands it), and a dirless `recv:` (it
-/// saves into the inbox), raw `stdin:` and non-path targets are kept as typed.
 #[test]
-fn resumed_paths_are_absolute() {
-    let scratch = Scratch::new("paths");
-    let home = scratch.home();
-    let cwd = Path::new("/work/here");
-    let started = Started::of(
-        &named(&[
+fn duplicate_normalized_constructors_identify_the_second_operand() {
+    let file = ServeToml::default();
+    let error = Started::of(&entries(&["PING", "ping"]), &file, Path::new("/")).unwrap_err();
+    assert!(matches!(
+        error,
+        ServingError::Definition(DefinitionError {
+            operand: Operand::Positional,
+            index: 2,
+            cause: DefinitionCause::Collision,
+        })
+    ));
+}
+
+#[test]
+fn saved_lists_receive_complete_validation_without_preparing_backends() {
+    for invalid in [
+        "--public=ssh",
+        "-q",
+        "not a service",
+        "db",
+        "bad=ping:80",
+        "bad=file:",
+        "bad=proxy:https://user:secret@example.test",
+    ] {
+        let file = ServeToml {
+            services: Some(entries(&["ping", invalid])),
+            ..ServeToml::default()
+        };
+        let error = Started::bare(&file).unwrap_err();
+        assert!(matches!(
+            error,
+            ServingError::Definition(DefinitionError {
+                operand: Operand::Saved,
+                index: 2,
+                ..
+            })
+        ));
+        assert!(!format!("{error:?} {error}").contains(invalid));
+    }
+    // Syntax validity is independent of whether a path exists, stdin is a TTY, or HOME is set.
+    let file = ServeToml {
+        services: Some(entries(&[
+            "raw=stdin:",
+            "drop=recv:",
+            "logs=file:/nonexistent/source",
+            "pipe=fifo:/nonexistent/pipe",
+        ])),
+        ..ServeToml::default()
+    };
+    assert!(Started::bare_at(&file, Path::new("/work")).is_ok());
+}
+
+#[test]
+fn invocation_paths_keep_lexical_spelling_and_receive_suffixes() {
+    let selected = Started::positional(
+        &entries(&[
             "inbox=recv:",
             "drop=recv:.",
             "db=unix:db.sock",
@@ -154,22 +103,13 @@ fn resumed_paths_are_absolute() {
             "home=file:~/notes",
             "raw=stdin:",
             "web=tcp:127.0.0.1:8080",
+            "literal=recv:dir+lossy",
         ]),
-        &kept(&home),
-        &home,
-        cwd,
+        Path::new("/work/here"),
     )
-    .expect("named");
-    crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file, &home.serve_toml());
-    })
-    .expect("recorded");
-    let recorded = crate::serve_toml::ServeToml::read(&home)
-        .expect("the record")
-        .services
-        .unwrap_or_default();
+    .unwrap();
     assert_eq!(
-        recorded,
+        selected.entries(),
         [
             "inbox=recv:",
             "drop=recv:/work/here/.",
@@ -180,260 +120,130 @@ fn resumed_paths_are_absolute() {
             "home=file:/work/here/~/notes",
             "raw=stdin:",
             "web=tcp:127.0.0.1:8080",
+            "literal=recv:/work/here/dir+lossy",
         ]
     );
 }
 
-/// A service the record cannot hold as typed is refused, and nothing is saved: a line break in the cwd or
-/// the typed path, or a space at either end.
 #[test]
-fn a_path_with_a_newline_is_refused_not_recorded() {
-    let scratch = Scratch::new("newline");
-    let home = scratch.home();
-    for (typed, cwd) in [
+fn controls_boundary_spaces_and_unrepresentable_cwd_are_finite_refusals() {
+    for (entry, cwd) in [
         ("inbox=recv:.", "/work/dl\nssh=sshd:"),
         ("inbox=recv:dl\nssh=sshd:", "/work"),
         ("logs=file:app.log ", "/work"),
     ] {
-        let refused = Started::of(&[typed.to_owned()], &kept(&home), &home, Path::new(cwd));
-        let Err(error @ ServingError::CannotSave { .. }) = refused else {
-            panic!("{typed:?} under {cwd:?} must refuse, not be saved: {refused:?}");
-        };
-        assert!(
-            error.to_string().starts_with("inbox=recv:") || error.to_string().starts_with("logs="),
-            "the refusal names the service: {error}"
+        let error = Started::positional(&entries(&[entry]), Path::new(cwd)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid positional service definition at index 1: invalid target form"
         );
-        assert!(!home.serve_toml().exists(), "nothing is saved");
+        assert!(!format!("{error:?}").contains(entry));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let cwd = Path::new(std::ffi::OsStr::from_bytes(b"/work/\xff"));
+        let error = Started::positional(&entries(&["inbox=recv:."]), cwd).unwrap_err();
+        assert!(matches!(
+            error,
+            ServingError::Definition(DefinitionError {
+                cause: DefinitionCause::Encoding,
+                ..
+            })
+        ));
     }
 }
 
-/// A path that is not UTF-8 cannot be saved as the path it names, so it is refused.
 #[test]
-fn a_cwd_that_is_not_utf8_is_refused_not_recorded() {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let scratch = Scratch::new("utf8");
-    let home = scratch.home();
-    let cwd = Path::new(std::ffi::OsStr::from_bytes(b"/work/\xff"));
-    let refused = Started::of(&["inbox=recv:.".to_owned()], &kept(&home), &home, cwd);
-    assert!(
-        matches!(refused, Err(ServingError::CannotSave { .. })),
-        "{refused:?}"
-    );
-}
-
-/// The record is owner-only: it says what this machine serves.
-#[test]
-fn the_record_is_owner_only() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let scratch = Scratch::new("mode");
-    let home = scratch.home();
-    let started =
-        Started::of(&named(&["ping"]), &kept(&home), &home, Path::new("/")).expect("named");
-    crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file, &home.serve_toml());
-    })
-    .expect("recorded");
-    let mode = std::fs::metadata(home.serve_toml())
-        .expect("the record")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
-}
-
-/// What a named start replaces is read against the recorded list only: an entry it drops, a name it keeps
-/// under another target, and nothing for a name kept as it was. A home that never recorded a list has
-/// nothing to replace, though its default counts as listed elsewhere, and a bare start replaces nothing.
-#[test]
-fn a_named_start_replaces_only_what_was_recorded() {
-    let scratch = Scratch::new("replaces");
-    let home = scratch.home();
-    let start = |entries: &[&str], kept: &ServeToml| {
-        Started::of(&named(entries), kept, &home, Path::new("/")).expect("a start")
-    };
-    let recorded = ServeToml {
-        services: Some(named(&[
-            "ssh",
-            "web=tcp:localhost:3000",
-            "drop=recv:/srv/drop",
-        ])),
-        ..ServeToml::default()
-    };
-    assert_eq!(
-        start(&["ssh", "web=tcp:localhost:4000"], &recorded)
-            .replaces(&recorded, &home.serve_toml()),
-        Replaced {
-            dropped: vec!["drop=recv:/srv/drop".to_owned()],
-            retargeted: vec![(
-                "web".to_owned(),
-                "tcp:localhost:4000".to_owned(),
-                "tcp:localhost:3000".to_owned(),
-            )],
-        }
-    );
-    assert_eq!(
-        start(&["ssh"], &ServeToml::default()).replaces(&ServeToml::default(), &home.serve_toml()),
-        Replaced::default(),
-        "a never-named home's default is not reported as replaced"
-    );
-    assert_eq!(
-        start(&[], &recorded).replaces(&recorded, &home.serve_toml()),
-        Replaced::default(),
-        "a bare start replaces nothing"
-    );
-    // A built-in written by hand as its name alone is read as a bare start reads it, so dropping it is
-    // reported. Read the raw entries and `ping`, with no `=`, is skipped and its drop goes unsaid.
-    let by_hand = ServeToml {
-        services: Some(vec!["ping".to_owned(), "ssh".to_owned()]),
-        ..ServeToml::default()
-    };
-    assert_eq!(
-        start(&["ssh"], &by_hand).replaces(&by_hand, &home.serve_toml()),
-        Replaced {
-            dropped: vec!["ping=ping:".to_owned()],
-            retargeted: vec![],
-        },
-        "a hand-written built-in a named start drops is reported"
-    );
-}
-
-#[test]
-fn removing_saved_services_retains_all_off_names() {
-    let path = Path::new("/home/serve.toml");
-    for (listed, removed, remaining) in [
+fn removing_saved_services_retains_off_names_and_explicit_empty_membership() {
+    for (services, removed, expected) in [
         (
-            Some(vec!["ping", "ssh", "speed"]),
-            vec!["ssh"],
-            vec!["ping", "speed"],
+            Some(entries(&["ping", "speed"])),
+            vec!["ping"],
+            vec!["speed=speed:"],
         ),
-        (
-            Some(vec!["ping", "ssh", "speed"]),
-            vec!["ping", "ssh"],
-            vec!["speed"],
-        ),
-        (Some(vec!["ssh"]), vec!["ssh"], vec![]),
-        (None, vec!["ping"], vec!["speed"]),
+        (Some(entries(&["ping"])), vec!["ping"], vec![]),
         (None, vec!["ping", "speed"], vec![]),
+        (None, vec![], vec!["ping=ping:", "speed=speed:"]),
         (Some(vec![]), vec![], vec![]),
-        (None, vec![], vec!["ping", "speed"]),
     ] {
         let mut file = ServeToml {
-            services: listed.map(|entries| entries.into_iter().map(str::to_owned).collect()),
-            off: ["ping", "ssh", "speed", "unlisted"]
-                .map(str::to_owned)
-                .into(),
+            services,
+            off: ["ping".to_owned(), "unlisted".to_owned()].into(),
             ..ServeToml::default()
         };
         let off = file.off.clone();
-        let names: Vec<nauthy::Service> = removed
-            .iter()
-            .map(|name| name.parse().expect("a service name"))
-            .collect();
-
-        file.remove(&names, path)
-            .expect("listed names can be removed");
-
-        let expected = named(&remaining);
-        assert_eq!(file.services, Some(expected.clone()), "{removed:?}");
-        assert_eq!(file.off, off, "{removed:?}");
-        assert_eq!(
-            Started::bare(&file, path).expect("a saved list"),
-            Started::Resumed(expected)
-        );
+        let names: Vec<_> = removed.iter().map(|name| name.parse().unwrap()).collect();
+        file.remove(&names).unwrap();
+        assert_eq!(file.services, Some(entries(&expected)));
+        assert_eq!(file.off, off);
     }
 }
 
 #[test]
-fn readding_a_removed_service_keeps_it_off() {
-    let path = Path::new("/home/serve.toml");
+fn failed_whole_list_edits_are_atomic_and_readding_keeps_off_marks() {
+    let cwd = Path::new("/work");
     let mut file = ServeToml {
-        services: Some(named(&["ssh"])),
-        off: ["ssh".to_owned(), "unlisted".to_owned()].into(),
+        services: Some(entries(&["ping"])),
+        off: ["ping".to_owned()].into(),
         ..ServeToml::default()
     };
-    let off = file.off.clone();
-    file.remove(&["ssh".parse().expect("a service name")], path)
-        .expect("ssh is listed");
-    assert_eq!(file.services, Some(vec![]));
-    assert_eq!(file.off, off);
-
-    assert_eq!(
-        file.add(&named(&["ssh"]), Path::new("/"), path)
-            .expect("ssh can be re-added"),
-        [Added::New("ssh".to_owned())]
-    );
-    assert_eq!(file.services, Some(named(&["ssh"])));
-    assert_eq!(file.off, off);
-    assert_eq!(
-        file.add(&named(&["ssh"]), Path::new("/"), path)
-            .expect("adding the same target is idempotent"),
-        [Added::ListedOff("ssh".to_owned())]
-    );
-    assert_eq!(file.off, off);
-}
-
-#[test]
-fn a_missing_or_duplicate_removal_leaves_membership_and_off_unchanged() {
-    let path = Path::new("/home/serve.toml");
-    for listed in [Some(named(&["ping", "ssh"])), None, Some(vec![])] {
-        for removed in [vec!["ping", "missing"], vec!["ping", "ping"]] {
-            let mut file = ServeToml {
-                services: listed.clone(),
-                off: ["ping".to_owned(), "unlisted".to_owned()].into(),
-                ..ServeToml::default()
-            };
-            let before = file.clone();
-            let names: Vec<nauthy::Service> = removed
-                .iter()
-                .map(|name| name.parse().expect("a service name"))
-                .collect();
-
-            let refused = file.remove(&names, path);
-
-            if removed[0] == removed[1] {
-                assert!(matches!(
-                    refused,
-                    Err(EditError::Serving(ServingError::Mistyped(Mistyped::Twice(name))))
-                        if name == "ping"
-                ));
-            } else {
-                let missing = if listed.as_ref().is_some_and(Vec::is_empty) {
-                    "ping"
-                } else {
-                    "missing"
-                };
-                assert!(matches!(refused, Err(EditError::NotListed(name)) if name == missing));
-            }
-            assert_eq!(file, before, "{listed:?}, {removed:?}");
-        }
+    for added in [
+        vec!["speed", "bad=ping:80"],
+        vec!["PING", "ping"],
+        vec!["speed", "ping=echo:"],
+    ] {
+        let before = file.clone();
+        assert!(file.add(&entries(&added), cwd).is_err());
+        assert_eq!(file, before);
     }
+    for removed in [vec!["ping", "missing"], vec!["ping", "ping"]] {
+        let before = file.clone();
+        let names: Vec<_> = removed.iter().map(|name| name.parse().unwrap()).collect();
+        assert!(file.remove(&names).is_err());
+        assert_eq!(file, before);
+    }
+    assert!(matches!(
+        Mistyped::check_names(["ping", "PING"]),
+        Err(Mistyped(DefinitionError {
+            index: 2,
+            cause: DefinitionCause::Collision,
+            ..
+        }))
+    ));
+    file.remove(&["ping".parse().unwrap()]).unwrap();
+    assert_eq!(file.services, Some(vec![]));
+    assert_eq!(
+        file.add(&entries(&["ping"]), cwd).unwrap(),
+        [Added::New("ping".into())]
+    );
+    assert_eq!(
+        file.add(&entries(&["ping"]), cwd).unwrap(),
+        [Added::ListedOff("ping".into())]
+    );
+    assert!(file.off.contains("ping"));
 }
 
 #[test]
-fn removal_refuses_a_malformed_or_duplicate_saved_list_without_changes() {
-    let path = Path::new("/home/serve.toml");
-    for invalid in ["--public=ssh", "db", "ssh=sshd:"] {
+fn malformed_saved_membership_cannot_be_repaired_by_an_unrelated_edit() {
+    for invalid in ["db", "--public=ssh", "ping", "bad=ping:80"] {
         let mut file = ServeToml {
-            services: Some(vec!["ssh=sshd:".to_owned(), invalid.to_owned()]),
-            off: ["ssh".to_owned(), "unlisted".to_owned()].into(),
+            services: Some(entries(&["ping", invalid])),
+            off: ["ping".into()].into(),
             ..ServeToml::default()
         };
         let before = file.clone();
-
-        let refused = file.remove(&["ssh".parse().expect("a service name")], path);
-
-        if invalid == "ssh=sshd:" {
-            assert!(matches!(
-                refused,
-                Err(EditError::Serving(ServingError::Twice { name, .. })) if name == "ssh"
-            ));
-        } else {
-            assert!(matches!(
-                refused,
-                Err(EditError::Serving(ServingError::NotAService { line, .. })) if line == invalid
-            ));
-        }
-        assert_eq!(file, before, "{invalid}");
+        let error = file.remove(&["ping".parse().unwrap()]).unwrap_err();
+        assert!(matches!(
+            error,
+            EditError::Serving(ServingError::Definition(DefinitionError {
+                operand: Operand::Saved,
+                index: 2,
+                ..
+            }))
+        ));
+        assert_eq!(file, before);
+        assert!(file.add(&entries(&["speed"]), Path::new("/work")).is_err());
+        assert_eq!(file, before);
     }
 }

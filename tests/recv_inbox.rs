@@ -182,48 +182,120 @@ impl Drop for Scratch {
 
 /// A running `swoosh serve`, killed and reaped on drop.
 struct Served {
-    child: Child,
+    _child: KillOnDrop,
     key: NodeId,
     addr: SocketAddr,
 }
 
-impl Drop for Served {
+/// Only this test's owned child is killed and reaped, including readiness failures.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
+}
+
+/// The overall deadline bounds channel receives even when the child's pipe stays open and silent.
+fn read_banner(
+    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
+    deadline: Instant,
+) -> (String, String) {
+    let (mut key, mut addr) = (None, None);
+    while key.is_none() || addr.is_none() {
+        assert!(Instant::now() < deadline, "serve never printed its banner");
+        let line = lines
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("serve never printed its banner before the deadline")
+            .expect("read the banner");
+        if key.is_none()
+            && let Some(parsed) = line.strip_prefix("  key  ")
+        {
+            key = Some(parsed.trim().to_owned());
+        }
+        if let Some(found) = line.trim().strip_suffix("(this machine)") {
+            addr = Some(found.trim().to_owned());
+        }
+    }
+    (key.unwrap(), addr.unwrap())
+}
+
+#[test]
+fn readiness_uses_the_key_fact_row_and_keeps_the_loopback_address() {
+    let (sender, lines) = std::sync::mpsc::channel();
+    for line in [
+        "swoosh is serving",
+        "  key            ed01exampleid",
+        "  127.0.0.1:1234 (this machine)",
+    ] {
+        sender.send(Ok(line.to_owned())).unwrap();
+    }
+    assert_eq!(
+        read_banner(lines, Instant::now() + Duration::from_secs(1)),
+        ("ed01exampleid".to_owned(), "127.0.0.1:1234".to_owned())
+    );
+}
+
+#[test]
+fn a_service_named_key_does_not_replace_the_first_key_fact() {
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x11; 32]).to_string();
+    let (sender, lines) = std::sync::mpsc::channel();
+    for line in [
+        format!("  key            {key}"),
+        "  key  your devices  echo:".to_owned(),
+        "  127.0.0.1:1234 (this machine)".to_owned(),
+    ] {
+        sender.send(Ok(line)).unwrap();
+    }
+    assert_eq!(
+        read_banner(lines, Instant::now() + Duration::from_secs(1)),
+        (key, "127.0.0.1:1234".to_owned())
+    );
+}
+
+#[test]
+fn readiness_rejects_colon_records_and_a_silent_open_pipe_is_bounded() {
+    let (sender, lines) = std::sync::mpsc::channel();
+    sender.send(Ok("key: ed01exampleid".to_owned())).unwrap();
+    sender
+        .send(Ok("127.0.0.1:1234 (this machine)".to_owned()))
+        .unwrap();
+    drop(sender);
+    assert!(
+        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_secs(1)))
+            .is_err()
+    );
+    let (_sender, lines) = std::sync::mpsc::channel();
+    assert!(
+        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_millis(10)))
+            .is_err()
+    );
 }
 
 /// Start `serve <args>` in `cwd` and wait for its banner: the key it answers at and its loopback address.
 fn serve(scratch: &Scratch, cwd: &Path, args: &[&str]) -> Served {
-    let mut child = scratch
+    let child = scratch
         .serve(cwd, &[&["--verbose"][..], args].concat())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("serve spawns");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let mut lines = BufReader::new(stdout).lines();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let (mut key, mut addr) = (None, None);
-    while key.is_none() || addr.is_none() {
-        assert!(Instant::now() < deadline, "serve never printed its banner");
-        let line = lines
-            .next()
-            .expect("serve exited before its banner")
-            .expect("read the banner");
-        let line = line.trim();
-        if let Some(parsed) = line.strip_prefix("key: ") {
-            key = Some(parsed.parse::<NodeId>().expect("the banner's key"));
+    let mut child = KillOnDrop(child);
+    let stdout = child.0.stdout.take().expect("piped stdout");
+    // Bound both the wait and queued output; the pipe reader may block, never the deadline owner.
+    let (sender, lines) = std::sync::mpsc::sync_channel(16);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            // Keep draining after readiness, without closing the child's output pipe early.
+            let _ = sender.send(line);
         }
-        if let Some(found) = line.strip_suffix("(this machine)") {
-            addr = Some(found.trim().parse().expect("a loopback address"));
-        }
-    }
+    });
+    let (key, addr) = read_banner(lines, Instant::now() + Duration::from_secs(60));
     Served {
-        child,
-        key: key.unwrap(),
-        addr: addr.unwrap(),
+        _child: child,
+        key: key.parse().expect("the banner's key"),
+        addr: addr.parse().expect("a loopback address"),
     }
 }
 
@@ -272,7 +344,7 @@ async fn push(served: &Served, service: &str, link: nauthy::Link, name: &[u8], p
 }
 
 /// `inbox=recv:` saves a push into the inbox, created owner-only, and nothing into the directory `serve`
-/// was started in; the saved list keeps it dirless, so a resume saves there too.
+/// was started in; invocation selection leaves the saved list absent and the next bare start at defaults.
 #[tokio::test]
 async fn a_dirless_recv_saves_into_the_inbox() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -303,10 +375,16 @@ async fn a_dirless_recv_saves_into_the_inbox() {
         0,
         "nothing lands in the directory serve was started in"
     );
-    assert_eq!(
-        std::fs::read_to_string(scratch.home.join("serve.toml")).unwrap(),
-        "services = [\"inbox=recv:\"]\n",
-        "the saved list keeps the inbox, not the start directory"
+    let home = swoosh::home::Home::resolve(Some(scratch.home.clone())).unwrap();
+    let saved = swoosh::serve_toml::ServeToml::read(&home).unwrap();
+    assert_eq!(saved.services, None, "the invocation inbox is not saved");
+    assert!(saved.off.is_empty(), "launch does not change off policy");
+    assert!(
+        matches!(
+            swoosh::serve::Started::bare(&saved).unwrap(),
+            swoosh::serve::Started::Default
+        ),
+        "the next bare start uses defaults, not the invocation inbox"
     );
 }
 

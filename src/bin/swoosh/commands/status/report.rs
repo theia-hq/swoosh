@@ -22,7 +22,6 @@ use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::{Date, Root, RootPlace};
 use swoosh::root_key::RootKey;
 use swoosh::roster::{Member, RevokedDevice};
-use swoosh::serve::ServingError;
 use swoosh::standing::{Standing, StandingError};
 use swoosh::{badge, roster, standing, sync, touch};
 use tightbeam::identity::AsVerifyKey as _;
@@ -624,7 +623,7 @@ fn renew_line(row: &DeviceRow, root: &str) -> Option<String> {
 /// Alternate report formatting retains the source of an I/O refusal without repeating a path.
 fn serving_file_notice(home: &Home, error: ReadError) -> String {
     match error {
-        ReadError::List(error @ ServingError::Mistyped(_)) => format!(
+        ReadError::List(error) => format!(
             "{}: {:#}",
             EscapedPath(&home.serve_toml()),
             eyre::Report::new(error)

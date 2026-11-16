@@ -62,6 +62,82 @@ struct Served {
     addr: String,
 }
 
+/// The overall deadline bounds channel receives even when the child's pipe stays open and silent.
+fn read_banner(
+    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
+    deadline: Instant,
+) -> (String, String) {
+    let (mut key, mut addr) = (None, None);
+    while key.is_none() || addr.is_none() {
+        assert!(Instant::now() < deadline, "serve never printed its banner");
+        let line = lines
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("serve never printed its banner before the deadline")
+            .expect("read the banner");
+        if key.is_none()
+            && let Some(parsed) = line.strip_prefix("  key  ")
+        {
+            key = Some(parsed.trim().to_owned());
+        }
+        if let Some(found) = line.trim().strip_suffix("(this machine)") {
+            addr = Some(found.trim().to_owned());
+        }
+    }
+    (key.unwrap(), addr.unwrap())
+}
+
+#[test]
+fn readiness_uses_the_key_fact_row_and_keeps_the_loopback_address() {
+    let (sender, lines) = std::sync::mpsc::channel();
+    for line in [
+        "swoosh is serving",
+        "  key            ed01exampleid",
+        "  127.0.0.1:1234 (this machine)",
+    ] {
+        sender.send(Ok(line.to_owned())).unwrap();
+    }
+    assert_eq!(
+        read_banner(lines, Instant::now() + Duration::from_secs(1)),
+        ("ed01exampleid".to_owned(), "127.0.0.1:1234".to_owned())
+    );
+}
+
+#[test]
+fn a_service_named_key_does_not_replace_the_first_key_fact() {
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x11; 32]).to_string();
+    let (sender, lines) = std::sync::mpsc::channel();
+    for line in [
+        format!("  key            {key}"),
+        "  key  your devices  echo:".to_owned(),
+        "  127.0.0.1:1234 (this machine)".to_owned(),
+    ] {
+        sender.send(Ok(line)).unwrap();
+    }
+    assert_eq!(
+        read_banner(lines, Instant::now() + Duration::from_secs(1)),
+        (key, "127.0.0.1:1234".to_owned())
+    );
+}
+
+#[test]
+fn readiness_rejects_colon_records_and_a_silent_open_pipe_is_bounded() {
+    let (sender, lines) = std::sync::mpsc::channel();
+    sender.send(Ok("key: ed01exampleid".to_owned())).unwrap();
+    sender
+        .send(Ok("127.0.0.1:1234 (this machine)".to_owned()))
+        .unwrap();
+    drop(sender);
+    assert!(
+        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_secs(1)))
+            .is_err()
+    );
+    let (_sender, lines) = std::sync::mpsc::channel();
+    assert!(
+        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_millis(10)))
+            .is_err()
+    );
+}
+
 /// Serve `home` with `entries` over iroh with `--local`, and wait for its banner.
 fn serve(home: &Path, entries: &[&str]) -> Served {
     use std::os::unix::fs::PermissionsExt as _;
@@ -69,7 +145,7 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
     let runtime = home.join("run");
     std::fs::create_dir_all(&runtime).unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+    let child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(home)
         .args(["serve", "--local", "--verbose"])
@@ -81,28 +157,21 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
         .stderr(Stdio::null())
         .spawn()
         .expect("serve spawns");
-    let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
-    let child = KillOnDrop(child);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let (mut key, mut addr) = (None, None);
-    while key.is_none() || addr.is_none() {
-        assert!(Instant::now() < deadline, "serve never printed its banner");
-        let line = lines
-            .next()
-            .expect("serve exited before its banner")
-            .expect("read the banner");
-        let line = line.trim();
-        if let Some(parsed) = line.strip_prefix("key: ") {
-            key = Some(parsed.to_owned());
+    let mut child = KillOnDrop(child);
+    let stdout = child.0.stdout.take().expect("piped stdout");
+    // Bound both the wait and queued output; the pipe reader may block, never the deadline owner.
+    let (sender, lines) = std::sync::mpsc::sync_channel(16);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            // Keep draining after readiness, without closing the child's output pipe early.
+            let _ = sender.send(line);
         }
-        if let Some(found) = line.strip_suffix("(this machine)") {
-            addr = Some(found.trim().to_owned());
-        }
-    }
+    });
+    let (key, addr) = read_banner(lines, Instant::now() + Duration::from_secs(60));
     Served {
         _child: child,
-        key: key.unwrap(),
-        addr: addr.unwrap(),
+        key,
+        addr,
     }
 }
 

@@ -64,7 +64,7 @@ impl Drop for Scratch {
 
 /// A running `swoosh serve`, killed and reaped on drop.
 struct Served {
-    child: Child,
+    child: KillOnDrop,
     key: NodeId,
     addr: SocketAddr,
     /// Each line it wrote to stderr so far, read on a thread of its own.
@@ -95,7 +95,7 @@ impl Served {
     async fn exited(&mut self) -> std::process::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
+            if let Some(status) = self.child.0.try_wait().unwrap() {
                 return status;
             }
             assert!(Instant::now() < deadline, "serve did not stop");
@@ -104,17 +104,24 @@ impl Served {
     }
 }
 
-impl Drop for Served {
+/// Only this test's owned child is killed and reaped, including readiness failures.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
 /// Start `swoosh serve` on `home` over `quirk+noise` with `flags` and `entries`, its stderr read line by
 /// line on a thread of its own.
-fn spawn_serve(home: &Path, flags: &[&str], entries: &[&str]) -> (Child, Arc<Mutex<Vec<String>>>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+fn spawn_serve(
+    home: &Path,
+    flags: &[&str],
+    entries: &[&str],
+) -> (KillOnDrop, Arc<Mutex<Vec<String>>>) {
+    let child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(home)
         .args(["serve", "--transport", "quirk+noise"])
@@ -127,8 +134,9 @@ fn spawn_serve(home: &Path, flags: &[&str], entries: &[&str]) -> (Child, Arc<Mut
         .stderr(Stdio::piped())
         .spawn()
         .expect("serve spawns");
+    let mut child = KillOnDrop(child);
     let stderr = Arc::new(Mutex::new(Vec::new()));
-    let reader = BufReader::new(child.stderr.take().expect("piped stderr"));
+    let reader = BufReader::new(child.0.stderr.take().expect("piped stderr"));
     let lines_read = Arc::clone(&stderr);
     std::thread::spawn(move || {
         for line in reader.lines().map_while(Result::ok) {
@@ -138,32 +146,100 @@ fn spawn_serve(home: &Path, flags: &[&str], entries: &[&str]) -> (Child, Arc<Mut
     (child, stderr)
 }
 
-/// Serve `home` with `entries` over `quirk+noise`, and wait for its banner: the key it answers at and its
-/// loopback address, from the transport block `--verbose` adds.
-fn serve(home: &Path, entries: &[&str]) -> Served {
-    let (mut child, stderr) = spawn_serve(home, &["--verbose"], entries);
-    let stdout = child.stdout.take().expect("piped stdout");
-    let mut lines = BufReader::new(stdout).lines();
-    let deadline = Instant::now() + Duration::from_secs(60);
+/// The overall deadline bounds channel receives even when the child's pipe stays open and silent.
+fn read_banner(
+    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
+    deadline: Instant,
+) -> (String, String) {
     let (mut key, mut addr) = (None, None);
     while key.is_none() || addr.is_none() {
         assert!(Instant::now() < deadline, "serve never printed its banner");
         let line = lines
-            .next()
-            .expect("serve exited before its banner")
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("serve never printed its banner before the deadline")
             .expect("read the banner");
-        let line = line.trim();
-        if let Some(parsed) = line.strip_prefix("key: ") {
-            key = Some(parsed.parse::<NodeId>().expect("the banner's key"));
+        if key.is_none()
+            && let Some(parsed) = line.strip_prefix("  key  ")
+        {
+            key = Some(parsed.trim().to_owned());
         }
-        if let Some(found) = line.strip_suffix("(this machine)") {
-            addr = Some(found.trim().parse().expect("a loopback address"));
+        if let Some(found) = line.trim().strip_suffix("(this machine)") {
+            addr = Some(found.trim().to_owned());
         }
     }
+    (key.unwrap(), addr.unwrap())
+}
+
+#[test]
+fn readiness_uses_the_key_fact_row_and_keeps_the_loopback_address() {
+    let (sender, lines) = std::sync::mpsc::channel();
+    for line in [
+        "swoosh is serving",
+        "  key            ed01exampleid",
+        "  127.0.0.1:1234 (this machine)",
+    ] {
+        sender.send(Ok(line.to_owned())).unwrap();
+    }
+    assert_eq!(
+        read_banner(lines, Instant::now() + Duration::from_secs(1)),
+        ("ed01exampleid".to_owned(), "127.0.0.1:1234".to_owned())
+    );
+}
+
+#[test]
+fn a_service_named_key_does_not_replace_the_first_key_fact() {
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x11; 32]).to_string();
+    let (sender, lines) = std::sync::mpsc::channel();
+    for line in [
+        format!("  key            {key}"),
+        "  key  your devices  echo:".to_owned(),
+        "  127.0.0.1:1234 (this machine)".to_owned(),
+    ] {
+        sender.send(Ok(line)).unwrap();
+    }
+    assert_eq!(
+        read_banner(lines, Instant::now() + Duration::from_secs(1)),
+        (key, "127.0.0.1:1234".to_owned())
+    );
+}
+
+#[test]
+fn readiness_rejects_colon_records_and_a_silent_open_pipe_is_bounded() {
+    let (sender, lines) = std::sync::mpsc::channel();
+    sender.send(Ok("key: ed01exampleid".to_owned())).unwrap();
+    sender
+        .send(Ok("127.0.0.1:1234 (this machine)".to_owned()))
+        .unwrap();
+    drop(sender);
+    assert!(
+        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_secs(1)))
+            .is_err()
+    );
+    let (_sender, lines) = std::sync::mpsc::channel();
+    assert!(
+        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_millis(10)))
+            .is_err()
+    );
+}
+
+/// Serve `home` with `entries` over `quirk+noise`, and wait for its banner: the key it answers at and its
+/// loopback address, from the transport block `--verbose` adds.
+fn serve(home: &Path, entries: &[&str]) -> Served {
+    let (mut child, stderr) = spawn_serve(home, &["--verbose"], entries);
+    let stdout = child.0.stdout.take().expect("piped stdout");
+    // Bound both the wait and queued output; the pipe reader may block, never the deadline owner.
+    let (sender, lines) = std::sync::mpsc::sync_channel(16);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            // Keep draining after readiness, without closing the child's output pipe early.
+            let _ = sender.send(line);
+        }
+    });
+    let (key, addr) = read_banner(lines, Instant::now() + Duration::from_secs(60));
     Served {
         child,
-        key: key.unwrap(),
-        addr: addr.unwrap(),
+        key: key.parse().expect("the banner's key"),
+        addr: addr.parse().expect("a loopback address"),
         stderr,
     }
 }
@@ -175,7 +251,7 @@ async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, std::thread::Joi
     use std::io::Read as _;
 
     let (mut child, stderr) = spawn_serve(home, &["--quiet"], entries);
-    let mut pipe = child.stdout.take().expect("piped stdout");
+    let mut pipe = child.0.stdout.take().expect("piped stdout");
     // Read to EOF, so joining the thread after the child exits yields everything it printed.
     let printed = std::thread::spawn(move || {
         let mut text = String::new();
@@ -186,7 +262,7 @@ async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, std::thread::Joi
     let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
         assert!(
-            child.try_wait().unwrap().is_none(),
+            child.0.try_wait().unwrap().is_none(),
             "serve exited before its socket answered"
         );
         assert!(Instant::now() < deadline, "serve's socket never answered");
@@ -569,7 +645,7 @@ async fn a_quiet_serve_stopped_over_the_wire_says_who_stopped_it() {
     );
     let printed = stdout.join().expect("the stdout reader joins");
     assert!(
-        !printed.contains("key: "),
+        !printed.lines().any(|line| line.starts_with("  key  ")),
         "--quiet prints no banner: {printed}"
     );
 }
@@ -812,7 +888,7 @@ async fn a_serve_of_a_never_public_engine_starts_over_an_unreadable_ledger_and_a
         .expect("the link is admitted once the ledger reads again");
     assert!(echoes(&mut write, &mut read).await, "and served");
 
-    // The default `ping` and `speed` first, since a named start saves its list and a bare one resumes it.
+    // A bare start still selects the defaults; explicit constructors do not save a list.
     let scratch = Scratch::new("ledger-unreadable-default");
     std::fs::create_dir(scratch.home().links()).unwrap();
     serve(&scratch.0, &[]).stderr_line("the grants ledger cannot be read");

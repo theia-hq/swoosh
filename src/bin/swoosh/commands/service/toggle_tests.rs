@@ -9,6 +9,46 @@ use swoosh::serve_toml::ServeToml;
 
 use super::{ServiceToggleCmd, Usage, Way};
 
+#[tokio::test]
+async fn toggle_cli_discards_invalid_names_before_home_access() {
+    let home = temp_home("safe-toggle-name");
+    let original = b"services = ['ping']\noff = ['ping']\n";
+    std::fs::write(home.serve_toml(), original).unwrap();
+    for (verb, way) in [("on", Way::On), ("off", Way::Off)] {
+        for entry in [
+            "bad=proxy:https://user:secret@host.test/?token=private",
+            "proxy:https://user:secret@host.test",
+            "recv:/user:secret@host.test",
+            "control.stop",
+        ] {
+            let Some(crate::Command::Service { command: Some(cmd) }) =
+                crate::Cli::try_parse_from(["swoosh", "service", verb, entry])
+                    .unwrap()
+                    .command
+            else {
+                panic!("service toggle parses");
+            };
+            let cmd = match cmd {
+                super::super::ServiceCmd::On(cmd) | super::super::ServiceCmd::Off(cmd) => cmd,
+                _ => panic!("toggle leaf"),
+            };
+            let debug = format!("{cmd:?}");
+            let error = cmd.run(&home, way).await.unwrap_err();
+            assert!(error.downcast_ref::<Usage>().is_some());
+            assert_eq!(error.to_string(), "invalid service name at index 1");
+            for cause in error.chain() {
+                let text = format!("{cause:?} {cause} {debug}");
+                for forbidden in [entry, "secret", "private", "host.test", "NameError"] {
+                    assert!(!text.contains(forbidden), "{text}");
+                }
+            }
+            assert_eq!(std::fs::read(home.serve_toml()).unwrap(), original);
+            assert_eq!(std::fs::read_dir(home.dir()).unwrap().count(), 1);
+        }
+    }
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
 /// A fresh, empty home under a unique temp dir, so parallel tests never share a `<home>/serve.toml`.
 fn temp_home(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!("swoosh-toggle-{tag}-{}", std::process::id()));
@@ -252,10 +292,7 @@ async fn service_toggle_refuses_a_list_that_is_not_services() {
     std::fs::write(home.serve_toml(), "services = [\"ping=ping:\", \"db\"]\n")
         .expect("a hand-edited list");
     let before = std::fs::read_to_string(home.serve_toml()).expect("the file");
-    let line = format!(
-        "{} lists db, which is not a service\n  Edit that file to fix or remove the entry.",
-        home.serve_toml().display()
-    );
+    let line = "invalid saved service definition at index 2: invalid target form";
     for way in [Way::On, Way::Off] {
         let error = leaf(&["ping"])
             .run(&home, way)

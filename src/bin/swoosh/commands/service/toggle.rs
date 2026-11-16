@@ -21,17 +21,16 @@
 //! Two racing toggles cannot lose an edit: the read-modify-write runs under `home.lock`, and the rewrite goes
 //! through the home's one write routine, so a crash mid-write can never leave a torn list.
 
-use std::path::Path;
-
 use clap::Args;
 use nauthy::Service;
 use swoosh::escape::Escaped;
 use swoosh::home::{Home, HomeWrite};
-use swoosh::names::{Name, NameError};
+use swoosh::names::Name;
 use swoosh::serve::{ServingError, Started};
 use swoosh::serve_toml::ServeToml;
 
 use super::Usage;
+use super::name_input::NameError;
 
 /// Turn a service on or off; the leaf carries the service, and the subcommand says which way.
 #[derive(Debug, Args)]
@@ -53,15 +52,23 @@ pub enum Slot {
     Service(Service),
     /// Text shaped like a machine (`me/nas`), kept so its refusal can name it.
     Machine(String),
+    /// Identifies an invalid service name by its one-based position in the input list. Contains no input text or underlying parser error.
+    Invalid,
 }
 
-/// The value parser: a `/` or a root's `root:` makes a machine, anything else meets the service name rule,
-/// so a dotted internal route (`control.stop`) is still refused at parse.
-fn slot(text: &str) -> Result<Slot, NameError> {
+// A total parser prevents clap from echoing invalid NAME text; here() refuses the categorical result.
+fn slot(text: &str) -> Result<Slot, core::convert::Infallible> {
+    // Definitions and URLs must not be retained as machine-shaped operands.
+    if text.contains('=')
+        || (text.contains(':') && !swoosh::root_key::is_prefixed(text))
+        || text.contains('@')
+    {
+        return Ok(Slot::Invalid);
+    }
     if is_machine(text) {
         return Ok(Slot::Machine(text.to_owned()));
     }
-    swoosh::names::service(text).map(Slot::Service)
+    Ok(swoosh::names::service(text).map_or(Slot::Invalid, Slot::Service))
 }
 
 /// What was typed after the service: a machine (`me/nas`), or a second word, which `on` and `off` never
@@ -131,6 +138,7 @@ impl ServiceToggleCmd {
     pub fn here(&self, way: Way) -> Result<&Service, Usage> {
         let verb = way.verb();
         let machine = match (&self.service, &self.machine) {
+            (Slot::Invalid, _) => return Err(Usage(NameError { index: 1 }.to_string())),
             (Slot::Service(service), None) => return Ok(service),
             (Slot::Service(_), Some(After::Word)) => {
                 return Err(Usage(format!("swoosh service {verb} takes one service")));
@@ -148,7 +156,7 @@ impl ServiceToggleCmd {
         };
         let service = match &self.service {
             Slot::Service(service) => service.as_str(),
-            Slot::Machine(_) => "<service>",
+            Slot::Machine(_) | Slot::Invalid => "<service>",
         };
         Err(Usage(format!(
             "{head}\n  To run it on {name}:\n    swoosh ssh {} -- swoosh service {verb} {service}",
@@ -167,9 +175,11 @@ impl ServiceToggleCmd {
         let service = self.here(way)?;
         let name = service.as_str();
         let home_lock = HomeWrite::take(home).await?;
-        let path = home.serve_toml();
-        let toggled =
-            ServeToml::try_update(&home_lock, home, |file| toggle(file, name, way, &path))?;
+        let cwd = std::env::current_dir()?;
+        let toggled = ServeToml::try_update(&home_lock, home, |file| {
+            Started::bare_at(file, &cwd).map_err(Refused::List)?;
+            toggle(file, name, way)
+        })?;
         drop(home_lock);
         let line = match (toggled, way) {
             (Err(Refused::NotListed), Way::On) => eyre::bail!(
@@ -195,10 +205,9 @@ enum Refused {
     List(ServingError),
 }
 
-/// Turn `name` `way` in `file`, the `serve.toml` at `path`, which holds the list it must be on. The list
-/// is read as a bare `serve` reads it, so a hand-written `ping` is listed here as it is served there.
-fn toggle(file: &mut ServeToml, name: &str, way: Way, path: &Path) -> Result<Toggled, Refused> {
-    let listed = Started::bare(file, path)
+// Read membership through bare selection so shorthand names retain the same meaning.
+fn toggle(file: &mut ServeToml, name: &str, way: Way) -> Result<Toggled, Refused> {
+    let listed = Started::bare(file)
         .map_err(Refused::List)?
         .names()
         .iter()

@@ -265,7 +265,7 @@ impl Yours {
         // list `serve` refuses serves nothing, and the hint stays quiet.
         let served = swoosh::serve_toml::ServeToml::read(home)
             .ok()
-            .and_then(|file| swoosh::serve::Started::bare(&file, &home.serve_toml()).ok())
+            .and_then(|file| swoosh::serve::Started::bare(&file).ok())
             .map(|started| started.names())
             .unwrap_or_default();
         Ok(Self {

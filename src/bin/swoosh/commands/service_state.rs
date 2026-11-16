@@ -42,9 +42,13 @@ pub(super) struct ServiceState {
 impl ServiceState {
     /// Read through the trusted, bounded file opener and the same-UID socket client, never a transport.
     pub async fn read(home: &Home, mode: ReadMode) -> Result<Self, ReadError> {
+        let cwd = std::env::current_dir().map_err(|source| ServeTomlError::Io {
+            path: home.serve_toml(),
+            source,
+        })?;
         let file = ServeToml::read(home)?;
-        // TOML decoding alone accepts duplicate names and entries that a bare start refuses.
-        let started = Started::bare(&file, &home.serve_toml())?;
+        // TOML decoding alone does not establish complete definition validity.
+        let started = Started::bare_at(&file, &cwd)?;
         let client = match ControlClient::resolve(home) {
             Ok(client) => Some(client),
             Err(ControlError::NoResident) => None,
@@ -166,8 +170,9 @@ impl ShareTarget {
                 if home.resident_presence().await? != ResidentPresence::Free {
                     eyre::bail!("cannot confirm that no node is serving this home");
                 }
+                let cwd = std::env::current_dir()?;
                 let file = ServeToml::read(home)?;
-                let entries = Started::bare(&file, &home.serve_toml())?.entries();
+                let entries = Started::bare_at(&file, &cwd)?.entries();
                 let target = entries
                     .iter()
                     .find_map(|entry| {

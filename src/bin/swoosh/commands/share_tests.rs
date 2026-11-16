@@ -1501,7 +1501,7 @@ async fn an_anyone_link_to_an_unknown_scheme_is_refused() {
         let ran = share(&home, args).await;
         assert_eq!(
             ran.refusal(),
-            "\"gopher:x\" is not a target serve binds",
+            "invalid saved service definition at index 1: unsupported target scheme",
             "{args:?}"
         );
     }

@@ -1,24 +1,19 @@
 //! `<home>/serve.toml`: what `serve` runs. One file holds the services a bare `serve` resumes, the
 //! services turned off, the relay this machine is reached through and the resolver it publishes to.
 //!
-//! Every writer changes it under `home.lock`, re-reading it first and keeping the fields it does not set:
-//! a `serve` that names its services (once its routes bind), `service add|rm`, `service on|off`, and `serve
-//! --relay` or `--resolver`. A person is not meant to open it.
+//! Every writer holds home.lock and preserves fields it does not set. service add|rm edits saved
+//! membership; service on|off edits off names. Launch may retain reach settings, never service membership
+//! or off names.
 //!
-//! A running `serve` reads the file through one [`LiveServeToml`], from its start to its end: the services
-//! it starts with, the relay and the resolver it binds over, and the services off all come from that one
-//! watcher's first read, and every later read is that watcher's too, so no two parts of a `serve` ever
-//! hold the file as read at two different moments. Its gate refuses a service turned off and serves one
-//! turned back on, with no restart, and its status reports the same set the gate refuses.
+//! One LiveServeToml reads saved policy throughout the run. Bare startup uses its saved/default services;
+//! explicit startup uses captured constructors. Off policy remains live in both modes.
 //! A failed live policy read retains accepted configuration and refuses new admissions to bound user
 //! services until a valid read. Initial absence still permits defaults. Internal routes remain available;
 //! existing streams are not terminated by this policy change.
 //!
-//! A running `serve` takes service away live and gives it only when it starts, where its routes are
-//! proven and its banner says what it serves. So a service dropped from `services` is refused on its next
-//! stream, as one turned off is, while a service added or retargeted there, and a changed relay or
-//! resolver, wait for the next `serve`; the watcher names what waits ([`Waiting`]) so the run can say so
-//! once.
+//! Saved removal refuses new streams only for a configuration-following run. Saved additions and target
+//! edits do not construct routes. Invocation-selected membership and targets stay fixed. Off policy and
+//! failed-policy refusal remain live in both modes; existing streams are not promised to end.
 
 use core::time::Duration;
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,10 +49,7 @@ const RESOLVER: &str = "resolver";
 /// What `<home>/serve.toml` holds. An absent file holds nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServeToml {
-    /// The services a bare `serve` starts, paths made absolute, in order: as the last `serve` that named its
-    /// services gave them, edited since by `service add` and `service rm`. `None` on a home that never
-    /// named any, which serves the default; `Some` and empty once `service rm` took the last one, which
-    /// serves nothing, so the default never returns on its own.
+    /// The saved list used by a bare start; an explicitly empty list selects no user services.
     pub services: Option<Vec<String>>,
     /// The services turned off.
     pub off: BTreeSet<String>,
@@ -70,6 +62,9 @@ pub struct ServeToml {
 /// Why `<home>/serve.toml` could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeTomlError {
+    /// Identifies an invalid definition by operand, one-based index, and finite cause. Contains no definition text or underlying parser error.
+    #[error(transparent)]
+    Definition(#[from] crate::serve::ServingError),
     /// The file exists and could not be read or written, or another user owns it, or others can write it.
     #[error("could not use {}", EscapedPath(path))]
     Io {
@@ -309,15 +304,21 @@ struct Serving {
     /// The names its services are bound under, each with its target. Only these are refused for leaving
     /// `services`: the node's own routes are bound by no entry.
     bound: BTreeMap<String, String>,
+    selection: Selection,
     /// The relay the file held once the run saved what it was told, which is the one it bound.
     relay: Option<RelayUrl>,
     /// The resolver, likewise.
     resolver: Option<ResolverUrl>,
 }
 
-/// What `serve.toml` holds that a running `serve` applies only when it next starts: a relay or a resolver
-/// other than the one it bound, the services it lists that the run does not serve, and the ones it serves
-/// under another target. Empty when the file holds nothing the run is not doing.
+#[derive(Clone, Copy)]
+enum Selection {
+    Invocation,
+    Saved,
+}
+
+/// Saved services or reach settings that differ from this run's captured startup configuration.
+/// Saved service changes are a basis for a later bare start, not a promise about repeating explicit constructors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Waiting {
     /// The relay changed.
@@ -338,53 +339,28 @@ impl Waiting {
 }
 
 impl core::fmt::Display for Waiting {
-    /// One line naming each change that waits: "the changed relay and the added service drop in serve.toml
-    /// take effect the next time serve starts" (printed after `warning: `).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut items = Vec::new();
+        let mut lines = Vec::new();
         if self.relay {
-            items.push("the changed relay".to_owned());
+            lines.push("the changed relay in serve.toml takes effect at the next start".to_owned());
         }
         if self.resolver {
-            items.push("the changed resolver".to_owned());
+            lines.push(
+                "the changed resolver in serve.toml takes effect at the next start".to_owned(),
+            );
         }
-        // Each name passed the service-name parser, so it holds nothing a terminal would act on.
-        match self.added.as_slice() {
-            [] => {}
-            [one] => items.push(format!("the added service {one}")),
-            many => items.push(format!("the added services {}", and_list(many))),
+        for name in self.added.iter().chain(&self.changed) {
+            lines.push(format!(
+                "saved service {name} applies to the next bare serve"
+            ));
         }
-        match self.changed.as_slice() {
-            [] => {}
-            [one] => items.push(format!("the changed service {one}")),
-            many => items.push(format!("the changed services {}", and_list(many))),
-        }
-        let verb = if items.len() == 1 && self.added.len() < 2 && self.changed.len() < 2 {
-            "takes"
-        } else {
-            "take"
-        };
-        write!(
-            f,
-            "{} in serve.toml {verb} effect the next time serve starts",
-            and_list(&items)
-        )
+        f.write_str(&lines.join("\n"))
     }
 }
 
-/// `items` as a list a sentence reads: "a", "a and b", "a, b and c".
-fn and_list(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [head @ .., last] => format!("{} and {last}", head.join(", ")),
-    }
-}
-
-/// The names `file`'s services run, each with its target, as a bare `serve` started over the file at `path`
-/// would bind them; `None` when it lists a service that is not one.
-fn running(file: &ServeToml, path: &Path) -> Option<BTreeMap<String, String>> {
-    Started::bare(file, path)
+// Use the captured cwd for every snapshot, without consulting the current process directory.
+fn running(file: &ServeToml, cwd: &Path) -> Option<BTreeMap<String, String>> {
+    Started::bare_at(file, cwd)
         .ok()
         .map(|started| targets(&started))
 }
@@ -411,14 +387,14 @@ struct Watched {
 
 /// What a [`LiveServeToml`] read last.
 struct Held {
+    // Every snapshot uses the startup basis, never the watcher's ambient working directory.
+    cwd: PathBuf,
     /// The file, as the last good read found it.
     file: ServeToml,
-    /// The names `file`'s services run, each with its target, as a bare `serve` would start them (the
-    /// default when it never recorded a list). `None` only while the first read lists a service that is not one: a
-    /// `serve` that named its services started over such a file, and its own write replaces it.
+    /// The last accepted saved/default service targets, not the invocation-selected targets.
+    /// None when no valid service list is available; explicit launch never repairs it.
     running: Option<BTreeMap<String, String>>,
-    /// What the run serves, once its routes bound; `None` before, when nothing is refused for leaving
-    /// `services` and nothing waits.
+    /// Captured startup targets and selection origin, absent until routes bind.
     serving: Option<Serving>,
     /// Admission follows read health, never a fabricated change to the accepted file.
     policy: LivePolicy,
@@ -450,22 +426,41 @@ impl LiveServeToml {
     /// [`ServeTomlError`] when the file cannot be read, is loose, or is damaged: a `serve` does not start
     /// on a file it cannot read.
     pub fn load(home: &Home) -> Result<Self, ServeTomlError> {
-        let path = home.serve_toml();
-        let read = read_stamped(&path)?;
-        Ok(Self::from_read(path, read))
+        let cwd = std::env::current_dir().map_err(|source| ServeTomlError::Io {
+            path: home.serve_toml(),
+            source,
+        })?;
+        Self::load_at(home, &cwd)
     }
 
-    // Presence establishes policy health; a stamp only controls when to read again.
-    fn from_read(path: PathBuf, read: Option<(ServeToml, Option<FileStamp>)>) -> Self {
+    /// Read `home`'s `serve.toml` now.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the saved file cannot be read or accepted, or a saved service definition is invalid.
+    pub fn load_at(home: &Home, cwd: &Path) -> Result<Self, ServeTomlError> {
+        let path = home.serve_toml();
+        let read = read_stamped(&path)?;
+        Self::from_read(path, read, cwd)
+    }
+
+    // Complete syntax establishes health; a stamp only controls when to read again.
+    fn from_read(
+        path: PathBuf,
+        read: Option<(ServeToml, Option<FileStamp>)>,
+        cwd: &Path,
+    ) -> Result<Self, ServeTomlError> {
         let (file, stamp, policy) = match read {
             Some((file, stamp)) => (file, stamp, LivePolicy::Accepted),
             None => (ServeToml::default(), None, LivePolicy::Absent),
         };
-        let running = running(&file, &path);
-        Self {
+        let started = Started::bare_at(&file, cwd)?;
+        let running = Some(targets(&started));
+        Ok(Self {
             shared: Arc::new(Watched {
                 first: file.clone(),
                 state: Mutex::new(Held {
+                    cwd: cwd.to_owned(),
                     file,
                     running,
                     serving: None,
@@ -475,11 +470,11 @@ impl LiveServeToml {
                 }),
                 path,
             }),
-        }
+        })
     }
 
-    /// The file as [`load`](Self::load) read it: what a run starts with and binds over, so the services
-    /// it starts and the relay and resolver it binds come from one read, however long its start takes.
+    /// The first file read supplies saved/default services for a bare start, plus relay and resolver
+    /// settings; explicit constructors supply invocation-selected services.
     pub fn first_read(&self) -> &ServeToml {
         &self.shared.first
     }
@@ -487,6 +482,16 @@ impl LiveServeToml {
     /// The file as held now, re-read first when it changed.
     pub fn held(&self) -> ServeToml {
         self.refreshed().file.clone()
+    }
+
+    /// The last accepted saved/default service targets, not the invocation-selected targets.
+    /// None when no valid service list is available; explicit launch never repairs it.
+    pub fn saved_services(&self) -> Option<Started> {
+        let held = self.refreshed();
+        if held.policy == LivePolicy::Failed {
+            return None;
+        }
+        Started::bare_at(&held.file, &held.cwd).ok()
     }
 
     /// The services off now, sorted.
@@ -514,10 +519,8 @@ impl LiveServeToml {
         }
     }
 
-    /// Hold the file this run just wrote, at once rather than at the next stat, and fix what the run
-    /// serves: the names `started` bound with their targets, and the relay and resolver the file now holds. Called once its
-    /// routes bound and it saved what it was told, before the first stream, so its own write never reads
-    /// as a service removed.
+    /// Capture started's bound targets and selection origin once routes bind, before the first stream.
+    /// Refresh saved policy without saving or replacing service entries.
     pub fn serving(&self, started: &Started) {
         let mut held = self.lock();
         held.stamp = None;
@@ -525,6 +528,10 @@ impl LiveServeToml {
         self.refresh(&mut held);
         held.serving = Some(Serving {
             bound: targets(started),
+            selection: match started {
+                Started::Named(_) => Selection::Invocation,
+                Started::Resumed(_) | Started::Default => Selection::Saved,
+            },
             relay: held.file.relay.clone(),
             resolver: held.file.resolver.clone(),
         });
@@ -555,7 +562,8 @@ impl LiveServeToml {
         )
     }
 
-    /// What the file holds now that the run applies only when it next starts.
+    /// Saved services or reach settings that differ from this run's captured startup configuration.
+    /// Saved service changes are a basis for a later bare start, not a promise about repeating explicit constructors.
     pub fn waiting(&self) -> Waiting {
         let held = self.refreshed();
         let Some(serving) = &held.serving else {
@@ -665,7 +673,7 @@ impl Held {
         statted: Option<FileStamp>,
     ) {
         let read = read.and_then(|read| {
-            read.map(|(file, stamp)| match running(&file, path) {
+            read.map(|(file, stamp)| match running(&file, &self.cwd) {
                 Some(running) => Ok((file, running, stamp)),
                 None => Err(ServeTomlError::Damaged {
                     path: path.to_owned(),
@@ -735,25 +743,27 @@ impl Held {
 }
 
 impl Held {
-    /// Failed policy and saved removal refuse only bound user services. Internal routes have no bound
-    /// entry here, so policy failure cannot disable recovery through the node's control routes.
+    /// Off policy and failed live policy refuse new user-service admissions in both modes.
+    /// Saved membership removal additionally refuses configuration-following routes, never invocation-selected membership.
+    /// No saved edit constructs a route; internal control routes remain separate.
     fn refuses(&self, name: &str) -> bool {
         self.file.off.contains(name)
             || self.serving.as_ref().is_some_and(|serving| {
                 serving.bound.contains_key(name)
                     && (self.policy == LivePolicy::Failed
-                        || self
-                            .running
-                            .as_ref()
-                            .is_some_and(|running| !running.contains_key(name)))
+                        || matches!(serving.selection, Selection::Saved)
+                            && !self
+                                .running
+                                .as_ref()
+                                .is_some_and(|running| running.contains_key(name)))
             })
     }
 }
 
 impl EnabledServices for LiveServeToml {
-    /// Refuse a service turned off, one the run serves that `services` no longer runs, and every one the
-    /// run serves while the file cannot be read. Never opens one: a service added to the file has no route
-    /// until the next `serve`.
+    /// Refuse a service turned off, and every service the run serves while the file cannot be read. A run
+    /// that follows the saved file also refuses one `services` no longer runs; a run that named its
+    /// services does not. Never opens one: a service added to the file has no route until the next `serve`.
     fn is_enabled(&self, service: &Service) -> bool {
         !self.refreshed().refuses(service.as_str())
     }

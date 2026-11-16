@@ -9,6 +9,57 @@ use swoosh::serve_toml::ServeToml;
 use super::{ServiceAddCmd, ServiceRmCmd, Usage, added_line};
 use crate::commands::service::Running;
 
+#[tokio::test]
+async fn rm_cli_discards_invalid_names_before_home_access() {
+    let home = temp_home("safe-rm-name");
+    list(&home, &["ping", "speed"]);
+    let before = std::fs::read(home.serve_toml()).unwrap();
+    for entry in [
+        "bad=proxy:https://user:secret@host.test/?token=private",
+        "proxy:https://user:secret@host.test",
+        "control.stop",
+    ] {
+        for prefix in [vec![], vec!["ping"]] {
+            let index = prefix.len() + 1;
+            let mut argv = vec!["swoosh", "service", "rm"];
+            argv.extend(prefix);
+            argv.push(entry);
+            let Some(crate::Command::Service {
+                command: Some(super::super::ServiceCmd::Rm(cmd)),
+            }) = crate::Cli::try_parse_from(argv).unwrap().command
+            else {
+                panic!("service rm parses");
+            };
+            let debug = format!("{cmd:?}");
+            let error = cmd.run(&home).await.unwrap_err();
+            assert!(error.downcast_ref::<Usage>().is_some());
+            assert_eq!(
+                error.to_string(),
+                format!("invalid service name at index {index}")
+            );
+            for cause in error.chain() {
+                let text = format!("{cause:?} {cause} {debug}");
+                for forbidden in [entry, "secret", "private", "host.test", "NameError"] {
+                    assert!(!text.contains(forbidden), "{text}");
+                }
+            }
+            assert_eq!(std::fs::read(home.serve_toml()).unwrap(), before);
+            assert_eq!(std::fs::read_dir(home.dir()).unwrap().count(), 1);
+        }
+    }
+    assert_eq!(
+        rm(&["PING", "Speed"])
+            .checked_names()
+            .unwrap()
+            .iter()
+            .map(nauthy::Service::as_str)
+            .collect::<Vec<_>>(),
+        ["ping", "speed"]
+    );
+    assert!(rm(&["ping", "PING"]).checked_names().is_err());
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
 /// A fresh, empty home under a unique temp dir, so parallel tests never share a `<home>/serve.toml`.
 fn temp_home(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!("swoosh-edit-{tag}-{}", std::process::id()));
@@ -59,12 +110,11 @@ fn listed(home: &Home) -> Option<Vec<String>> {
     ServeToml::read(home).expect("read serve.toml").services
 }
 
-/// An add records the entry in `serve.toml`, and its line says it is served from the next start, whether
-/// or not a `serve` runs: it binds nothing now.
+/// Adding saves an entry without binding or enabling it.
 #[tokio::test]
 async fn service_add_records_and_names_the_next_start() {
     let home = temp_home("records");
-    list(&home, &["ssh=sshd:"]);
+    list(&home, &["ssh=tcp:localhost:22"]);
     add(&["web=tcp:localhost:3000"])
         .run(&home)
         .await
@@ -72,19 +122,18 @@ async fn service_add_records_and_names_the_next_start() {
     assert_eq!(
         listed(&home),
         Some(vec![
-            "ssh=sshd:".to_owned(),
+            "ssh=tcp:localhost:22".to_owned(),
             "web=tcp:localhost:3000".to_owned()
         ])
     );
     assert_eq!(
         added_line(&Added::New("web".to_owned()), None),
-        "Added web; it is served when swoosh serve next starts."
+        "Added web to the saved list."
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// The lines for a name already listed: plain, or with when it is served when the running `serve` did
-/// not bind it, or with how to turn it on when it is off.
+/// Listed-name reports distinguish saved membership and off policy.
 #[test]
 fn service_add_of_a_listed_name_says_where_it_stands() {
     let listed = Added::Listed("ssh".to_owned());
@@ -99,7 +148,7 @@ fn service_add_of_a_listed_name_says_where_it_stands() {
     );
     assert_eq!(
         added_line(&listed, Some(&running(&["ping"]))),
-        "ssh is already listed; it is served when swoosh serve next starts."
+        "ssh is already in the saved list."
     );
     assert_eq!(
         added_line(
@@ -115,16 +164,51 @@ fn service_add_of_a_listed_name_says_where_it_stands() {
 #[tokio::test]
 async fn service_add_on_a_never_named_home_keeps_ping_and_speed() {
     let home = temp_home("never-named");
-    add(&["ssh"]).run(&home).await.expect("add ssh");
+    add(&["web=tcp:localhost:3000"])
+        .run(&home)
+        .await
+        .expect("add web");
     assert_eq!(
         listed(&home),
         Some(vec![
             "ping=ping:".to_owned(),
             "speed=speed:".to_owned(),
-            "ssh=sshd:".to_owned()
+            "web=tcp:localhost:3000".to_owned()
         ])
     );
     let _ = std::fs::remove_dir_all(home.dir());
+}
+
+#[tokio::test]
+async fn service_add_ssh_requires_compiled_support_and_preserves_off_policy() {
+    for entry in ["ssh", "ssh=sshd:"] {
+        let home = temp_home("ssh-support");
+        std::fs::write(
+            home.serve_toml(),
+            "services = ['speed=speed:']\noff = ['ssh']\n",
+        )
+        .unwrap();
+        #[cfg(feature = "ssh")]
+        {
+            add(&[entry]).run(&home).await.unwrap();
+            let file = ServeToml::read(&home).unwrap();
+            assert_eq!(file.services.unwrap(), ["speed=speed:", "ssh=sshd:"]);
+            assert_eq!(file.off.into_iter().collect::<Vec<_>>(), ["ssh"]);
+        }
+        #[cfg(not(feature = "ssh"))]
+        {
+            let before = std::fs::read(home.serve_toml()).unwrap();
+            let error = add(&[entry]).run(&home).await.unwrap_err();
+            assert!(error.downcast_ref::<Usage>().is_some());
+            assert_eq!(
+                error.to_string(),
+                "invalid positional service definition at index 1: unsupported target scheme"
+            );
+            assert_eq!(std::fs::read(home.serve_toml()).unwrap(), before);
+            assert_eq!(std::fs::read_dir(home.dir()).unwrap().count(), 1);
+        }
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
 }
 
 /// A new target under a listed name is refused, exit 1, naming `rm` then `add`; the name is never
@@ -157,10 +241,14 @@ async fn service_add_of_several_is_all_or_nothing() {
     let home = temp_home("add-several");
     list(&home, &["web=tcp:localhost:3000"]);
     let before = std::fs::read_to_string(home.serve_toml()).expect("the file");
-    let error = add(&["ssh", "web=tcp:localhost:4000", "db=tcp:localhost:5432"])
-        .run(&home)
-        .await
-        .expect_err("one retarget among three refuses");
+    let error = add(&[
+        "probe=echo:",
+        "web=tcp:localhost:4000",
+        "db=tcp:localhost:5432",
+    ])
+    .run(&home)
+    .await
+    .expect_err("one retarget among three refuses");
     assert_eq!(
         format!("{error:#}"),
         "web already serves tcp:localhost:3000 here\n  Nothing was added.\n  To point it elsewhere, remove \
@@ -180,12 +268,12 @@ async fn service_rm_drops_one_entry() {
     let home = temp_home("rm-one");
     std::fs::write(
         home.serve_toml(),
-        "off = [\"web\", \"ssh\"]\nservices = [\"ssh=sshd:\", \"web=tcp:localhost:3000\"]\n",
+        "off = [\"web\", \"ssh\"]\nservices = [\"ssh=tcp:localhost:22\", \"web=tcp:localhost:3000\"]\n",
     )
     .expect("write serve.toml");
     rm(&["web"]).run(&home).await.expect("rm web");
     let file = ServeToml::read(&home).expect("read");
-    assert_eq!(file.services, Some(vec!["ssh=sshd:".to_owned()]));
+    assert_eq!(file.services, Some(vec!["ssh=tcp:localhost:22".to_owned()]));
     assert_eq!(
         file.off.into_iter().collect::<Vec<_>>(),
         ["ssh", "web"],
@@ -198,7 +286,7 @@ async fn service_rm_drops_one_entry() {
 #[tokio::test]
 async fn service_rm_of_several_is_all_or_nothing() {
     let home = temp_home("rm-several");
-    list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"]);
+    list(&home, &["ssh=tcp:localhost:22", "web=tcp:localhost:3000"]);
     let error = rm(&["web", "db"])
         .run(&home)
         .await
@@ -210,7 +298,7 @@ async fn service_rm_of_several_is_all_or_nothing() {
     assert_eq!(
         listed(&home),
         Some(vec![
-            "ssh=sshd:".to_owned(),
+            "ssh=tcp:localhost:22".to_owned(),
             "web=tcp:localhost:3000".to_owned()
         ])
     );
@@ -234,7 +322,7 @@ async fn a_name_typed_twice_is_a_usage_error() {
     assert!(error.downcast_ref::<Usage>().is_some(), "exit 2: {error:#}");
     assert_eq!(
         format!("{error:#}"),
-        "web is named twice; each service needs its own name"
+        "invalid positional service definition at index 2: service name already used"
     );
     let error = rm(&["web", "web"]).run(&home).await.expect_err("web twice");
     assert!(error.downcast_ref::<Usage>().is_some(), "exit 2: {error:#}");
@@ -247,10 +335,13 @@ async fn a_name_typed_twice_is_a_usage_error() {
 async fn an_entry_with_no_name_or_target_is_a_usage_error() {
     let home = temp_home("unnamed");
     for (entry, line) in [
-        ("db", "db needs a target, like db=tcp:<address>:<port>"),
+        (
+            "db",
+            "invalid positional service definition at index 1: invalid target form",
+        ),
         (
             "tcp:localhost:3000",
-            "tcp:localhost:3000 needs a name, like web=tcp:localhost:3000",
+            "invalid positional service definition at index 1: invalid target form",
         ),
     ] {
         let error = add(&[entry]).run(&home).await.expect_err("refused");
@@ -266,7 +357,7 @@ async fn an_entry_with_no_name_or_target_is_a_usage_error() {
 #[tokio::test]
 async fn an_emptied_list_survives_a_write_and_read() {
     let home = temp_home("emptied");
-    list(&home, &["ssh=sshd:"]);
+    list(&home, &["ssh=tcp:localhost:22"]);
     rm(&["ssh"]).run(&home).await.expect("rm ssh");
     assert_eq!(
         std::fs::read_to_string(home.serve_toml()).expect("the file"),
@@ -274,7 +365,7 @@ async fn an_emptied_list_survives_a_write_and_read() {
     );
     let file = ServeToml::read(&home).expect("read");
     assert_eq!(file.services, Some(Vec::new()));
-    let started = Started::bare(&file, &home.serve_toml()).expect("an empty list starts");
+    let started = Started::bare(&file).expect("an empty list starts");
     assert!(started.entries().is_empty(), "{started:?}");
     let _ = std::fs::remove_dir_all(home.dir());
 }
@@ -286,18 +377,14 @@ async fn no_writer_keeps_a_duplicate_name() {
     let home = temp_home("duplicate");
     list(&home, &["web=tcp:localhost:3000", "web=tcp:localhost:4000"]);
     let before = std::fs::read_to_string(home.serve_toml()).expect("the file");
-    let path = home.serve_toml();
-    let line = format!(
-        "web is named twice in {}\n  Each service needs its own name; swoosh will not guess which one to keep.",
-        path.display()
-    );
-    let error = add(&["ssh"]).run(&home).await.expect_err("refused");
+    let line = "invalid saved service definition at index 2: service name already used";
+    let error = add(&["probe=echo:"]).run(&home).await.expect_err("refused");
     assert!(error.downcast_ref::<Usage>().is_none(), "exit 1");
     assert_eq!(format!("{error:#}"), line);
     let error = rm(&["web"]).run(&home).await.expect_err("refused");
     assert_eq!(format!("{error:#}"), line);
     let file = ServeToml::read(&home).expect("read");
-    let error = Started::bare(&file, &path).expect_err("a start refuses");
+    let error = Started::bare(&file).expect_err("a start refuses");
     assert_eq!(error.to_string(), line);
     assert_eq!(
         std::fs::read_to_string(home.serve_toml()).expect("the file"),
@@ -315,19 +402,15 @@ async fn no_writer_keeps_an_entry_that_is_not_a_service() {
         let home = temp_home(tag);
         list(&home, &["web=tcp:localhost:4000", entry]);
         let before = std::fs::read_to_string(home.serve_toml()).expect("the file");
-        let path = home.serve_toml();
-        let line = format!(
-            "{} lists {entry}, which is not a service\n  Edit that file to fix or remove the entry.",
-            path.display()
-        );
-        let error = add(&["ssh"]).run(&home).await.expect_err("refused");
+        let line = "invalid saved service definition at index 2: invalid target form";
+        let error = add(&["probe=echo:"]).run(&home).await.expect_err("refused");
         assert!(error.downcast_ref::<Usage>().is_none(), "{entry}: exit 1");
         assert_eq!(format!("{error:#}"), line);
         let error = rm(&["web"]).run(&home).await.expect_err("refused");
         assert!(error.downcast_ref::<Usage>().is_none(), "{entry}: exit 1");
         assert_eq!(format!("{error:#}"), line);
         let file = ServeToml::read(&home).expect("read");
-        let error = Started::bare(&file, &path).expect_err("a start refuses");
+        let error = Started::bare(&file).expect_err("a start refuses");
         assert_eq!(error.to_string(), line);
         assert_eq!(
             std::fs::read_to_string(home.serve_toml()).expect("the file"),
@@ -338,11 +421,49 @@ async fn no_writer_keeps_an_entry_that_is_not_a_service() {
     }
 }
 
+#[tokio::test]
+async fn add_cli_never_echoes_credentials_or_writes_a_valid_prefix() {
+    let home = temp_home("safe-add-error");
+    list(&home, &["speed=speed:"]);
+    let before = std::fs::read(home.serve_toml()).unwrap();
+    let entry = "bad=proxy:https://user:secret@host.test/?token=private";
+    let parsed = crate::Cli::try_parse_from([
+        "swoosh",
+        "service",
+        "add",
+        "raw=stdin:",
+        "drop=recv:",
+        entry,
+    ])
+    .unwrap();
+    let Some(crate::Command::Service {
+        command: Some(super::super::ServiceCmd::Add(cmd)),
+    }) = parsed.command
+    else {
+        panic!("service add parses")
+    };
+    let error = cmd.run(&home).await.unwrap_err();
+    assert!(error.downcast_ref::<Usage>().is_some());
+    assert_eq!(
+        error.to_string(),
+        "invalid positional service definition at index 3: invalid proxy origin"
+    );
+    for cause in error.chain() {
+        let text = format!("{cause:?} {cause}");
+        for forbidden in [entry, "secret", "private", "host.test"] {
+            assert!(!text.contains(forbidden), "{text}");
+        }
+    }
+    assert_eq!(std::fs::read(home.serve_toml()).unwrap(), before);
+    assert_eq!(std::fs::read_dir(home.dir()).unwrap().count(), 1);
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
 /// The full CLI rejects a reserved add before it can record an unmanageable list.
-#[test]
-fn service_add_refuses_reserved_names_before_home_writes() {
+#[tokio::test]
+async fn service_add_refuses_reserved_names_before_home_writes() {
     let home = temp_home("reserved");
-    list(&home, &["ssh=sshd:"]);
+    list(&home, &["ssh=tcp:localhost:22"]);
     let original = std::fs::read(home.serve_toml()).unwrap();
     let before = std::fs::metadata(home.serve_toml())
         .unwrap()
@@ -358,7 +479,7 @@ fn service_add_refuses_reserved_names_before_home_writes() {
         "CONTROL=ping:",
         "LookUp=ping:",
     ] {
-        let error = crate::Cli::try_parse_from([
+        let parsed = crate::Cli::try_parse_from([
             "swoosh",
             "--home",
             home.dir().to_str().unwrap(),
@@ -366,13 +487,21 @@ fn service_add_refuses_reserved_names_before_home_writes() {
             "add",
             entry,
         ])
-        .expect_err("a reserved name refuses before add can run");
-        assert_eq!(error.exit_code(), 2);
-        let name = entry.split('=').next().unwrap().to_ascii_lowercase();
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("{name} is reserved: pick another name"))
+        .expect("the raw operand is not echoed by a value parser");
+        let Some(crate::Command::Service {
+            command: Some(super::super::ServiceCmd::Add(cmd)),
+        }) = parsed.command
+        else {
+            panic!("service add parses");
+        };
+        let error = cmd
+            .run(&home)
+            .await
+            .expect_err("reserved names refuse before home writes");
+        assert!(error.downcast_ref::<Usage>().is_some());
+        assert_eq!(
+            error.to_string(),
+            "invalid positional service definition at index 1: invalid service name"
         );
         assert_eq!(std::fs::read(home.serve_toml()).unwrap(), original);
         assert_eq!(
