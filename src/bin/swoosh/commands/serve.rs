@@ -750,24 +750,18 @@ impl ServeCmd {
             );
         }
 
-        // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
-        // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives.
-        if let Some(lifetime) = self.expires {
-            let cancel = cancel.clone();
-            let deadline = lifetime.duration();
-            tokio::spawn(async move {
-                tokio::time::sleep(deadline).await;
-                cancel.cancel();
-            });
-        }
-
         let dial = swoosh::sync::NodeDial::new(peers, &home);
         let fetch = swoosh::renewal::NodeFetch::new(peers);
+        // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
+        // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. It is an
+        // arm of the run, never a spawned task, so a run that stops first takes the timer with it.
+        let expiry = expire(self.expires, cancel.clone());
         // Run until a stop, distinguishing a GRACEFUL stop from an ERRORED teardown: a requested stop is
         // SUCCESS (exit 0, so a CI action reads a clean teardown as green); only a genuine error exits
         // non-zero. Beside the run, this node's own exchanges with your devices: they end when the run does.
         let stopped = tokio::select! {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
+            never = expiry => match never {},
             () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             () = saved.watch() => unreachable!("the root route's keys are read until the node stops"),
@@ -876,6 +870,21 @@ where
         }
     };
     Ok(stopped)
+}
+
+/// Cancel `cancel` once `lifetime` has elapsed, then wait forever; with no lifetime, only wait. It never
+/// returns, so as an arm of the run's select it can never win it: the exposer still sees the cancel and
+/// ends the run gracefully, and the stop is classified exactly as before. Dropping it before the deadline
+/// drops the timer, so nothing of this run is left behind to fire later.
+async fn expire(
+    lifetime: Option<Lifetime>,
+    cancel: CancellationToken,
+) -> core::convert::Infallible {
+    if let Some(lifetime) = lifetime {
+        tokio::time::sleep(lifetime.duration()).await;
+        cancel.cancel();
+    }
+    core::future::pending().await
 }
 
 fn service_pairs(entries: &[String]) -> impl Iterator<Item = (&str, &str)> {
