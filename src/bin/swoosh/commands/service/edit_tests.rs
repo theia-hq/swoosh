@@ -174,7 +174,7 @@ async fn service_add_of_several_is_all_or_nothing() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// `rm` drops the one entry named, with its `off` row, and keeps the rest.
+/// `rm` removes the saved entry and keeps every `off` name.
 #[tokio::test]
 async fn service_rm_drops_one_entry() {
     let home = temp_home("rm-one");
@@ -188,8 +188,8 @@ async fn service_rm_drops_one_entry() {
     assert_eq!(file.services, Some(vec!["ssh=sshd:".to_owned()]));
     assert_eq!(
         file.off.into_iter().collect::<Vec<_>>(),
-        ["ssh"],
-        "web's row goes"
+        ["ssh", "web"],
+        "every off name stays"
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }

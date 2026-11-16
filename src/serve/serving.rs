@@ -401,10 +401,10 @@ impl ServeToml {
         Ok(found)
     }
 
-    /// `service rm`: take `names` off the list, and with each its `off` row, which would otherwise outlive
-    /// the service it was for. All or nothing: a name the list does not hold changes nothing. It starts from
-    /// the list as a bare `serve` would start it, as [`add`](Self::add) does: the default on a home that never
-    /// recorded one. An emptied list stays empty.
+    /// Remove `names` from the saved service list, retaining all `off` names.
+    /// The edit is all or nothing. If no list is saved, use the same default list as
+    /// [`add`](Self::add). Removing the last entry saves an explicitly empty list.
+    /// Re-adding a removed service does not clear its `off` name.
     ///
     /// # Errors
     ///
@@ -421,9 +421,6 @@ impl ServeToml {
             if list.len() == before {
                 return Err(EditError::NotListed(name.to_owned()));
             }
-        }
-        for name in names {
-            self.off.remove(name.as_str());
         }
         self.services = Some(list);
         Ok(())

@@ -10,7 +10,7 @@
 //! served, so an add never removes. A running `serve` binds only at its start, so what it adds is served
 //! from its next start. `add` reads the running `serve`'s socket for one line only: a name already listed
 //! that the running one did not bind says it is served from the next start too. Whether the write happens
-//! never depends on that read. `rm` takes a name's `off` row with it.
+//! never depends on that read. `rm` retains all `off` names.
 //!
 //! A name typed twice is a usage error, exit 2, before the home is read.
 
