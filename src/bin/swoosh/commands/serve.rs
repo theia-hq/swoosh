@@ -6,7 +6,7 @@
 //! `swoosh serve ssh ping` selects a shell and round-trip probe for this run without saving them.
 //! `ssh`, `ping` and `speed` name themselves; other entries use `name=target`.
 //!
-//! Use --with DEF and --without NAME to change the saved/default selection for this run.
+//! `--with DEF` and `--without NAME` add to or omit from the saved services (or ping and speed) for this run.
 //! Later saved service additions, removals and target changes do not change this process's selection.
 //! Off changes affect new admissions; existing streams may continue. Each restart, including a
 //! supervisor restart, captures the then-current saved/default selection again. Launch changes neither
@@ -74,7 +74,7 @@ pub struct ServeCmd {
         value_name = "service",
         conflicts_with_all = ["with", "without"],
         long_help = "Serve exactly these for this run, without saving them\n\
-                     With none named, it serves the saved services, or ping and speed if none are saved.\n\
+                     With none named and no --with or --without, it serves the saved services, or ping and speed if none are saved.\n\
                      \n\
                      Built in, served under their own names:\n\
                      \x20 ssh                     a shell on this machine\n\
@@ -92,20 +92,24 @@ pub struct ServeCmd {
                      \x20 echo:                   sends back whatever it receives"
     )]
     pub services: Vec<String>,
-    /// add a service to the saved/default selection for this run
+    /// Add a service to the saved/default selection for this run
     #[arg(
         long,
-        value_name = "def",
-        long_help = "add a service to the saved/default selection for this run\n\
-                     Repeat or combine these flags; positional definitions cannot be used with them."
+        value_name = "service",
+        long_help = "Add a service to the saved/default selection for this run\n\
+                     Repeat or combine these flags; positional definitions cannot be used with them.\n\
+                     \n\
+                     Later saved service additions, removals and target changes do not change this process's selection. Off changes affect new admissions; existing streams may continue. Each restart, including a supervisor restart, captures the then-current saved/default selection again. Launch changes neither saved services nor off settings."
     )]
     pub with: Vec<String>,
-    /// omit a saved/default service for this run
+    /// Omit a saved/default service for this run
     #[arg(
         long,
-        value_name = "name",
-        long_help = "omit a saved/default service for this run\n\
-                     Repeat or combine these flags; positional definitions cannot be used with them."
+        value_name = "service",
+        long_help = "Omit a saved/default service for this run\n\
+                     Repeat or combine these flags; positional definitions cannot be used with them.\n\
+                     \n\
+                     Later saved changes do not change this process's selection; see --with."
     )]
     pub without: Vec<String>,
     /// Open these services to anyone (comma-separated, repeatable)
@@ -367,6 +371,8 @@ impl ServeCmd {
         swoosh::serve::Mistyped::check(&self.services)?;
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
         self.normalize_services(&cwd)?;
+        // Additions are typed too, so their grammar is refused before the lock as well.
+        Started::positional(&self.with, &cwd)?;
         let root = swoosh::home::runtime_root()?;
         let (lock, listener) = match acquire_single(home, &root).await {
             Ok(held) => held,

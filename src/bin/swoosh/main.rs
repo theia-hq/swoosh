@@ -517,7 +517,7 @@ where
                 {
                     Err(usage(
                         &["serve"],
-                        "Repeat or combine these flags; positional definitions cannot be used with them.",
+                        "--with and --without cannot be used with services typed on the command line",
                     ))
                 }
                 _ => Err(error),

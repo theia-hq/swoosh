@@ -4,7 +4,7 @@
 //! clear `off` names. Bare `serve` uses the saved list, or `ping` and `speed` when no list is saved.
 //! An explicitly empty saved list stays empty. `service add` and `service rm` edit the saved list.
 //!
-//! Use --with DEF and --without NAME to change the saved/default selection for this run.
+//! `--with DEF` and `--without NAME` add to or omit from the saved services (or ping and speed) for this run.
 //! Later saved service additions, removals and target changes do not change this process's selection.
 //! Off changes affect new admissions; existing streams may continue. Each restart, including a
 //! supervisor restart, captures the then-current saved/default selection again. Launch changes neither
@@ -27,31 +27,31 @@ pub enum ServingError {
     #[error(transparent)]
     Mistyped(#[from] Mistyped),
     /// An exclusion name is invalid.
-    #[error("invalid exclusion name at index {index}")]
+    #[error("--without #{index} is not a valid service name")]
     InvalidExclusion {
         /// The operand's one-based position.
         index: usize,
     },
     /// An exclusion is absent from the captured base.
-    #[error("exclusion at index {index} is not in the saved/default selection")]
+    #[error("--without #{index} is not in the saved/default selection")]
     MissingExclusion {
         /// The operand's one-based position.
         index: usize,
     },
     /// An exclusion repeats a normalized name.
-    #[error("duplicate exclusion at index {index}")]
+    #[error("--without #{index} repeats an earlier --without")]
     DuplicateExclusion {
         /// The operand's one-based position.
         index: usize,
     },
     /// An addition is also excluded.
-    #[error("addition at index {index} is also excluded")]
+    #[error("--with #{index} is also named by --without")]
     ExcludedAddition {
         /// The operand's one-based position.
         index: usize,
     },
     /// An addition conflicts with a captured base target.
-    #[error("addition at index {index} conflicts with the saved/default target")]
+    #[error("--with #{index} has a different target than the saved/default one")]
     ConflictingAddition {
         /// The operand's one-based position.
         index: usize,

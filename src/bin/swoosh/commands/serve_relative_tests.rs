@@ -64,7 +64,7 @@ fn positional_conflicts_do_not_echo_definition_or_exclusion_credentials() {
         let error = crate::parse_from(args).unwrap_err();
         let text = error.to_string();
         assert!(text.contains(
-            "Repeat or combine these flags; positional definitions cannot be used with them."
+            "--with and --without cannot be used with services typed on the command line"
         ));
         assert!(!format!("{error:?} {error}").contains("credential-sentinel"));
     }
@@ -75,11 +75,11 @@ fn relative_help_and_running_refusal_keep_the_approved_words() {
     let error = crate::parse_from(["swoosh", "serve", "--help"]).unwrap_err();
     let help = error.to_string();
     for words in [
-        "--with <def>",
-        "--without <name>",
-        "add a service to the saved/default selection for this run",
-        "omit a saved/default service for this run",
-        "Without positional definitions or relative flags, use saved services; no saved list means ping and speed.",
+        "--with <service>",
+        "--without <service>",
+        "Add a service to the saved/default selection for this run",
+        "Omit a saved/default service for this run",
+        "With none named and no --with or --without, it serves the saved services, or ping and speed if none are saved.",
         "Repeat or combine these flags; positional definitions cannot be used with them.",
     ] {
         assert!(help.contains(words), "missing {words:?}: {help}");
@@ -186,13 +186,13 @@ fn malformed_excluded_base_and_selected_failure_leave_service_policy_unchanged()
                 "--with",
                 "bad=proxy:https://user:credential-sentinel@example.test/path",
             ],
-            "invalid addition service definition at index 1",
+            "invalid service definition at index 1",
         ),
         (
             "rel-name",
             "services = []\noff = []\n",
             vec!["--without", "https://user:credential-sentinel@example.test"],
-            "invalid exclusion name at index 1",
+            "--without #1 is not a valid service name",
         ),
         (
             "rel-inbox",
