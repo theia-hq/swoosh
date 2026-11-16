@@ -111,4 +111,5 @@ inherits = "dev"
 # Before replacing it with a release, check every source-bound advisory row against that release.
 # Update the rows and deny.toml source exception with the patch.
 [patch.crates-io]
-noq-proto = { git = "https://github.com/theia-hq/noq", rev = "fda50f43b779082da3fc010515dfc0262eeba330" }
+noq-proto = { git = "https://github.com/theia-hq/noq", rev = "e97ac991b23287afe8756f64942ebc01e0a3d5a2" }
+noq-udp = { git = "https://github.com/theia-hq/noq", rev = "e97ac991b23287afe8756f64942ebc01e0a3d5a2" }
