@@ -9,9 +9,10 @@
 //! it starts with, the relay and the resolver it binds over, and the services off all come from that one
 //! watcher's first read, and every later read is that watcher's too, so no two parts of a `serve` ever
 //! hold the file as read at two different moments. Its gate refuses a service turned off and serves one
-//! turned back on, with no restart, and its status reports the same set the gate refuses. A file that
-//! goes missing or cannot be read keeps everything read last, so deleting the file never turns a service
-//! back on.
+//! turned back on, with no restart, and its status reports the same set the gate refuses.
+//! A failed live policy read retains accepted configuration and refuses new admissions to bound user
+//! services until a valid read. Initial absence still permits defaults. Internal routes remain available;
+//! existing streams are not terminated by this policy change.
 //!
 //! A running `serve` takes service away live and gives it only when it starts, where its routes are
 //! proven and its banner says what it serves. So a service dropped from `services` is refused on its next
@@ -115,7 +116,9 @@ impl ServeToml {
     ///
     /// [`ServeTomlError`] when the file cannot be read, is loose, or is damaged.
     pub fn read(home: &Home) -> Result<Self, ServeTomlError> {
-        Ok(read_stamped(&home.serve_toml())?.0)
+        Ok(read_stamped(&home.serve_toml())?
+            .map(|(file, _)| file)
+            .unwrap_or_default())
     }
 
     /// Re-read `<home>/serve.toml`, let `change` set what it sets, and write the file back when anything
@@ -241,11 +244,11 @@ fn strings(value: toml::Value) -> Option<Vec<String>> {
         .collect()
 }
 
-/// Read and decode the file at `path` and its stamp from one open handle, checked as a trust file. An
-/// absent file holds nothing and has no stamp.
+/// Read and decode the file at `path` and its stamp from one open handle, checked as a trust file.
+/// Only absence returns `None`; a successful read need not have a stamp.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
-fn read_stamped(path: &Path) -> Result<(ServeToml, Option<FileStamp>), ServeTomlError> {
+fn read_stamped(path: &Path) -> Result<Option<(ServeToml, Option<FileStamp>)>, ServeTomlError> {
     let io = |source| ServeTomlError::Io {
         path: path.to_owned(),
         source,
@@ -253,7 +256,7 @@ fn read_stamped(path: &Path) -> Result<(ServeToml, Option<FileStamp>), ServeToml
     let mut file = match crate::home::open_trust_file(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((ServeToml::default(), None));
+            return Ok(None);
         }
         Err(error) => return Err(io(error)),
     };
@@ -282,7 +285,7 @@ fn read_stamped(path: &Path) -> Result<(ServeToml, Option<FileStamp>), ServeToml
             what,
         },
     })?;
-    Ok((read, stamp))
+    Ok(Some((read, stamp)))
 }
 
 /// `<home>/serve.toml`, read live: the one watcher a running `serve` reads the file through. It holds the
@@ -292,8 +295,10 @@ fn read_stamped(path: &Path) -> Result<(ServeToml, Option<FileStamp>), ServeToml
 /// file they each read at a different moment.
 ///
 /// It re-stats the file at most once per [`STAT_DEBOUNCE`] and re-reads it when its [`FileStamp`] (mtime,
-/// length, inode and ctime) changed, so a same-length rewrite renamed into place is seen. A file that goes
-/// missing, cannot be read, or is damaged keeps everything read last.
+/// length, inode and ctime) changed, so a same-length rewrite renamed into place is seen.
+/// A failed live policy read retains accepted configuration and refuses new admissions to bound user
+/// services until a valid read. Initial absence still permits defaults. Internal routes remain available;
+/// existing streams are not terminated by this policy change.
 #[derive(Clone)]
 pub struct LiveServeToml {
     shared: Arc<Watched>,
@@ -415,10 +420,26 @@ struct Held {
     /// What the run serves, once its routes bound; `None` before, when nothing is refused for leaving
     /// `services` and nothing waits.
     serving: Option<Serving>,
+    /// Admission follows read health, never a fabricated change to the accepted file.
+    policy: LivePolicy,
     /// The stamp of the file that read came from; `None` re-reads at the next stat.
     stamp: Option<FileStamp>,
     /// When the file was last statted, to debounce the next stat.
     last_stat: Option<Instant>,
+}
+
+/// The reason a status carries while the file cannot be read. Fixed and pathless, so it always fits the
+/// reply's string cap and a long home path can never fail the whole status.
+const UNREADABLE: &str = "serve.toml cannot be read";
+const _: () = assert!(UNREADABLE.len() <= crate::serve::control_codec::MAX_STATUS_STRING);
+
+/// Only initial absence permits defaults without a file. Once a file was observed or a read failed,
+/// absence cannot establish a valid policy again; recovery requires a successful read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LivePolicy {
+    Absent,
+    Accepted,
+    Failed,
 }
 
 impl LiveServeToml {
@@ -430,21 +451,31 @@ impl LiveServeToml {
     /// on a file it cannot read.
     pub fn load(home: &Home) -> Result<Self, ServeTomlError> {
         let path = home.serve_toml();
-        let (file, stamp) = read_stamped(&path)?;
+        let read = read_stamped(&path)?;
+        Ok(Self::from_read(path, read))
+    }
+
+    // Presence establishes policy health; a stamp only controls when to read again.
+    fn from_read(path: PathBuf, read: Option<(ServeToml, Option<FileStamp>)>) -> Self {
+        let (file, stamp, policy) = match read {
+            Some((file, stamp)) => (file, stamp, LivePolicy::Accepted),
+            None => (ServeToml::default(), None, LivePolicy::Absent),
+        };
         let running = running(&file, &path);
-        Ok(Self {
+        Self {
             shared: Arc::new(Watched {
                 first: file.clone(),
                 state: Mutex::new(Held {
                     file,
                     running,
                     serving: None,
+                    policy,
                     stamp,
                     last_stat: Some(Instant::now()),
                 }),
                 path,
             }),
-        })
+        }
     }
 
     /// The file as [`load`](Self::load) read it: what a run starts with and binds over, so the services
@@ -463,13 +494,24 @@ impl LiveServeToml {
         self.refreshed().file.off.iter().cloned().collect()
     }
 
-    /// The services the gate refuses now, sorted: those off, and those the run serves that `services` no
-    /// longer runs. What the status reports as off, so it and the gate never disagree.
+    /// The refused service names, sorted: saved off names, removed bound services, and all bound user
+    /// services while live policy is unreadable. Retained configuration and saved off marks are unchanged.
     pub fn refused(&self) -> Vec<String> {
+        self.refreshed().refused()
+    }
+
+    /// What the status reports as off: [`refused`](Self::refused), or unknown while the file cannot be
+    /// read. Then the gate refuses every service this run bound, and naming them all as off would send
+    /// the user to turn on a service the gate goes on refusing. Decided under one refreshed hold, so the
+    /// report and the gate never straddle a read.
+    pub fn disabled(&self) -> crate::serve::control_codec::DisabledList {
+        use crate::serve::control_codec::DisabledList;
+
         let held = self.refreshed();
-        let mut refused = held.file.off.clone();
-        refused.extend(held.removed());
-        refused.into_iter().collect()
+        match held.policy {
+            LivePolicy::Failed => DisabledList::Unknown(UNREADABLE.to_owned()),
+            LivePolicy::Absent | LivePolicy::Accepted => DisabledList::Known(held.refused()),
+        }
     }
 
     /// Hold the file this run just wrote, at once rather than at the next stat, and fix what the run
@@ -502,17 +544,15 @@ impl LiveServeToml {
             .serving
             .as_ref()
             .ok_or(LocalDetailError::MissingStartup)?;
-        let running = held
-            .running
+        held.running
             .as_ref()
             .ok_or(LocalDetailError::InconsistentState)?;
-        LocalServiceSnapshot::capture(serving.bound.iter().map(|(name, target)| {
-            (
-                name.as_str(),
-                target.as_str(),
-                held.file.off.contains(name) || !running.contains_key(name),
-            )
-        }))
+        LocalServiceSnapshot::capture(
+            serving
+                .bound
+                .iter()
+                .map(|(name, target)| (name.as_str(), target.as_str(), held.refuses(name))),
+        )
     }
 
     /// What the file holds now that the run applies only when it next starts.
@@ -577,8 +617,10 @@ impl LiveServeToml {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Re-read the file when its stamp changed, at most once per [`STAT_DEBOUNCE`]. Every failure keeps
-    /// what was held: a missing file, a failed stat or read, and a damaged file.
+    /// Re-read the file when its stamp changed, at most once per [`STAT_DEBOUNCE`]. Failures keep
+    /// accepted data but deny new bound user admissions until a valid read, not merely a successful stat.
+    // `core::io::ErrorKind` is still unstable, as in `read_stamped`.
+    #[allow(clippy::std_instead_of_core)]
     fn refresh(&self, state: &mut Held) {
         if state
             .last_stat
@@ -588,8 +630,21 @@ impl LiveServeToml {
         }
         state.last_stat = Some(Instant::now());
         let path = &self.shared.path;
-        let Ok(meta) = std::fs::metadata(path) else {
-            return;
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound
+                    || state.policy != LivePolicy::Absent
+                {
+                    // A recovered stat may have the same stamp. Only a new read restores admission.
+                    let error = ServeTomlError::Io {
+                        path: path.clone(),
+                        source: error,
+                    };
+                    state.fail(path, &error, None);
+                }
+                return;
+            }
         };
         let statted = FileStamp::of(&meta);
         if FileStamp::unchanged(state.stamp, statted) {
@@ -600,73 +655,105 @@ impl LiveServeToml {
 }
 
 impl Held {
-    /// Take one read of the file at `path`, whose stat just gave `statted`. Only a read of a file that is
-    /// there replaces what is held: a file removed between the stat and the read reads as absent, and
-    /// keeps it, so deleting the file never turns a service back on. A failed read keeps it too, and so
-    /// does one whose `services` lists a service that is not one, which a running `serve` treats as damage
-    /// rather than as every service removed. A file whose contents are refused is marked as read, so it is
-    /// not read again until it changes; any other failure is tried again at the next stat.
+    /// Only a valid read of an existing file replaces accepted data and restores admission. A file
+    /// removed after stat is a failure too, never a request to restore defaults. Rejected contents are
+    /// marked as read until they change; other failures retry at the next stat.
     fn take(
         &mut self,
         path: &Path,
-        read: Result<(ServeToml, Option<FileStamp>), ServeTomlError>,
+        read: Result<Option<(ServeToml, Option<FileStamp>)>, ServeTomlError>,
         statted: Option<FileStamp>,
     ) {
-        let read = read.and_then(|(file, stamp)| match running(&file, path) {
-            Some(running) => Ok((file, running, stamp)),
-            None => Err(ServeTomlError::Damaged {
-                path: path.to_owned(),
-            }),
+        let read = read.and_then(|read| {
+            read.map(|(file, stamp)| match running(&file, path) {
+                Some(running) => Ok((file, running, stamp)),
+                None => Err(ServeTomlError::Damaged {
+                    path: path.to_owned(),
+                }),
+            })
+            .transpose()
         });
         match read {
-            Ok((file, running, Some(stamp))) => {
+            Ok(Some((file, running, stamp))) => {
                 self.file = file;
                 self.running = Some(running);
-                self.stamp = Some(stamp);
+                self.stamp = stamp;
+                if self.policy == LivePolicy::Failed {
+                    tracing::warn!(path = %EscapedPath(path), "serve.toml can be read again");
+                }
+                self.policy = LivePolicy::Accepted;
             }
-            Ok((_, _, None)) => {}
+            Ok(None) => {
+                let error = ServeTomlError::Io {
+                    path: path.to_owned(),
+                    source: io::ErrorKind::NotFound.into(),
+                };
+                self.fail(path, &error, None);
+            }
             Err(error) => {
-                if matches!(
+                let stamp = if matches!(
                     error,
                     ServeTomlError::Damaged { .. } | ServeTomlError::Unusable { .. }
                 ) {
-                    self.stamp = statted;
-                }
-                tracing::warn!(
-                    path = %EscapedPath(path),
-                    %error,
-                    "keeping what serve.toml held when it was last read"
-                );
+                    statted
+                } else {
+                    None
+                };
+                self.fail(path, &error, stamp);
             }
         }
+    }
+
+    /// Keep what was held and refuse every service this run bound until a read succeeds. `stamp` marks
+    /// the file as read, or `None` reads it again at the next stat. Said once, when reads start failing:
+    /// a failure that retries at every stat would otherwise log every [`STAT_DEBOUNCE`], and a different
+    /// failure while still failing changes nothing the gate does.
+    fn fail(&mut self, path: &Path, error: &ServeTomlError, stamp: Option<FileStamp>) {
+        self.stamp = stamp;
+        if self.policy != LivePolicy::Failed {
+            tracing::warn!(
+                path = %EscapedPath(path),
+                %error,
+                "serve.toml cannot be read; new connections to the services this serve bound are refused until it can"
+            );
+        }
+        self.policy = LivePolicy::Failed;
+    }
+
+    /// The names the gate refuses, sorted: those off, and those it refuses of the ones this run bound.
+    fn refused(&self) -> Vec<String> {
+        let mut refused = self.file.off.clone();
+        refused.extend(
+            self.serving
+                .iter()
+                .flat_map(|serving| serving.bound.keys())
+                .filter(|name| self.refuses(name))
+                .cloned(),
+        );
+        refused.into_iter().collect()
     }
 }
 
 impl Held {
-    /// The names the run serves that the held `services` no longer runs. A name bound by no entry (the
-    /// node's own routes) is never among them, and an emptied list runs nothing, so every name it bound is.
-    fn removed(&self) -> impl Iterator<Item = String> + '_ {
-        self.serving
-            .iter()
-            .zip(&self.running)
-            .flat_map(|(serving, running)| {
-                serving
-                    .bound
-                    .keys()
-                    .filter(|name| !running.contains_key(*name))
-                    .cloned()
-            })
-    }
-
-    /// Whether the gate refuses `name`: it is off, or it left `services`.
+    /// Failed policy and saved removal refuse only bound user services. Internal routes have no bound
+    /// entry here, so policy failure cannot disable recovery through the node's control routes.
     fn refuses(&self, name: &str) -> bool {
-        self.file.off.contains(name) || self.removed().any(|removed| removed == name)
+        self.file.off.contains(name)
+            || self.serving.as_ref().is_some_and(|serving| {
+                serving.bound.contains_key(name)
+                    && (self.policy == LivePolicy::Failed
+                        || self
+                            .running
+                            .as_ref()
+                            .is_some_and(|running| !running.contains_key(name)))
+            })
     }
 }
 
 impl EnabledServices for LiveServeToml {
-    /// Refuse a service turned off, and one the run serves that `services` no longer runs. Never opens
-    /// one: a service added to the file has no route until the next `serve`.
+    /// Refuse a service turned off, one the run serves that `services` no longer runs, and every one the
+    /// run serves while the file cannot be read. Never opens one: a service added to the file has no route
+    /// until the next `serve`.
     fn is_enabled(&self, service: &Service) -> bool {
         !self.refreshed().refuses(service.as_str())
     }

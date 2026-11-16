@@ -175,13 +175,18 @@ impl Resident {
         }
     }
 
-    /// The services the gate refuses now (off, or no longer in `services`), at most [`DISABLED_NAMES_CAP`] of them so the reply
-    /// always decodes. A file that went missing or cannot be read reports the set read last, as the gate
-    /// refuses it.
+    /// The services the gate refuses now (off, or no longer in `services`), at most
+    /// [`DISABLED_NAMES_CAP`] of them so the reply always decodes. While the file cannot be read the gate
+    /// refuses every service the run serves, and the status reports that as unknown rather than as each
+    /// one turned off.
     pub fn disabled_names(&self) -> DisabledList {
-        let mut names = self.off.refused();
-        names.truncate(DISABLED_NAMES_CAP);
-        DisabledList::Known(names)
+        match self.off.disabled() {
+            DisabledList::Known(mut names) => {
+                names.truncate(DISABLED_NAMES_CAP);
+                DisabledList::Known(names)
+            }
+            unknown @ DisabledList::Unknown(_) => unknown,
+        }
     }
 
     /// Serve the bound std listener until the teardown token fires: the third arm of the serve
