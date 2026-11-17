@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser as _;
 use keystore::{KeyFile, Passphrase, Protection};
-use nauthy::VerifyKey;
+use nauthy::{Link, VerifyKey};
 use swoosh::home::Home;
 use swoosh::roster::RosterDoc;
 use swoosh::standing::Standing;
@@ -18,8 +18,8 @@ use zeroize::Zeroizing;
 use super::RestoreCmd;
 use crate::Cli;
 use crate::commands::invite::invite_tests::{
-    LAPTOP, OWN, PASS, ROOT, copy, device_of, holds, key, lapsed, live, node, records, revoked,
-    scratch, standing,
+    LAPTOP, NAS, OWN, PASS, PHONE, ROOT, Row, copy, device_of, holds, key, lapsed, live, node,
+    records, revoked, scratch, standing,
 };
 
 /// Another machine's key: one that was never a device of the root.
@@ -1087,4 +1087,110 @@ async fn restore_onto_a_touch_id_only_machine_key_names_lock_touch_id() {
                 machine: swoosh lock passphrase"),
         "{err}"
     );
+}
+
+// --- what `serve` admits after a restore ---
+
+/// A copy that revoked two devices, one by its key and one by its standing's id, and keeps a third live,
+/// beside `own` when it is given: the list, then the standings the live device, the key-revoked one and the
+/// id-revoked one present.
+fn revoking(own: Option<Row>) -> (RosterDoc, [(u8, Link); 3]) {
+    let phone = live(PHONE, "phone");
+    let laptop = revoked(LAPTOP, "laptop");
+    let nas = live(NAS, "nas");
+    let rows: Vec<Row> = own
+        .into_iter()
+        .chain([phone.clone(), laptop.clone()])
+        .collect();
+    let list = records(2, &rows, nas.ids.clone());
+    (
+        list,
+        [
+            (PHONE, phone.standing),
+            (LAPTOP, laptop.standing),
+            (NAS, nas.standing),
+        ],
+    )
+}
+
+/// Whether `home`'s `serve` gate admits the device `seed` presenting `standing`.
+async fn serve_admits(home: &Home, seed: u8, standing: &Link) -> bool {
+    swoosh::testkit::serve_admits(home, own_key(home), key(seed), standing).await
+}
+
+/// `serve` on `home` admits the live device and refuses both revoked ones.
+async fn serves_only_the_live(home: &Home, standings: &[(u8, Link); 3]) {
+    let [(phone, live), (laptop, by_key), (nas, by_id)] = standings;
+    assert!(
+        serve_admits(home, *phone, live).await,
+        "the live device is admitted"
+    );
+    assert!(
+        !serve_admits(home, *laptop, by_key).await,
+        "a device whose key the copy revoked is refused"
+    );
+    assert!(
+        !serve_admits(home, *nas, by_id).await,
+        "a standing whose id the copy revoked is refused"
+    );
+}
+
+/// A new machine restores a copy that revoked devices, cuts its own row, and serves: the revoked devices
+/// are refused at its gate. End to end: both the restore's own add and its cut's add bring the copy's
+/// revocations here, so it is red only when neither does.
+#[tokio::test]
+async fn serve_after_a_restore_on_a_new_machine_refuses_the_copys_revoked_devices() {
+    let home = machine("restore-serve-new", SPARE);
+    let (list, standings) = revoking(None);
+    let dir = stick(&home, &list);
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    assert!(
+        held(&home).epoch() > list.epoch(),
+        "the restore cut its own row"
+    );
+    serves_only_the_live(&home, &standings).await;
+}
+
+/// A machine that keeps no root and whose row the copy keeps live restores with nothing cut, and serves: the
+/// revoked devices are refused at its gate. With nothing cut, only the restore's own add brings the copy's
+/// revocations here: red when the copy's list is written without them.
+#[tokio::test]
+async fn serve_after_a_restore_with_nothing_cut_refuses_the_copys_revoked_devices() {
+    let home = scratch("restore-serve-uncut");
+    let (list, standings) = revoking(Some(live(OWN, "desk")));
+    let dir = stick(&home, &list);
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    assert_eq!(held(&home).epoch(), list.epoch(), "nothing was cut");
+    serves_only_the_live(&home, &standings).await;
+}
+
+/// A device of the root restores a copy that revoked devices, and serves: the fold brings the revocations to
+/// its gate. The device path's control beside the rows above: it holds through the fold, which this restore
+/// does not change.
+#[tokio::test]
+async fn serve_after_a_restore_on_a_device_refuses_the_copys_revoked_devices() {
+    let home = scratch("restore-serve-device");
+    let desk = live(OWN, "desk");
+    device_of(&home, &desk).await;
+    let (list, standings) = revoking(Some(desk));
+    let dir = stick(&home, &list);
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    serves_only_the_live(&home, &standings).await;
+}
+
+/// A device of the root whose row the copy no longer carries restores a copy that revoked devices, cuts its
+/// own row outside the fold, and serves: the revoked devices are refused at its gate. End to end: the fold
+/// brings the copy's revocations before the cut, so this holds without the cut's own add too.
+#[tokio::test]
+async fn serve_after_a_restore_on_a_device_whose_row_is_gone_refuses_the_copys_revoked_devices() {
+    let home = scratch("restore-serve-device-cut");
+    device_of(&home, &live(OWN, "desk")).await;
+    let (list, standings) = revoking(None);
+    let dir = stick(&home, &list);
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    assert!(
+        held(&home).epoch() > list.epoch(),
+        "the restore cut its own row"
+    );
+    serves_only_the_live(&home, &standings).await;
 }

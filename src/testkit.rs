@@ -62,6 +62,33 @@ pub fn lock() -> HomeWrite {
     HomeWrite::wait(&home).expect("take the scratch home's lock")
 }
 
+/// Whether the `serve` gate of `home`, built as `serve` builds it for this machine `own`, admits the device
+/// `peer` presenting `standing` to the service `demo`. The gate reads `revoked` and never the list, so this
+/// asks what a dial is answered.
+///
+/// # Panics
+///
+/// When the gate cannot be built, or `standing` is not a link.
+#[expect(
+    clippy::expect_used,
+    reason = "a test fixture that cannot build the gate stops the test"
+)]
+pub async fn serve_admits(home: &Home, own: NodeId, peer: VerifyKey, standing: &Link) -> bool {
+    let (gate, _cut) = crate::gate::anchored(home, own, crate::serve::BoundTargets::default())
+        .await
+        .expect("build the serve gate");
+    let cap = Cap::parse(standing.as_str()).expect("a standing is a link");
+    let service: Service = "demo".parse().expect("a service name");
+    matches!(
+        gate.admit(
+            nauthy::ProvenPeer::from_handshake(peer),
+            Some(&cap),
+            &service
+        ),
+        nauthy::Decision::Admit
+    )
+}
+
 /// `serve.lock` held the way a running `serve` holds it: taken under the home's own `home.lock`, recording
 /// this process and, under `--admit`, the root it admits. A test holds it to stand for a `serve` of `home`.
 ///

@@ -2769,6 +2769,77 @@ async fn a_list_revoking_this_machine_after_its_row_was_renewed_never_stops_the_
     );
 }
 
+/// A list that keeps the phone and revokes the laptop's key, with no row for this machine, so finishing a
+/// root on it cuts this machine's row.
+fn revoking_the_laptop() -> RosterDoc {
+    records(
+        2,
+        vec![row(PHONE, "phone", Vec::new())],
+        Vec::new(),
+        vec![key(LAPTOP)],
+    )
+}
+
+/// Whether `home`'s `serve` gate admits the device `seed` presenting the standing `ROOT` signed for it.
+async fn serve_admits(home: &Home, seed: u8) -> bool {
+    let standing = TestRoot::seeded(ROOT).standing(key(seed)).unwrap();
+    crate::testkit::serve_admits(home, TestNode::seeded(OWN).node_id(), key(seed), &standing).await
+}
+
+/// A restore on a machine that kept no root, killed after `root.key`, is finished by the next act, which cuts
+/// this machine's row; `serve` then refuses the device the copy revoked. End to end: the restore's own add
+/// and the finish's cut each bring the copy's revocations to `revoked`, so it is red only when neither does.
+#[tokio::test]
+async fn a_killed_restore_finished_by_the_next_act_serves_none_the_copy_revoked() {
+    let home = home("restore-killed-serve");
+    let dir = beside(&home, "copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    copy(&dir, ROOT, &revoking_the_laptop());
+    STOP.set(Some(Seam::Keyed));
+    let killed = super::restore(&home, &dir, &mut Counting::new([PASS])).await;
+    STOP.set(None);
+    assert!(killed.is_err(), "stopped at the seam");
+
+    let finished = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
+    assert!(matches!(finished, Ok(Minted::Made(_))), "{finished:?}");
+    assert!(matches!(standing(&home).await, Standing::HoldsRoot { .. }));
+    assert!(
+        serve_admits(&home, PHONE).await,
+        "the live device is admitted"
+    );
+    assert!(
+        !serve_admits(&home, LAPTOP).await,
+        "the revoked one is refused"
+    );
+}
+
+/// A finish whose list never had its revocations brought to `revoked` brings them with its own cut, since no
+/// fold runs before the pin. The list is written here by hand: every write of `devices` now adds its
+/// revocations first, so no path leaves this state, and no other row turns red when the cut's own add is
+/// gone. This one pins that add, the rule that no list is written without its revocations. Red when the
+/// finish writes its cut without them.
+#[tokio::test]
+async fn a_finish_brings_its_cuts_revocations_to_the_gate() {
+    let home = home("finish-serve");
+    private(&home.root_key(), &sealed(ROOT));
+    held(&home, &revoking_the_laptop());
+    assert!(matches!(
+        standing(&home).await,
+        Standing::InterruptedMint { .. }
+    ));
+
+    let finished = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
+    assert!(matches!(finished, Ok(Minted::Made(_))), "{finished:?}");
+    assert!(
+        serve_admits(&home, PHONE).await,
+        "the live device is admitted"
+    );
+    assert!(
+        !serve_admits(&home, LAPTOP).await,
+        "the revoked one is refused"
+    );
+}
+
 // --- present: a root with a `touch-id` lock ---
 
 /// Make the root kept in `home` the one under its passphrase and a `touch-id` lock.

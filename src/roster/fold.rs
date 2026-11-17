@@ -1,10 +1,12 @@
 //! The fold: how an update reaches this machine's files, whoever carried it.
 //!
-//! A root act's own cut, an update taken in an exchange, and one given to this machine in an exchange all
-//! fold here, and nowhere else writes `devices`. The fold verifies the update under the pin, compares it with
-//! the one held, and only ever adds: a revoked id or key it learns is written to the files the gate reads,
-//! and none is ever removed. A fork another device passes on in an exchange folds here too
-//! ([`fold_fork`]), and never becomes the update held.
+//! A root act's commit, an update taken in an exchange, and one given to this machine in an exchange all
+//! fold here. Two writes of `devices` do not: a root signing this machine's own row (a mint, its finish, or
+//! a restore, on a device too) and a restore where the standing lets no fold run. Each adds the list's
+//! revocations ([`RosterDoc::revocations`]) to `revoked` before it writes, as the fold does. The fold
+//! verifies the update under the pin, compares it with the one held, and only ever adds: a revoked id or key
+//! it learns is written to the files the gate reads, and none is ever removed. A fork another device passes
+//! on in an exchange folds here too ([`fold_fork`]), and never becomes the update held.
 //!
 //! Every fold runs under `home.lock`, taken by its caller and passed in, from the read of the held update to
 //! its last write, so two folds never both read one floor and both write. A root act's commit folds its own
@@ -15,7 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use nauthy::{Revocation, VerifyKey};
+use nauthy::VerifyKey;
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{ArtifactError, Epoch, MAX_ROSTER_BLOB, RosterDoc, RosterVerifyError};
@@ -204,18 +206,11 @@ pub(crate) fn read_held_or_error(
     Ok(super::verify(&bytes, root).ok().map(|doc| (doc, bytes)))
 }
 
-/// Add the update's revoked ids that have not ended, and its revoked keys, to `<home>/revoked`, in one
-/// write. The writer leaves out this machine's own key (see [`crate::revoked::add`]); the pick-up still
-/// refuses a standing whose key the update revokes.
+/// Add the update's revocations ([`RosterDoc::revocations`]) to `<home>/revoked`, in one write. The writer
+/// leaves out this machine's own key (see [`crate::revoked::add`]); the pick-up still refuses a standing
+/// whose key the update revokes.
 fn revoke(home_lock: &HomeWrite, home: &Home, doc: &RosterDoc) -> Result<(), FoldError> {
-    let now = unix_now();
-    let ids = doc
-        .revoked()
-        .iter()
-        .filter(|id| id.expires > now)
-        .map(|id| Revocation::Id(id.id.clone()));
-    let keys = doc.revoked_keys().map(Revocation::Key);
-    crate::revoked::add(home_lock, home, ids.chain(keys))?;
+    crate::revoked::add(home_lock, home, doc.revocations(unix_now()))?;
     Ok(())
 }
 

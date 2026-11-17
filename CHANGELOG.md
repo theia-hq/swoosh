@@ -138,6 +138,9 @@ All notable changes to swoosh, newest first.
   data out of order, and swoosh held it without limit (RUSTSEC-2026-0185). Any machine that knew your
   machine's key could do it, and so could a machine you connected to. swoosh now drops a connection that sends
   data with too many gaps, and a machine can leave at most 16 MiB of unread data per connection.
+- **`swoosh root restore` on a machine that was not one of your devices left revoked devices admitted.**
+  `swoosh serve` there let in a device your root had revoked until its standing expired or the root next
+  issued a device list. Restore now applies the revocations on every machine.
 
 ## v0.14.1
 
