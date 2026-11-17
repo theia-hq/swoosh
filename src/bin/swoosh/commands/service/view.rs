@@ -47,14 +47,24 @@ fn render(state: &ServiceState, out: &mut impl io::Write) -> eyre::Result<()> {
         ));
     };
     let entries = state.started.entries();
-    let rows: Vec<_> = entries
+    let saved: Vec<_> = entries
         .iter()
-        .filter_map(|entry| {
-            let (name, configured) = entry.split_once('=')?;
+        .filter_map(|entry| entry.split_once('='))
+        .collect();
+    let mut rows: Vec<_> = saved
+        .iter()
+        .map(|&(name, configured)| {
             let bound = snapshot.as_ref().and_then(|snapshot| snapshot.get(name));
             let target = bound.map_or(configured, |pair| pair.target().as_str());
             let off = state.off.contains(name);
             let unbound = snapshot.is_some() && bound.is_none();
+            // The resident's refusal bit is not the file's off mark: removal or an unreadable file sets it
+            // too, so a refusing route that is not off reads neither `on` nor `off`.
+            let (on, on_and) = if bound.is_some_and(|pair| pair.refused()) {
+                ("refusing new connections", "refusing new connections,")
+            } else {
+                ("on", "on,")
+            };
             // A relative path names a directory only where `serve` starts, which this reader cannot know:
             // it is shown as written beside any bound target, never compared with it.
             if state.started.is_relative(name) {
@@ -62,59 +72,114 @@ fn render(state: &ServiceState, out: &mut impl io::Write) -> eyre::Result<()> {
                 let state = match (unbound, off) {
                     (true, false) => State::Relative("from the next start,", saved),
                     (true, true) => State::Relative("off, from the next start,", saved),
-                    (false, false) => State::Relative("on,", saved),
+                    (false, false) => State::Relative(on_and, saved),
                     (false, true) => State::Relative("off,", saved),
                 };
-                return Some(Row {
+                return Row {
                     name,
                     target,
                     state,
-                });
+                };
             }
             let next = (target != configured).then_some(configured);
             let state = match (next, unbound, off) {
-                (Some(next), _, false) => State::Next("on,", next),
+                (Some(next), _, false) => State::Next(on_and, next),
                 (Some(next), _, true) => State::Next("off,", next),
                 (None, true, false) => State::Fixed("from the next start"),
                 (None, true, true) => State::Fixed("off, from the next start"),
-                (None, false, false) => State::Fixed("on"),
+                (None, false, false) => State::Fixed(on),
                 (None, false, true) => State::Fixed("off"),
             };
-            Some(Row {
+            Row {
                 name,
                 target,
                 state,
-            })
+            }
         })
         .collect();
-    if rows.is_empty() {
+    let held = |name: &str| saved.iter().any(|&(held, _)| held == name);
+    // A bound name the file does not hold shows its bound target, in the snapshot's order (by name: it
+    // carries no bind order). Nothing here says whether the start named it or the file dropped it since: the
+    // snapshot carries no origin.
+    for pair in snapshot.iter().flat_map(|snapshot| snapshot.pairs()) {
+        let name = pair.name().as_str();
+        if held(name) {
+            continue;
+        }
+        let state = match (state.off.contains(name), pair.refused()) {
+            (true, _) => "off, not saved",
+            (false, true) => "refusing new connections, not saved",
+            (false, false) => "on, not saved",
+        };
+        rows.push(Row {
+            name,
+            target: pair.target().as_str(),
+            state: State::Fixed(state),
+        });
+    }
+    let services = rows.len();
+    // An off mark outlives removal, so the file can hold one with no service behind it: shown with no target,
+    // since none is saved or bound to show.
+    for name in &state.off {
+        if !held(name)
+            && !snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.contains(name))
+        {
+            rows.push(Row {
+                name,
+                target: "",
+                state: State::Fixed("off, no service saved"),
+            });
+        }
+    }
+    write_rows(&rows, out)?;
+    if services == 0 {
+        if !rows.is_empty() {
+            writeln!(out)?;
+        }
         writeln!(
             out,
             "Serving nothing.\nTo add a service:\n  swoosh service add <service>"
         )?;
         return Ok(());
     }
+    if snapshot.is_none() {
+        write!(
+            out,
+            "\nNot serving now.\nTo start serving:\n  swoosh serve\n"
+        )?;
+    }
+    Ok(())
+}
+
+/// Aligned rows, or stacked ones where a row cannot fit; only compact rows set the padding.
+fn write_rows(rows: &[Row<'_>], out: &mut impl io::Write) -> eyre::Result<()> {
     // Ineligible large targets cannot force padding proportional to their length.
     let (mut names, mut targets) = (0, 0);
     for row in rows.iter().filter(|row| row.compact()) {
-        names = names.max(row.name.len());
+        names = names.max(width(Escaped(row.name)));
         targets = targets.max(width(EscapedComplete(row.target)));
     }
     for row in rows {
         let target_width = width(EscapedComplete(row.target));
         if row.compact() && 6 + names + targets + row.state.width() <= 80 {
-            write!(
-                out,
-                "  {:names$}  {}",
-                row.name,
-                EscapedComplete(row.target)
-            )?;
+            // Padding is counted by hand: an escaped name's Display does not honour a width.
+            write!(out, "  {}", Escaped(row.name))?;
+            for _ in width(Escaped(row.name))..names {
+                write!(out, " ")?;
+            }
+            write!(out, "  {}", EscapedComplete(row.target))?;
             for _ in target_width..targets {
                 write!(out, " ")?;
             }
             writeln!(out, "  {}", row.state)?;
         } else {
-            writeln!(out, "  {}\n    {}", row.name, EscapedComplete(row.target))?;
+            writeln!(out, "  {}", Escaped(row.name))?;
+            // An off-only row has no target, so it gets no target line.
+            if !row.target.is_empty() {
+                writeln!(out, "    {}", EscapedComplete(row.target))?;
+            }
             let mut line = StateLine { out, column: 0 };
             match row.state {
                 State::Fixed(words) => line.words(words)?,
@@ -135,12 +200,6 @@ fn render(state: &ServiceState, out: &mut impl io::Write) -> eyre::Result<()> {
             line.finish()?;
         }
     }
-    if snapshot.is_none() {
-        write!(
-            out,
-            "\nNot serving now.\nTo start serving:\n  swoosh serve\n"
-        )?;
-    }
     Ok(())
 }
 
@@ -154,7 +213,10 @@ impl Row<'_> {
     fn compact(&self) -> bool {
         self.target.is_ascii()
             && self.state.ascii()
-            && 6 + self.name.len() + width(EscapedComplete(self.target)) + self.state.width() <= 80
+            && 6 + width(Escaped(self.name))
+                + width(EscapedComplete(self.target))
+                + self.state.width()
+                <= 80
     }
 }
 

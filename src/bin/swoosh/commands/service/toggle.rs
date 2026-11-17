@@ -170,7 +170,7 @@ impl ServiceToggleCmd {
     ///
     /// # Errors
     ///
-    /// [`Usage`] when a machine was typed; the name is not listed here; the file cannot be read or
+    /// [`Usage`] when a machine was typed; the name is not saved here; the file cannot be read or
     /// written.
     pub async fn run(self, home: &Home, way: Way) -> eyre::Result<()> {
         let service = self.here(way)?;
@@ -181,10 +181,10 @@ impl ServiceToggleCmd {
         drop(home_lock);
         let line = match (toggled, way) {
             (Err(Refused::NotListed), Way::On) => eyre::bail!(
-                "{name} is not listed here; add it: swoosh service add {}",
+                "{name} is not saved here; add it: swoosh service add {}",
                 swoosh::serve::entry_for(name)
             ),
-            (Err(Refused::NotListed), Way::Off) => eyre::bail!("{name} is not listed here"),
+            (Err(Refused::NotListed), Way::Off) => eyre::bail!("{name} is not saved here"),
             (Err(Refused::List(error)), _) => return Err(error.into()),
             (Ok(Toggled::Turned), _) => format!("Turned {name} {} here.", way.verb()),
             (Ok(Toggled::Already), _) => format!("{name} is already {}.", way.verb()),

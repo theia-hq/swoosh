@@ -324,7 +324,7 @@ async fn service_rm_of_several_is_all_or_nothing() {
         .expect_err("db is not listed");
     assert_eq!(
         format!("{error:#}"),
-        "db is not listed here\n  Nothing was removed."
+        "db is not saved here\n  Nothing was removed."
     );
     assert_eq!(
         listed(&home),
@@ -336,7 +336,7 @@ async fn service_rm_of_several_is_all_or_nothing() {
     let one = rm(&["db"]).run(&home).await.expect_err("db is not listed");
     assert_eq!(
         format!("{one:#}"),
-        "db is not listed here",
+        "db is not saved here",
         "one typed: no extra line"
     );
     let _ = std::fs::remove_dir_all(home.dir());
