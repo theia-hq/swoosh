@@ -11,7 +11,7 @@
 //! Where the root is kept, the last update it signed is also its record: the next number, and every
 //! device and revocation the next cut carries, are read forward from it.
 
-use nauthy::{Link, SignError, Signed, VerifyKey};
+use nauthy::{Link, Revocation, SignError, Signed, VerifyKey};
 
 pub use crate::codec::{
     FormatError, Id, MAX_BADGE, MAX_IDS, MAX_MEMBERS, MAX_REVOCATION_ID, MAX_REVOKED,
@@ -213,6 +213,17 @@ impl RosterDoc {
     /// The revoked device keys, in key order.
     pub fn revoked_keys(&self) -> impl Iterator<Item = VerifyKey> + '_ {
         self.revoked_devices.iter().map(|device| device.node)
+    }
+
+    /// What this update brings to `revoked`, the file the gate reads: its revoked ids that have not ended by
+    /// `now` (unix seconds), then its revoked keys. An ended id refuses nothing, so it is left out.
+    pub(crate) fn revocations(&self, now: u64) -> impl Iterator<Item = Revocation> + '_ {
+        let ids = self
+            .revoked
+            .iter()
+            .filter(move |id| id.expires > now)
+            .map(|id| Revocation::Id(id.id.clone()));
+        ids.chain(self.revoked_keys().map(Revocation::Key))
     }
 
     /// Whether this update revokes the device `key`.

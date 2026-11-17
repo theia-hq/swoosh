@@ -11,10 +11,10 @@
 //!    refused before the prompt, and the bytes that verified then are the ones written; so are the key's,
 //!    never sealed again, staged in the home and opened there with the passphrase as this root before
 //!    anything of the root is written, so the bytes published are bytes proven to open. The order is
-//!    `devices`, then `root.key`, then this machine's row, `key.cert` and the pin. On a device of this root
-//!    `root.key` is the commit point (the home keeps the root from then on), so everything the copy brings
-//!    lands before it: on a device the list goes through the fold, the one path that writes `devices`, and
-//!    elsewhere it is written only over an older list or none, decided under the lock. This machine's row
+//!    `revoked` and `devices`, then `root.key`, then this machine's row, `key.cert` and the pin. On a device
+//!    of this root `root.key` is the commit point (the home keeps the root from then on), so everything the
+//!    copy brings lands before it: on a device the list goes through the fold, and elsewhere its revocations
+//!    are added and it is written only over an older list or none, decided under the lock. This machine's row
 //!    needs nothing signed when it is live; a lapsed row is renewed and an absent one added under the
 //!    suggested name for 90 days, as a mint signs its own, and that cut is kept here, offered to nobody. On a
 //!    machine that kept no root, a crash before the pin leaves a root with no pin, which running this again
@@ -281,9 +281,10 @@ pub async fn restore(
     };
     drop(key_bytes);
     drop(passphrase);
-    // 1. `devices`, never over a newer list: decided here, under the lock. A device folds the copy's list, the
-    // one path that writes `devices` (newer taken, the same number with other bytes kept as the conflict,
-    // older nothing); elsewhere the bytes are written only over an older list or none.
+    // 1. `revoked` and `devices`, never over a newer list: decided here, under the lock. A device folds the
+    // copy's list (newer taken, the same number with other bytes kept as the conflict, older nothing), and
+    // the fold adds the revocations of what it takes or keeps; elsewhere, where the standing lets no fold
+    // run, the copy's revocations are added and its bytes written only over an older list or none.
     match standing {
         Standing::Device { .. } => {
             crate::roster::fold(&home_lock, home, &copied_bytes)
@@ -291,7 +292,10 @@ pub async fn restore(
                 .map_err(RootError::from)?;
         }
         // `HoldsRoot` returned before the prompt, and `still` refuses a standing that moved since.
+        // The copy's revocations land whether its list is written or not: they only ever add.
         Standing::Unpinned | Standing::InterruptedMint { .. } | Standing::HoldsRoot { .. } => {
+            crate::revoked::add(&home_lock, home, copied.revocations(unix_now()))
+                .map_err(|error| RootError::Write(error.into()))?;
             let held_here = crate::roster::read_held(&home.devices(), pin);
             if held_here.is_none_or(|(held, _)| held.epoch() < copied.epoch()) {
                 crate::roster::write(&home_lock, &home.devices(), &copied_bytes)
@@ -335,6 +339,7 @@ pub async fn restore(
             None
         }
         // Lapsed or absent: signed as a mint signs its own, into a list kept here, which carries the rename.
+        // `take_own` writes that list's revocations and the list itself, on a device too, not through the fold.
         _ => {
             root_here.take_own(&home_lock, own)?;
             renamed

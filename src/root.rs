@@ -1751,9 +1751,11 @@ async fn finish(
 }
 
 impl Root {
-    /// Sign this machine's standing, cut it into a list and write that list as `devices`, then take the
-    /// standing as this machine's and pin the root, under `home.lock`: the steps a mint and its finish
-    /// share, in the order a crash is finished from.
+    /// Sign this machine's standing, cut it into a list, add that list's revocations to `revoked` and write
+    /// the list as `devices`, then take the standing as this machine's and pin the root, under `home.lock`:
+    /// the steps a mint, its finish and a restore that signs this machine's row share, in the order a crash
+    /// is finished from. Not a fold: on a machine with no pin yet none can run, and a restore takes it on a
+    /// device too, after folding the copy.
     fn take_own(&mut self, home_lock: &HomeWrite, own: VerifyKey) -> Result<(), RootError> {
         let standing = self.sign_own(own)?;
         let act = &mut self.act;
@@ -1767,6 +1769,12 @@ impl Root {
         let doc = act.book.update(number, act.now)?;
         let bytes = self.sign(&doc.canonical_bytes())?;
         let act = &mut self.act;
+        // The gate reads `revoked` and never the list, so the list's revocations go there first, as on every
+        // write of `devices`; a write that dies between the two leaves revocations and no list. Each one the
+        // cut carries came from `revoked` itself or from a list or fork added there before it was held, so on
+        // every path that reaches here this writes nothing new: it keeps that rule, not a known gap.
+        crate::revoked::add(home_lock, &act.home, doc.revocations(unix_now()))
+            .map_err(|error| RootError::Write(error.into()))?;
         crate::roster::write(home_lock, &act.home.devices(), &bytes)?;
         act.book.last_update = number;
         act.held = Some((doc, bytes));
