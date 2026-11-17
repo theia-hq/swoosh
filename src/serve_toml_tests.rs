@@ -1345,3 +1345,115 @@ fn a_relative_saved_path_is_read_live_at_the_captured_start_directory() {
         ["site=file:/captured/./next"]
     );
 }
+
+/// A write whose text would be larger than a read accepts is refused, an `off` and an `add` alike, and the
+/// file is left byte for byte and readable; a write that lands exactly at the bound succeeds and reads back.
+/// Without the bound the refused write would land, and every later read would call the file damaged.
+#[test]
+fn a_write_never_exceeds_the_read_cap() {
+    let scratch = Scratch::new("write-cap");
+    let file = at_the_cap(ServeToml::default());
+
+    let lock = crate::testkit::lock();
+    let exact = file.clone();
+    ServeToml::update(&lock, &scratch.home, |held| *held = exact)
+        .expect("exactly the bound is written");
+    assert_eq!(ServeToml::read(&scratch.home).expect("it reads back"), file);
+    let before = std::fs::read(scratch.home.serve_toml()).unwrap();
+
+    let off = ServeToml::update(&lock, &scratch.home, |held| {
+        held.off.insert("z".to_owned());
+    });
+    assert!(
+        matches!(off, Err(super::ServeTomlError::TooLarge { .. })),
+        "{off:?}"
+    );
+    let add = ServeToml::try_update(&lock, &scratch.home, |held| {
+        held.add(&["web=tcp:localhost:3000".to_owned()], Path::new("/"))
+    });
+    assert!(
+        matches!(add, Err(super::ServeTomlError::TooLarge { .. })),
+        "{add:?}"
+    );
+    assert_eq!(std::fs::read(scratch.home.serve_toml()).unwrap(), before);
+    assert_eq!(
+        ServeToml::read(&scratch.home).expect("still readable"),
+        file
+    );
+}
+
+/// `file` with off marks added until its text is exactly [`MAX_SERVE_TOML`](super::MAX_SERVE_TOML) bytes.
+fn at_the_cap(mut file: ServeToml) -> ServeToml {
+    let cap = usize::try_from(super::MAX_SERVE_TOML).unwrap();
+    // Each `n00000` adds `, "n00000"`, ten bytes: fill to within one name of 60 bytes short of the bound.
+    let names = (cap - 60 - file.encode().len()) / 10;
+    file.off
+        .extend((0..names).map(|index| format!("n{index:05}")));
+    // One last name, sized so the text lands on the bound exactly.
+    let short = file.encode().len() + "\"t\", ".len();
+    let pad = cap - short;
+    assert!(pad < 63, "{pad}");
+    file.off.insert(format!("t{}", "a".repeat(pad)));
+    assert_eq!(file.encode().len(), cap);
+    file
+}
+
+/// A file exactly at the bound can always shrink: `on` clears a mark and `rm` removes a saved service, each
+/// from the full file, so a full file never leaves the operator stuck.
+#[test]
+fn on_and_rm_shrink_a_file_at_the_read_cap() {
+    let scratch = Scratch::new("cap-shrink");
+    let file = at_the_cap(ServeToml {
+        services: Some(vec!["web=tcp:localhost:3000".to_owned()]),
+        ..ServeToml::default()
+    });
+    let mark = file.off.first().cloned().unwrap();
+    let lock = crate::testkit::lock();
+    let seed = |file: &ServeToml| {
+        let full = file.clone();
+        ServeToml::update(&lock, &scratch.home, |held| *held = full)
+            .expect("exactly the bound is written");
+    };
+
+    seed(&file);
+    ServeToml::update(&lock, &scratch.home, |held| {
+        held.off.remove(&mark);
+    })
+    .expect("on shrinks a full file");
+    assert!(!ServeToml::read(&scratch.home).unwrap().off.contains(&mark));
+
+    seed(&file);
+    ServeToml::try_update(&lock, &scratch.home, |held| held.remove(&[service("web")]))
+        .expect("rm shrinks a full file")
+        .expect("web is saved");
+    let read = ServeToml::read(&scratch.home).unwrap();
+    assert!(
+        read.services
+            .is_some_and(|services| services.iter().all(|entry| !entry.starts_with("web="))),
+        "web is removed"
+    );
+}
+
+/// `rm` on a home with no saved list writes the default list out, less the name: when that would pass the
+/// bound it is refused like any other write, and the file is left byte for byte and readable.
+#[test]
+fn rm_that_writes_the_default_list_past_the_cap_is_refused() {
+    let scratch = Scratch::new("cap-rm-default");
+    let file = at_the_cap(ServeToml::default());
+    let lock = crate::testkit::lock();
+    let full = file.clone();
+    ServeToml::update(&lock, &scratch.home, |held| *held = full)
+        .expect("exactly the bound is written");
+    let before = std::fs::read(scratch.home.serve_toml()).unwrap();
+    let removed =
+        ServeToml::try_update(&lock, &scratch.home, |held| held.remove(&[service("ping")]));
+    assert!(
+        matches!(removed, Err(super::ServeTomlError::TooLarge { .. })),
+        "{removed:?}"
+    );
+    assert_eq!(std::fs::read(scratch.home.serve_toml()).unwrap(), before);
+    assert_eq!(
+        ServeToml::read(&scratch.home).expect("still readable"),
+        file
+    );
+}

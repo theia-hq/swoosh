@@ -176,7 +176,9 @@ impl Resident {
     }
 
     /// The services the gate refuses now (off, or no longer in `services`), at most
-    /// [`DISABLED_NAMES_CAP`] of them so the reply always decodes. While the file cannot be read the gate
+    /// [`DISABLED_NAMES_CAP`] of them so the reply always decodes. The names this run bound come first, so
+    /// the cut drops only marks no route here answers: a bound name the gate refuses is never reported as
+    /// answering, however many marks sort before it. While the file cannot be read the gate
     /// refuses every service the run serves, and the status reports that as unknown rather than as each
     /// one turned off.
     pub fn disabled_names(&self) -> DisabledList {

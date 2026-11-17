@@ -81,6 +81,17 @@ pub enum ServeTomlError {
         /// The file.
         path: PathBuf,
     },
+    /// A write would make the file larger than [`MAX_SERVE_TOML`], which every read refuses, so nothing was
+    /// written and the file still reads as it did.
+    #[error(
+        "{} would grow past {} KiB: nothing was written\n  To make room: swoosh service rm <name>, or swoosh service on <name> to clear an off mark",
+        EscapedPath(path),
+        MAX_SERVE_TOML / 1024
+    )]
+    TooLarge {
+        /// The file.
+        path: PathBuf,
+    },
     /// The relay or the resolver the file keeps is not a URL swoosh can use. Swoosh's own line, never the
     /// parser's text, and it names no command: which server to use is the person's call, and swoosh
     /// never falls back to the default one.
@@ -122,7 +133,8 @@ impl ServeToml {
     ///
     /// # Errors
     ///
-    /// [`ServeTomlError`] when the file cannot be read or written.
+    /// [`ServeTomlError`] when the file cannot be read or written, or when what it would hold is larger
+    /// than [`MAX_SERVE_TOML`], which leaves the file as it was.
     pub fn update(
         home_lock: &HomeWrite,
         home: &Home,
@@ -142,7 +154,8 @@ impl ServeToml {
     ///
     /// # Errors
     ///
-    /// [`ServeTomlError`] when the file cannot be read or written.
+    /// [`ServeTomlError`] when the file cannot be read or written, or when what it would hold is larger
+    /// than [`MAX_SERVE_TOML`], which leaves the file as it was.
     pub fn try_update<T, E>(
         home_lock: &HomeWrite,
         home: &Home,
@@ -156,7 +169,13 @@ impl ServeToml {
             Err(refused) => return Ok(Err(refused)),
         };
         if next != held {
-            crate::config::write_private_atomic(home_lock, &path, next.encode().as_bytes())
+            let text = next.encode();
+            // The read's own bound, so a write can never leave a file every later read calls damaged: that
+            // file would refuse every toggle and edit, and every service a running `serve` bound.
+            if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_SERVE_TOML {
+                return Err(ServeTomlError::TooLarge { path });
+            }
+            crate::config::write_private_atomic(home_lock, &path, text.as_bytes())
                 .map_err(|source| ServeTomlError::Io { path, source })?;
         }
         Ok(Ok(changed))
@@ -526,17 +545,21 @@ impl LiveServeToml {
         self.refreshed().refused()
     }
 
-    /// What the status reports as off: [`refused`](Self::refused), or unknown while the file cannot be
-    /// read. Then the gate refuses every service this run bound, and naming them all as off would send
-    /// the user to turn on a service the gate goes on refusing. Decided under one refreshed hold, so the
-    /// report and the gate never straddle a read.
+    /// What the status reports as off: [`refused`](Self::refused), the names this run bound first, or
+    /// unknown while the file cannot be read. Then the gate refuses every service this run bound, and
+    /// naming them all as off would send the user to turn on a service the gate goes on refusing. Bound
+    /// names lead so a reply that must cut the list cuts only marks no route here answers, never a name
+    /// the gate refuses on this run. Decided under one refreshed hold, so the report and the gate never
+    /// straddle a read.
     pub fn disabled(&self) -> crate::serve::control_codec::DisabledList {
         use crate::serve::control_codec::DisabledList;
 
         let held = self.refreshed();
         match held.policy {
             LivePolicy::Failed => DisabledList::Unknown(UNREADABLE.to_owned()),
-            LivePolicy::Absent | LivePolicy::Accepted => DisabledList::Known(held.refused()),
+            LivePolicy::Absent | LivePolicy::Accepted => {
+                DisabledList::Known(held.refused_bound_first())
+            }
         }
     }
 
@@ -756,6 +779,19 @@ impl Held {
                 .cloned(),
         );
         refused.into_iter().collect()
+    }
+
+    /// [`refused`](Self::refused), the names this run bound first and the other marks after, each part
+    /// still sorted.
+    fn refused_bound_first(&self) -> Vec<String> {
+        let (mut bound, marks): (Vec<String>, Vec<String>) =
+            self.refused().into_iter().partition(|name| {
+                self.serving
+                    .as_ref()
+                    .is_some_and(|serving| serving.bound.contains_key(name))
+            });
+        bound.extend(marks);
+        bound
     }
 }
 

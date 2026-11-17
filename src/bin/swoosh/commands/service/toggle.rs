@@ -1,18 +1,21 @@
-//! `swoosh service on <service>` / `swoosh service off <service>`: turn one listed service on or off here,
-//! live, without stopping `serve`.
+//! `swoosh service on <service>` / `swoosh service off <service>`: turn one service on or off here, live,
+//! without stopping `serve`.
 //!
 //! Both are LOCAL FILE WRITES on the `off` list of `<home>/serve.toml`, never a socket call: the running
 //! `serve` is never asked anything. Its gate reads the file live (the
 //! [`LiveServeToml`](swoosh::serve_toml::LiveServeToml) it consults per stream), so an `off` refuses the
 //! service on the next stream and an `on` restores it, with no restart; with no `serve` running, the next
 //! start reads the same file. So one line fits both: the setting is written either way. An `off` PERSISTS
-//! (fail-closed): a restart keeps it off, and no start clears it for a name already listed.
+//! (fail-closed): a restart keeps it off, and no start clears it, saved or not.
 //!
-//! Each acts on a name the list holds, read as a bare `serve` reads it ([`Started::bare`]), the default
-//! included on a home that never named a list; a list that read refuses is refused here too, naming the
-//! file. `on` of a name not listed refuses and names the `service add` that would list it; `off` of
-//! one refuses with no fix, since a name not listed already does not answer. Neither opens a new service:
-//! `on` only takes a name off the `off` list.
+//! `off` takes any service name, saved or not: the gate refuses a name on the `off` list whoever bound it
+//! and however `serve` was started, so a name a `serve` binds can always be turned off, even one typed on
+//! its command line and never saved. `on` takes a name the list holds, read as a bare `serve` reads it
+//! ([`Started::bare`]), the default included on a home that never named a list, or a name on the `off`
+//! list, so every mark can be cleared. `on` of a name that is neither refuses and names the `service add`
+//! that would list it: it has no mark to clear and no route to open. A name not saved is said to be, so a
+//! typo shows. A list that bare read refuses is refused by both, naming the file. Neither opens a new
+//! service: `on` only takes a name off the `off` list.
 //!
 //! A machine typed after the service (`[me/<name>]`), or alone in its slot, is parsed so it can be refused
 //! with exit 2, and hidden from usage: these act on this machine only until they can reach another of your
@@ -35,7 +38,7 @@ use super::name_input::NameError;
 /// Turn a service on or off; the leaf carries the service, and the subcommand says which way.
 #[derive(Debug, Args)]
 pub struct ServiceToggleCmd {
-    /// A name on this machine's list
+    /// A service name
     #[arg(value_name = "service", value_parser = slot)]
     pub service: Slot,
     // One of your devices: refused until this can act there, so usage does not show it. Any text parses, so
@@ -116,11 +119,15 @@ impl Way {
     }
 }
 
-/// What a toggle found: it turned the service, or the service was already that way.
+/// What a toggle found: it turned a saved service, it moved the mark of a name not saved, or the name was
+/// already that way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Toggled {
-    /// The setting changed.
+    /// The setting changed for a name the list holds.
     Turned,
+    /// The setting changed for a name the list does not hold: only its mark moved, and nothing is said of
+    /// whether it serves, since no `serve` is asked.
+    Unsaved,
     /// It already was; nothing was written.
     Already,
 }
@@ -170,8 +177,8 @@ impl ServiceToggleCmd {
     ///
     /// # Errors
     ///
-    /// [`Usage`] when a machine was typed; the name is not saved here; the file cannot be read or
-    /// written.
+    /// [`Usage`] when a machine was typed; `on` of a name neither saved nor off here; the saved list is one
+    /// a bare `serve` refuses; the file cannot be read or written, or would grow past what a read accepts.
     pub async fn run(self, home: &Home, way: Way) -> eyre::Result<()> {
         let service = self.here(way)?;
         let name = service.as_str();
@@ -179,25 +186,37 @@ impl ServiceToggleCmd {
         // Membership is read as saved, never anchored at this cwd, so a removed cwd cannot block a toggle.
         let toggled = ServeToml::try_update(&home_lock, home, |file| toggle(file, name, way))?;
         drop(home_lock);
-        let line = match (toggled, way) {
-            (Err(Refused::NotListed), Way::On) => eyre::bail!(
+        let toggled = match toggled {
+            Ok(toggled) => toggled,
+            Err(Refused::NotListed) => eyre::bail!(
                 "{name} is not saved here; add it: swoosh service add {}",
                 swoosh::serve::entry_for(name)
             ),
-            (Err(Refused::NotListed), Way::Off) => eyre::bail!("{name} is not saved here"),
-            (Err(Refused::List(error)), _) => return Err(error.into()),
-            (Ok(Toggled::Turned), _) => format!("Turned {name} {} here.", way.verb()),
-            (Ok(Toggled::Already), _) => format!("{name} is already {}.", way.verb()),
+            Err(Refused::List(error)) => return Err(error.into()),
         };
-        eprintln!("{line}");
+        eprintln!("{}", toggled.line(name, way));
         Ok(())
+    }
+}
+
+impl Toggled {
+    /// The line a toggle says for `name`, turned `way`: true from the file alone, since no `serve` is asked.
+    fn line(self, name: &str, way: Way) -> String {
+        match (self, way) {
+            (Self::Turned, _) => format!("Turned {name} {} here.", way.verb()),
+            (Self::Unsaved, Way::Off) => format!("Turned {name} off here. It is not saved here."),
+            // Never "on": a mark cleared for a name not saved opens nothing, and only a `serve` that binds
+            // the name, which is not asked, would answer it.
+            (Self::Unsaved, Way::On) => format!("{name} is no longer off. It is not saved here."),
+            (Self::Already, _) => format!("{name} is already {}.", way.verb()),
+        }
     }
 }
 
 /// Why a toggle changed nothing.
 #[derive(Debug)]
 enum Refused {
-    /// The list does not hold the name the toggle was given.
+    /// `on` was given a name the list does not hold and the `off` list does not either: nothing to clear.
     NotListed,
     /// The list is one a bare `serve` refuses to start from, so no name on it can be trusted as listed.
     List(ServingError),
@@ -205,22 +224,23 @@ enum Refused {
 
 // Read membership through bare selection so shorthand names retain the same meaning.
 fn toggle(file: &mut ServeToml, name: &str, way: Way) -> Result<Toggled, Refused> {
-    let listed = Started::bare(file)
+    let saved = Started::bare(file)
         .map_err(Refused::List)?
         .names()
         .iter()
         .any(|held| held == name);
-    if !listed {
-        return Err(Refused::NotListed);
-    }
     let changed = match way {
-        Way::On => file.off.remove(name),
+        // Any name: the gate refuses a marked name in every launch mode, so a name bound but never saved
+        // can still be turned off, and no `serve` needs to say what it bound.
         Way::Off => file.off.insert(name.to_owned()),
+        // A saved name, or any mark: every mark `off` can write, `on` can clear.
+        Way::On if saved || file.off.contains(name) => file.off.remove(name),
+        Way::On => return Err(Refused::NotListed),
     };
-    Ok(if changed {
-        Toggled::Turned
-    } else {
-        Toggled::Already
+    Ok(match (changed, saved) {
+        (false, _) => Toggled::Already,
+        (true, true) => Toggled::Turned,
+        (true, false) => Toggled::Unsaved,
     })
 }
 

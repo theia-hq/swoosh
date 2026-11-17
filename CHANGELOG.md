@@ -22,6 +22,10 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`service off` takes any service name.** It no longer needs the name saved or a running serve, and says
+  `It is not saved here.` when the name is not saved. `service on` takes a saved name or one marked off; for a
+  marked name that is not saved it says `<name> is no longer off. It is not saved here.`. A change that would
+  grow `serve.toml` past 64 KiB is refused, nothing is written, and the error names `service rm` and `service on` as ways to make room.
 - **`service` and `status` show what the running serve holds.** `swoosh service` lists a bound service
   that is not saved (`on, not saved`) and a name marked off with no saved service (`off, no service saved`).
   A service the serve is refusing, such as one just removed, reads `refusing new connections`; `status` shows

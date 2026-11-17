@@ -2724,9 +2724,10 @@ fn naming_an_off_only_service_at_start_retains_every_off_name() {
     std::fs::write(&file, "off = [\"web\", \"speed\"]\n").expect("two services turned off");
 
     let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
+    // The bound name leads the reported list, the other marks after it.
     assert_eq!(
         running.off().as_deref(),
-        Some(&["speed".to_owned(), "web".to_owned()][..]),
+        Some(&["web".to_owned(), "speed".to_owned()][..]),
         "web remains refused"
     );
     running.stop();
