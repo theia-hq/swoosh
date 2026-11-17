@@ -50,6 +50,8 @@ use crate::standing::Standing;
 
 /// How long one exchange may take.
 pub const EACH: Duration = Duration::from_secs(5);
+// A Main open must time out inside the ask that waits on it, or a stalled session is never evicted.
+const _: () = assert!(crate::peers::MAIN_OPEN_TIMEOUT.as_millis() < EACH.as_millis());
 
 /// How old `synced` may be before a dialing verb exchanges on its connection.
 pub const STALE: Duration = Duration::from_secs(60 * 60);

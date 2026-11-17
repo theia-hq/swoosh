@@ -2,10 +2,11 @@
 //! present no credentials.
 //!
 //! [`Lane::Main`] carries ordinary service streams and [`Lane::Bulk`] fan-out pipes, each on its own held
-//! session per peer, so a full fan-out never stalls an exchange. A slip rides a held session of its own,
-//! shared only by streams presenting the identical slip: its Main and Bulk streams share that one
-//! session, each lane still under its own per-peer cap. [`Peers::isolated`] dials a connection per caller
-//! and never holds it. Every lane has a per-peer cap, enforced here for every run.
+//! session per peer, so a full fan-out never stalls an exchange. A slip rides held sessions of its own,
+//! shared only by streams presenting the identical slip, one per lane, so a slip's fan-out never stalls
+//! its exchanges either. [`Peers::isolated`] dials a connection per caller and never holds it. Every lane
+//! has a per-peer cap, enforced here for every run. An open that gets no answer in its lane's deadline
+//! evicts a session no other open got through on; dropping an open never removes a session.
 
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
@@ -25,7 +26,12 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Instant;
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+// A Bulk open's deadline. A pipe's caller waits on its open with nothing racing it, so the open itself
+// bounds how long a silent session is kept.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// A Main open's deadline, shorter than any Main caller's own bound, so the open's timer rather than the
+/// caller's fires on a silent session and evicts it.
+pub(crate) const MAIN_OPEN_TIMEOUT: Duration = Duration::from_secs(4);
 const IDLE_EVICTION: Duration = Duration::from_secs(5 * 60);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const MAIN_STREAMS: u16 = 64;
@@ -49,7 +55,7 @@ pub enum Presents {
     /// earliest grant presented on it ends, so a short grant must never share the home's session.
     Standing(Option<Link>),
     /// A link typed as the peer in slot 1, and this home's badge in slot 2 when the slip pins its fleet.
-    /// It rides a session shared only by the identical slip and slot 2, whichever held lane asks.
+    /// It rides a session per lane, shared only by the identical slip and slot 2.
     Slip {
         /// The link typed as the peer.
         slip: Link,
@@ -79,6 +85,7 @@ impl Presents {
                 standing: badge.as_ref().map(|badge| badge.as_str().to_owned()),
             },
             Self::Slip { slip, membership } => Carry::Slip {
+                lane,
                 digest: *blake3::hash(slip.as_str().as_bytes()).as_bytes(),
                 membership: membership.as_ref().map(|badge| badge.as_str().to_owned()),
             },
@@ -102,8 +109,9 @@ pub enum OpenError {
     /// The peer's lane already holds its cap of live streams, or of connections for an isolated one.
     #[error("too many streams open to this machine; try again when one closes")]
     Busy,
-    /// The held session took the request but the host did not answer within the open deadline; the
-    /// session is evicted, so the next stream dials afresh.
+    /// The held session took the request but the host did not answer within the lane's open deadline.
+    /// The session is evicted, so the next stream dials afresh, unless another open on it succeeded
+    /// during the wait: a slow host still answering keeps its session.
     #[error("the machine did not answer the request to open a stream in time")]
     Timeout,
     /// No session reached the peer: the dial failed or ran out of time.
@@ -139,10 +147,13 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     /// Request one stream on `lane`, presenting this immutable snapshot for the cache key and the slots.
     /// `Standing(None)` sends neither slot and never reads a home. Admission repeats on every stream.
     ///
-    /// Dial and open each have their own ten-second deadline. A reused broken entry gets one redial,
-    /// but a refusal, wrong peer, fresh failure or timeout never does. A caller that drops an open
-    /// before it completes evicts the entry, as the timeout does. The per-peer lane budget includes
-    /// pending opens and remains occupied until both returned halves have dropped; past it, `Busy`.
+    /// A dial has ten seconds; an open has four on Main and ten on Bulk. A reused session found closed
+    /// is redialed before the open, and a reused broken entry gets one redial; an open gets one redial
+    /// at most, and a refusal, wrong peer, fresh failure or timeout never gets one. A timeout evicts the
+    /// session only when no other open on it succeeded during the wait. Dropping an open never removes
+    /// a session from the cache, at any instant on any lane, and leaves its idle clock where it was. The
+    /// per-peer lane budget includes pending opens and remains occupied until both returned halves have
+    /// dropped; past it, `Busy`.
     pub async fn open(
         &self,
         peer: NodeId,
@@ -156,21 +167,22 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
             carry: presents.carry(lane),
         };
         let connector = presents.connector(peer, service);
+        let deadline = match lane {
+            Lane::Main => MAIN_OPEN_TIMEOUT,
+            Lane::Bulk => OPEN_TIMEOUT,
+        };
         let (mut entry, reused) = self.session(&key).await?;
         let mut retry = reused;
         loop {
-            let active = Active::new(Rc::clone(&entry));
-            // Declared after `active`, so a cancelled caller evicts first and then releases its count.
-            let attempt = Attempt {
-                peers: self,
-                key: &key,
-                entry: &entry,
-            };
-            let opened =
-                tokio::time::timeout(OPEN_TIMEOUT, connector.open_on(&entry.session)).await;
-            attempt.complete();
+            let mut active = Active::new(Rc::clone(&entry));
+            let start = Instant::now();
+            let opened = tokio::time::timeout(deadline, connector.open_on(&entry.session)).await;
+            if opened.is_ok() {
+                active.answered = true;
+            }
             match opened {
                 Ok(Ok((writer, reader))) => {
+                    entry.opened.set(Some(Instant::now()));
                     // The reservation transfers to the pair, not to either half alone.
                     let lease = Rc::new(Lease {
                         _active: active,
@@ -195,7 +207,11 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                 }
                 Ok(Err(error)) => return Err(OpenError::Open(error)),
                 Err(_) => {
-                    self.evict(&key, &entry);
+                    // A stall freezes every open on its session while the session stays alive, so only
+                    // an open that succeeded during this wait shows the host is still answering.
+                    if entry.opened.get().is_none_or(|opened| opened < start) {
+                        self.evict(&key, &entry);
+                    }
                     return Err(OpenError::Timeout);
                 }
             }
@@ -227,6 +243,12 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     async fn session(&self, key: &Key) -> Result<(Rc<Entry<T::Session>>, bool), OpenError> {
         let flight = {
             let mut entries = self.entries.borrow_mut();
+            // A session the transport already closed would fail the open; dialing now spends the
+            // open's one redial before a stream is asked of it.
+            if matches!(entries.get(key), Some(Slot::Ready(entry)) if entry.session.wait_closed().now_or_never().is_some())
+            {
+                entries.remove(key);
+            }
             match entries.get(key) {
                 Some(Slot::Ready(entry)) => return Ok((Rc::clone(entry), true)),
                 Some(Slot::Dialing(flight)) => Rc::clone(flight),
@@ -241,6 +263,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                             session,
                             live: Cell::new(0),
                             idle_since: Cell::new(Instant::now()),
+                            opened: Cell::new(None),
                         }))
                     }
                     .boxed_local()
@@ -345,9 +368,10 @@ enum Carry {
         lane: Lane,
         standing: Option<String>,
     },
-    // No lane: Main and Bulk streams presenting one slip share its session, while each keeps its own
-    // lane's count. The map keeps the slip's digest, never the slip.
+    // A lane per slip session, so a slip's stalled fan-out never holds its exchanges. The map keeps the
+    // slip's digest, never the slip.
     Slip {
+        lane: Lane,
         digest: [u8; 32],
         membership: Option<String>,
     },
@@ -416,31 +440,12 @@ impl<T: Transport, D: Discovery> Drop for Waiting<'_, '_, T, D> {
     }
 }
 
-// Callers bound an open below its own deadline, so a stalled session would otherwise stay cached and
-// every cancelled try would reset its idle clock. Dropping an unfinished attempt evicts its entry.
-struct Attempt<'a, 'n, T: Transport, D: Discovery> {
-    peers: &'a Peers<'n, T, D>,
-    key: &'a Key,
-    entry: &'a Rc<Entry<T::Session>>,
-}
-
-impl<T: Transport, D: Discovery> Attempt<'_, '_, T, D> {
-    fn complete(self) {
-        // Only borrows are held, so forgetting the guard leaks nothing.
-        core::mem::forget(self);
-    }
-}
-
-impl<T: Transport, D: Discovery> Drop for Attempt<'_, '_, T, D> {
-    fn drop(&mut self) {
-        self.peers.evict(self.key, self.entry);
-    }
-}
-
 struct Entry<S: Session> {
     session: S,
     live: Cell<u16>,
     idle_since: Cell<Instant>,
+    // When an open on this session last succeeded: the progress a timed-out open checks before evicting.
+    opened: Cell<Option<Instant>>,
 }
 
 impl<S: Session> Drop for Entry<S> {
@@ -466,19 +471,27 @@ struct Lease<S: Session> {
 
 struct Active<S: Session> {
     entry: Rc<Entry<S>>,
+    // Whether the host answered this open. An open cancelled or timed out before an answer used the
+    // session for nothing, so it must not keep an idle or stalled session from the sweep.
+    answered: bool,
 }
 
 impl<S: Session> Active<S> {
     fn new(entry: Rc<Entry<S>>) -> Self {
         entry.live.set(entry.live.get() + 1);
-        Self { entry }
+        Self {
+            entry,
+            answered: false,
+        }
     }
 }
 
 impl<S: Session> Drop for Active<S> {
     fn drop(&mut self) {
         self.entry.live.set(self.entry.live.get() - 1);
-        self.entry.idle_since.set(Instant::now());
+        if self.answered {
+            self.entry.idle_since.set(Instant::now());
+        }
     }
 }
 

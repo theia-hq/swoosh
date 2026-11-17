@@ -415,7 +415,10 @@ impl Session for Scripted {
         Err(bifrost::Error::Closed)
     }
 
-    async fn wait_closed(&self) {}
+    /// Open until dropped: a held session already closed is redialed before its next stream.
+    async fn wait_closed(&self) {
+        core::future::pending::<()>().await;
+    }
 
     /// A double that carries nothing has nothing to end.
     fn close(&self) {}
