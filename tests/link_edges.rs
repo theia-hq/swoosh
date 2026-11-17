@@ -128,11 +128,7 @@ fn a_stored_link_carries_no_prefix() {
         standing,
     )
     .to_string();
-    swoosh_with(
-        &device,
-        &["join", "--transport", "quirk+noise"],
-        &format!("{invite}\n"),
-    );
+    swoosh_with(&device, &["join", "--local"], &format!("{invite}\n"));
     swoosh(&owner, &["share", "demo", "anyone"]);
 
     let badge = std::fs::read_to_string(Home::resolve(Some(device)).unwrap().key_cert())

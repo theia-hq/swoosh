@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Which key a link dial binds, through the path the composition root takes: a real verb, clap-parsed,
-//! its identity resolved from its home, bound over `quirk+noise` on loopback, and dialed at the gate
+//! its identity resolved from its home, bound over iroh's local bind on loopback, and dialed at the gate
 //! `serve` runs, whose handler records the key each admitted dialer proved.
 //!
 //! An `anyone` link admits whoever holds it, so its dial binds a throwaway key: the server never sees
@@ -13,7 +13,6 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bifrost::{NoDiscovery, Node, Session as _};
-use bifrost_noise::Noise;
 use clap::Parser as _;
 use nauthy::{Cap, Link, Service, VerifyKey};
 use swoosh::contacts::Contacts;
@@ -28,7 +27,7 @@ use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{
     BoxRead, BoxWrite, CancellationToken, Handler, Router, ServeError, Served,
 };
-use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncReadExt;
 
 use crate::{Cli, Verb};
 
@@ -138,11 +137,8 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
     // The server: `serve`'s gate over its home, one gated route that records who it admitted.
     let host_secret = server.secret().await;
     let host_transport = host_secret
-        .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
+        .with_bytes(bifrost_iroh::Endpoint::bind_local_with_secret)
         .await
-        .unwrap();
-    let host_transport = host_secret
-        .with_bytes(|seed| Noise::new(host_transport, seed))
         .unwrap();
     let host = Node::new(host_transport, NoDiscovery);
     let (gate, cut) = swoosh::gate::anchored(
@@ -165,11 +161,8 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
         .await
         .unwrap();
     let transport = secret
-        .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
+        .with_bytes(bifrost_iroh::Endpoint::bind_local_with_secret)
         .await
-        .unwrap();
-    let transport = secret
-        .with_bytes(|seed| Noise::new(transport, seed))
         .unwrap();
     let bind_role = outward.bind_role();
     let hint: PeerHint = format!("{}={}", host.node_id(), host.local_addr().hints[0])
@@ -196,7 +189,9 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
             Ok((send, mut recv)) => {
                 drop(send);
                 let mut rest = Vec::new();
-                let _ = recv.read_to_end(&mut rest).await;
+                // Through the trait: iroh's stream has an inherent `read_to_end` of its own, which takes a
+                // size limit and would shadow this one.
+                let _ = AsyncReadExt::read_to_end(&mut recv, &mut rest).await;
                 true
             }
             Err(_) => false,

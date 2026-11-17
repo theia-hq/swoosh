@@ -77,7 +77,7 @@ fn serve(home: &Path, run: &Path, args: &[&str]) -> KillOnDrop {
         Command::new(env!("CARGO_BIN_EXE_swoosh"))
             .arg("--home")
             .arg(home)
-            .args(["serve", "--transport", "quirk+noise"])
+            .args(["serve", "--local"])
             .args(args)
             .env("XDG_RUNTIME_DIR", run)
             .env_remove("SWOOSH_HOME")
@@ -133,7 +133,7 @@ fn a_serve_holds_serve_lock_for_its_run() {
     let second = swoosh(
         &scratch.home,
         &scratch.run("elsewhere"),
-        &["serve", "--transport", "quirk+noise"],
+        &["serve", "--local"],
     );
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(!second.status.success(), "a second serve refuses: {stderr}");

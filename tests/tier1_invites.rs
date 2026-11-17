@@ -18,17 +18,16 @@
 //! 5. the owner's node serves; it pins no root, so it admits no member, and the device's stored standing
 //!    is REFUSED there.
 //!
-//! The transport is `Noise<Quirk>` on loopback, so the gate's `bound_device` check runs against the
-//! REAL key the device binds under (the wrapper proves the NodeId), not a synthetic test id.
+//! The transport is iroh's local bind on loopback, so the gate's `bound_device` check runs against the
+//! REAL key the device binds under (iroh's handshake proves the NodeId), not a synthetic test id.
 
 use core::time::Duration;
 use std::path::Path;
 use std::process::Command;
 
 use bifrost::{NoDiscovery, Node, NodeId};
-use bifrost_noise::Noise;
-use bifrost_quirk::Endpoint;
-use measure::Ping;
+use bifrost_iroh::Endpoint;
+use measure::{Ping, ProtocolError, Refusal};
 use swoosh::config;
 use swoosh::credential::Credential;
 use swoosh::home::Home;
@@ -41,13 +40,22 @@ use tightbeam::tunnel::{CancellationToken, Connector, Router};
 /// The role every node that dials here binds under: it browses the LAN and advertises nothing.
 const DIALING: BindRole = BindRole::Dialing(Credential::Family { present: None });
 
-/// Bind a quirk endpoint under `seed` and wrap it with the SAME seed, the composition
-/// `--transport quirk+noise` performs: one address, one identity, two layers.
-async fn sealed(seed: [u8; 32]) -> Noise<Endpoint> {
-    let inner = Endpoint::bind_with_secret(&seed)
+/// Bind an iroh endpoint under `seed` with no discovery and no relays, the bind `--local` performs.
+async fn local(seed: [u8; 32]) -> Endpoint {
+    Endpoint::bind_local_with_secret(&seed)
         .await
-        .expect("bind quirk on loopback");
-    Noise::new(inner, &seed).expect("wrap quirk under its own identity")
+        .expect("bind iroh on loopback")
+}
+
+/// Whether `report` is the gate's refusal of the stream as not admitted: the typed refusal, so a ping
+/// that failed for another reason does not pass as a refused one.
+fn not_admitted<T>(report: &Result<T, ProtocolError>) -> bool {
+    matches!(
+        report,
+        Err(ProtocolError::Refused(Refusal::Stream(
+            bifrost::Refusal::NotAdmitted
+        )))
+    )
 }
 
 /// The gate `serve` builds for a node from its home, over the diagnostics, with the live cut wired.
@@ -62,7 +70,7 @@ async fn anchored_exposer(home: &Home, own: NodeId) -> tightbeam::tunnel::Expose
         .with_live_cuts(cut)
 }
 
-/// The member's gated ping rides the sealed wrapper: the dial reaches the node, the gate admits the
+/// The member's gated ping rides iroh's local bind: the dial reaches the node, the gate admits the
 /// invite's device-bound badge, and every probe answers.
 #[tokio::test]
 async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
@@ -113,15 +121,9 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let token = Invite::bound(owner_id, "laptop".parse().unwrap(), standing).to_string();
 
     // 3. The device joins, keeping its identity; the pin and the standing land beside it. Its first exchange
-    //    is with the owner's machine, which is not serving, so it ends at once over loopback.
-    let joined = swoosh(&[
-        "join",
-        &token,
-        "--transport",
-        "quirk+noise",
-        "--home",
-        path_str(&device_dir),
-    ]);
+    //    is with the owner's machine, which is not serving, so with `--local` it finds nothing on this network
+    //    and ends within a few seconds.
+    let joined = swoosh(&["join", &token, "--local", "--home", path_str(&device_dir)]);
     assert!(joined.status.success(), "join failed: {}", stderr(&joined));
     let device_seed: [u8; 32] = std::fs::read(device_dir.join("machine").join("key"))
         .unwrap()
@@ -145,13 +147,13 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
 
     // 4. The DEVICE's node serves, gated at the pin `join` wrote; the owner dials presenting a standing the
     //    root signed for its node, and is admitted as one of the root's devices.
-    let device_transport = sealed(device_seed).await;
+    let device_transport = local(device_seed).await;
     let device_host = Node::new(device_transport, NoDiscovery);
     let device_id_bound = device_host.node_id();
     let device_addr = device_host.local_addr();
     let exposer = anchored_exposer(&device_home, device_id).await;
 
-    let owner_transport = sealed(owner_seed).await;
+    let owner_transport = local(owner_seed).await;
     let owner_hint: PeerHint = format!("{device_id_bound}={}", device_addr.hints[0])
         .parse()
         .expect("the direct hint parses");
@@ -183,7 +185,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         assert_eq!(report.received(), 3, "every probe answers for the owner");
 
         // A STRANGER: a different key, no badge at all. The gate refuses the stream.
-        let stranger_transport = sealed([0x5a; 32]).await;
+        let stranger_transport = local([0x5a; 32]).await;
         let stranger_discovery =
             PeerHint::discovery(&stranger_transport, [owner_hint.clone()], &DIALING).discovery;
         let stranger = Node::new(stranger_transport, stranger_discovery);
@@ -198,7 +200,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .run(&refused)
         .await;
         assert!(
-            report.is_err(),
+            not_admitted(&report),
             "a stranger without a badge must be refused, not answered: {report:?}"
         );
         cancel.cancel();
@@ -212,13 +214,13 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
 
     // 5. The OWNER's node serves. It pins no root, so the device's standing admits nothing here.
     let owner_home = Home::resolve(Some(signet_dir.clone())).unwrap();
-    let host_transport = sealed(owner_seed).await;
+    let host_transport = local(owner_seed).await;
     let host = Node::new(host_transport, NoDiscovery);
     let host_id = host.node_id();
     let addr = host.local_addr();
     let exposer = anchored_exposer(&owner_home, owner_id).await;
 
-    let member_transport = sealed(device_seed).await;
+    let member_transport = local(device_seed).await;
     let hint: PeerHint = format!("{host_id}={}", addr.hints[0])
         .parse()
         .expect("the direct hint parses");
@@ -239,7 +241,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .run(&session)
         .await;
         assert!(
-            report.is_err(),
+            not_admitted(&report),
             "a machine with no pin admits no member, even one its own key signed: {report:?}"
         );
         cancel.cancel();

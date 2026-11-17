@@ -1,8 +1,8 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! `serve`'s gate end to end: the compiled binary serves a scratch home over `quirk+noise` on loopback,
-//! and a dialer in this process reaches it with the credential each case is about.
+//! `serve`'s gate end to end: the compiled binary serves a scratch home over iroh with `--local` on
+//! loopback, and a dialer in this process reaches it with the credential each case is about.
 //!
 //! What is proven is what the composition root builds, not a gate assembled here: a machine with no pin
 //! admits no member, even one its own key signed; a link `share` signed is admitted through the
@@ -22,8 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use bifrost::{Node, NodeId};
-use bifrost_noise::Noise;
-use bifrost_quirk::Endpoint;
+use bifrost_iroh::Endpoint;
 use nauthy::{Link, Request};
 use swoosh::credential::Credential;
 use swoosh::reaching::BindRole;
@@ -114,7 +113,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Start `swoosh serve` on `home` over `quirk+noise` with `flags` and `entries`, its stderr read line by
+/// Start `swoosh serve` on `home` over iroh with `--local`, with `flags` and `entries`, its stderr read line by
 /// line on a thread of its own.
 fn spawn_serve(
     home: &Path,
@@ -124,7 +123,7 @@ fn spawn_serve(
     let child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(home)
-        .args(["serve", "--transport", "quirk+noise"])
+        .args(["serve", "--local"])
         .args(flags)
         .args(entries)
         .env("XDG_RUNTIME_DIR", runtime_dir(home))
@@ -222,7 +221,7 @@ fn readiness_rejects_colon_records_and_a_silent_open_pipe_is_bounded() {
     );
 }
 
-/// Serve `home` with `entries` over `quirk+noise`, and wait for its banner: the key it answers at and its
+/// Serve `home` with `entries` over iroh with `--local`, and wait for its banner: the key it answers at and its
 /// loopback address, from the transport block `--verbose` adds.
 fn serve(home: &Path, entries: &[&str]) -> Served {
     let (mut child, stderr) = spawn_serve(home, &["--verbose"], entries);
@@ -273,15 +272,18 @@ async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, std::thread::Joi
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+    let first = status.addr.expect("a `--local` bind has an address");
+    // The status names the bind's first dialable address, which may be a LAN or internet one. iroh binds
+    // a v4 and a v6 socket, each on its own port, so dial that port on the loopback of the same family:
+    // the socket the status named, reached on this machine as the banner's `(this machine)` row is.
+    let loopback: core::net::IpAddr = match first {
+        SocketAddr::V4(_) => core::net::Ipv4Addr::LOCALHOST.into(),
+        SocketAddr::V6(_) => core::net::Ipv6Addr::LOCALHOST.into(),
+    };
     let served = Served {
         child,
         key: status.node_id,
-        // The status names the bind's first dialable address, which may be a LAN one; the port is the
-        // bind's, so dial it on loopback, as the banner's `(this machine)` row does.
-        addr: SocketAddr::new(
-            core::net::Ipv4Addr::LOCALHOST.into(),
-            status.addr.expect("a quirk bind has an address").port(),
-        ),
+        addr: SocketAddr::new(loopback, first.port()),
         stderr,
     };
     (served, printed)
@@ -359,12 +361,10 @@ fn own_seed(home: &Path) -> [u8; 32] {
 }
 
 /// A dialer under `seed`, pointed at `served` by a direct hint.
-async fn dialer(seed: u8, served: &Served) -> Node<Noise<Endpoint>, impl bifrost::Discovery> {
-    let seed = [seed; 32];
-    let inner = Endpoint::bind_with_secret(&seed)
+async fn dialer(seed: u8, served: &Served) -> Node<Endpoint, impl bifrost::Discovery> {
+    let transport = Endpoint::bind_local_with_secret(&[seed; 32])
         .await
-        .expect("bind quirk on loopback");
-    let transport = Noise::new(inner, &seed).expect("wrap quirk under its own identity");
+        .expect("bind iroh on loopback");
     let hint: PeerHint = format!("{}={}", served.key, served.addr).parse().unwrap();
     let discovery = PeerHint::discovery(&transport, [hint], &DIALING).discovery;
     Node::new(transport, discovery)
@@ -379,12 +379,24 @@ fn in_an_hour() -> std::time::SystemTime {
     Request::expires_in(Duration::from_secs(3600))
 }
 
-/// An open stream on `session`'s service, or `None` when the gate refused it.
-async fn open<S: bifrost::Session>(session: &S) -> Option<(S::Write, S::Read)> {
+/// An open stream on `session`'s service, or the error the gate answered with.
+async fn open<S: bifrost::Session>(session: &S) -> Result<(S::Write, S::Read), bifrost::Error> {
     tokio::time::timeout(Duration::from_secs(15), session.open_bi())
         .await
         .expect("the stream answers within the deadline")
-        .ok()
+}
+
+/// Assert the gate refused `session`'s stream as not admitted, naming `why` on failure: the typed
+/// refusal, not any failure, so a dial that broke for another reason does not pass as a refusal.
+async fn assert_not_admitted<S: bifrost::Session>(session: &S, why: &str) {
+    let opened = open(session).await.map(drop);
+    assert!(
+        matches!(
+            opened,
+            Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+        ),
+        "{why}: {opened:?}"
+    );
 }
 
 /// Whether the stream still echoes a line: `false` once the session ended.
@@ -426,10 +438,11 @@ async fn a_pinless_serve_refuses_a_member_cap_at_its_own_key() {
 
     let badge = own.device_badge(dialer_id(0x41), in_an_hour()).unwrap();
     let session = echo_session(&node, &served, badge, None).await;
-    assert!(
-        open(&session).await.is_none(),
-        "a machine with no pin admits no member, even one its own key signed"
-    );
+    assert_not_admitted(
+        &session,
+        "a machine with no pin admits no member, even one its own key signed",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -488,10 +501,11 @@ async fn a_running_serve_admits_a_link_only_to_the_target_it_bound() {
     // A dialer of its own: a refusal tears its connection down.
     let node = dialer(0x48, &served).await;
     let session = echo_session(&node, &served, made_for_forward, None).await;
-    assert!(
-        open(&session).await.is_none(),
-        "a link made for the forward is refused by the running reflector"
-    );
+    assert_not_admitted(
+        &session,
+        "a link made for the forward is refused by the running reflector",
+    )
+    .await;
 
     // The refusal ended that connection; a fresh dialer checks live-target issuance.
     let node = dialer(0x4d, &served).await;
@@ -585,10 +599,7 @@ async fn a_pin_written_under_serve_is_trusted_without_restart() {
     let badge = root.device_badge(dialer_id(0x46), in_an_hour()).unwrap();
 
     let session = echo_session(&node, &served, badge.clone(), None).await;
-    assert!(
-        open(&session).await.is_none(),
-        "before the pin, the root's device is refused"
-    );
+    assert_not_admitted(&session, "before the pin, the root's device is refused").await;
 
     swoosh::config::write_signet(&swoosh::testkit::lock(), &scratch.home(), root.node_id())
         .unwrap();
@@ -785,10 +796,11 @@ async fn serve_warns_of_a_shell_over_an_anyone_link_and_its_gate_refuses_it() {
         .open_service(&node)
         .await
         .expect("connect");
-    assert!(
-        open(&session).await.is_none(),
-        "a link made for the forward never reaches the shell"
-    );
+    assert_not_admitted(
+        &session,
+        "a link made for the forward never reaches the shell",
+    )
+    .await;
 }
 
 /// The same line for an engine that runs no code: receiving files under a name whose links to anyone were
@@ -872,10 +884,11 @@ async fn a_serve_of_a_never_public_engine_starts_over_an_unreadable_ledger_and_a
     served.stderr_line("the grants ledger cannot be read");
     let node = dialer(0x4a, &served).await;
     let session = echo_session(&node, &served, link.clone(), None).await;
-    assert!(
-        open(&session).await.is_none(),
-        "no link this machine signed is admitted while the ledger cannot be read"
-    );
+    assert_not_admitted(
+        &session,
+        "no link this machine signed is admitted while the ledger cannot be read",
+    )
+    .await;
 
     std::fs::remove_dir(&links).unwrap();
     std::fs::rename(&kept, &links).unwrap();
