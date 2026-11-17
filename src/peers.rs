@@ -36,7 +36,7 @@ use tokio::time::Instant;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 // A Bulk open's deadline. A pipe's caller waits on its open with nothing racing it, so the open itself
 // bounds how long a silent session is kept.
-const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// A Main open's deadline, shorter than any Main caller's own bound, so the open's timer rather than the
 /// caller's fires on a silent session and evicts it.
 pub(crate) const MAIN_OPEN_TIMEOUT: Duration = Duration::from_secs(4);
@@ -59,8 +59,11 @@ pub enum Lane {
 /// The addresses one open puts in the feed of the dial it starts, at most [`Hints::MAX`], ahead of the
 /// run's own addresses and mDNS.
 ///
-/// Order and repeats are kept as given. An IPv4-mapped IPv6 address is held in its IPv4 form. `Debug`
-/// prints only the count: a hint says where the caller expects the peer, which no log line needs.
+/// Order and repeats are kept as given. A hint is an address, not text: an IPv4-mapped IPv6 address is
+/// held in its IPv4 form, and an IPv6 address without its flow label, which no hint's text can carry; a
+/// scope stays. An address that can never be a peer's endpoint is refused, judged on that held form so a
+/// mapped spelling cannot slip past. `Debug` prints only the count: a hint says where the caller expects
+/// the peer, which no log line needs.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct Hints(Vec<SocketAddr>);
 
@@ -75,14 +78,20 @@ impl Hints {
     ///
     /// # Errors
     ///
-    /// [`TooManyHints`] past [`MAX`](Self::MAX) addresses.
-    pub fn new(addrs: impl IntoIterator<Item = SocketAddr>) -> Result<Self, TooManyHints> {
+    /// [`HintsError::TooMany`] past [`MAX`](Self::MAX) addresses, and [`HintsError::Unusable`] for an
+    /// unspecified, multicast or limited-broadcast address or port 0. Loopback and link-local pass: a
+    /// peer on this host or this link is reached there.
+    pub fn new(addrs: impl IntoIterator<Item = SocketAddr>) -> Result<Self, HintsError> {
         let mut hints = Vec::new();
         for addr in addrs {
             if hints.len() == Self::MAX {
-                return Err(TooManyHints);
+                return Err(HintsError::TooMany);
             }
-            hints.push(canonical(addr));
+            let addr = canonical(addr);
+            if !endpoint(addr) {
+                return Err(HintsError::Unusable);
+            }
+            hints.push(addr);
         }
         Ok(Self(hints))
     }
@@ -99,20 +108,42 @@ impl fmt::Debug for Hints {
     }
 }
 
-/// More than [`Hints::MAX`] addresses for one open.
+/// Why addresses are not one open's [`Hints`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("at most {} dial hints per open", Hints::MAX)]
-pub struct TooManyHints;
+pub enum HintsError {
+    /// More than [`Hints::MAX`] addresses.
+    #[error("at most {} dial hints per open", Hints::MAX)]
+    TooMany,
+    /// An address that is never a peer's endpoint.
+    #[error("a dial hint is not an address a machine can be reached at")]
+    Unusable,
+}
 
-/// An IPv4-mapped IPv6 address as its IPv4 form; any other address unchanged, scope and flow included.
+/// An IPv4-mapped IPv6 address as its IPv4 form, and any other IPv6 address without its flow label; the
+/// scope and everything else unchanged.
 fn canonical(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
             Some(v4) => SocketAddr::from((v4, v6.port())),
-            None => addr,
+            None => SocketAddr::V6(core::net::SocketAddrV6::new(
+                *v6.ip(),
+                v6.port(),
+                0,
+                v6.scope_id(),
+            )),
         },
         SocketAddr::V4(_) => addr,
     }
+}
+
+/// Whether a dial could reach a peer at `addr`: not port 0, and not an unspecified, multicast or
+/// limited-broadcast address, none of which is any one machine's endpoint.
+fn endpoint(addr: SocketAddr) -> bool {
+    let ip = addr.ip();
+    addr.port() != 0
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && ip != core::net::IpAddr::V4(core::net::Ipv4Addr::BROADCAST)
 }
 
 /// What a stream presents, which also picks the held session it rides.
@@ -159,7 +190,8 @@ impl Presents {
         }
     }
 
-    fn connector(self, peer: NodeId, service: Service) -> Connector {
+    /// The connector that presents these slots for `service` at `peer`.
+    pub(crate) fn connector(self, peer: NodeId, service: Service) -> Connector {
         match self {
             Self::Standing(badge) => Connector::to_node(peer, service, badge),
             Self::Slip { slip, membership } => {
@@ -232,6 +264,28 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         lane: Lane,
         presents: Presents,
     ) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), OpenError> {
+        let (_, writer, reader) = self
+            .open_attached(peer, hints, service, lane, presents)
+            .await?;
+        Ok((writer, reader))
+    }
+
+    /// [`open`](Self::open), with the path report of the session the stream rides, read as it attached.
+    pub(crate) async fn open_attached(
+        &self,
+        peer: NodeId,
+        hints: Hints,
+        service: Service,
+        lane: Lane,
+        presents: Presents,
+    ) -> Result<
+        (
+            ConnInfo,
+            impl AsyncWrite + Unpin + use<'_, 'n, T, D>,
+            impl AsyncRead + Unpin + use<'_, 'n, T, D>,
+        ),
+        OpenError,
+    > {
         let budget = self.reserve(peer, Class::from(lane))?;
         let key = Key {
             peer,
@@ -254,12 +308,14 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
             match opened {
                 Ok(Ok((writer, reader))) => {
                     entry.opened.set(Some(Instant::now()));
+                    let info = entry.session.conn_info();
                     // The reservation transfers to the pair, not to either half alone.
                     let lease = Rc::new(Lease {
                         _active: active,
                         _budget: budget,
                     });
                     return Ok((
+                        info,
                         Half {
                             inner: writer,
                             _lease: Rc::clone(&lease),

@@ -825,6 +825,8 @@ pub enum Script {
     Lists(Vec<&'static str>),
     /// Read the request and never answer, holding the stream open.
     Silent,
+    /// Read the request, admit it, then hold the stream open and say nothing more.
+    Holds,
 }
 
 /// A peer whose gate follows a script, one [`Script`] per stream, recording every request it reads: the
@@ -915,6 +917,11 @@ impl ScriptedPeer {
                 core::future::pending::<()>().await;
                 Ok(())
             }
+            Script::Holds => {
+                tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                core::future::pending::<()>().await;
+                Ok(())
+            }
         }
     }
 }
@@ -992,3 +999,22 @@ impl bifrost::Session for ScriptedPeer {
 #[cfg(test)]
 #[path = "testkit_tests.rs"]
 mod tests;
+
+/// An [`Opens`](crate::serve::Opens) for a resident test that sends no Open: one that arrives is dropped
+/// unanswered, its connection and control slot with it.
+pub struct NoOpens;
+
+impl crate::serve::Opens for NoOpens {
+    async fn open<R, W>(
+        &self,
+        _open: crate::serve::control_codec::OpenRequest,
+        _from_client: R,
+        _to_client: W,
+        _gone: crate::serve::ClientGone,
+        _control: tokio::sync::SemaphorePermit<'_>,
+    ) where
+        R: tokio::io::AsyncBufRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+    }
+}

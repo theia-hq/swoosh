@@ -76,7 +76,7 @@ async fn unknown_tags_and_incomplete_headers_do_not_acquire_operation_context() 
         );
         assert_eq!(observed, None);
     }
-    for tag in [0, 4, 5, 7, 0xff] {
+    for tag in [0, 5, 7, 0xff] {
         let frame = [b'S', b'W', b'C', b'1', tag, 0, 0];
         let mut reader = frame.as_slice();
         let mut observed = None;
@@ -135,6 +135,6 @@ fn observed_request_parses_once_without_cloning_an_owning_request() {
         .0;
     assert!(reader.contains("observed: &mut Option<RequestKind>"));
     assert_eq!(reader.matches("::from_tag(").count(), 1);
-    assert_eq!(reader.matches("Ok(kind.into())").count(), 1);
+    assert_eq!(reader.matches("Ok(request)").count(), 1);
     assert!(!reader.contains("clone"));
 }

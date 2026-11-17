@@ -135,7 +135,7 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
             let (resident, control) = running_resident(off.clone(), &scratch.base, &cancel);
             let control_task = tokio::task::spawn_local({
                 let resident = Arc::clone(&resident);
-                async move { resident.serve(control).await }
+                async move { resident.serve(control, &swoosh::testkit::NoOpens).await }
             });
 
             let host = Node::new(MemTransport::bind(), NoDiscovery);
@@ -204,7 +204,7 @@ async fn revoke_while_resident_refuses_next_stream() {
             let (resident, control) = running_resident(off.clone(), &scratch.base, &cancel);
             let control_task = tokio::task::spawn_local({
                 let resident = Arc::clone(&resident);
-                async move { resident.serve(control).await }
+                async move { resident.serve(control, &swoosh::testkit::NoOpens).await }
             });
 
             let host = Node::new(MemTransport::bind(), NoDiscovery);

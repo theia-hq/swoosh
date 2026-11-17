@@ -19,9 +19,10 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
+use super::opening::{ClientGone, Opens};
 use super::socket::{
-    ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, Request, Response,
-    ServiceMenu, StatusReply,
+    ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, OpenRequest, Request,
+    Response, ServiceMenu, StatusReply,
 };
 use crate::node_client::{NodeClient, euid, real_peer_uid};
 use crate::serve_toml::LiveServeToml;
@@ -109,25 +110,6 @@ impl Resident {
         self.served.load(Ordering::Relaxed)
     }
 
-    /// Answer one decoded request without triggering teardown.
-    ///
-    /// `Stop` returns [`Response::Ack`]. The serve path writes the Ack before calling
-    /// [`fire_stop`](Self::fire_stop).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LocalDetailError::ResourceUnavailable`] if a local service detail error reply
-    /// cannot be built within its memory limits. The socket caller then closes the connection
-    /// without writing a response.
-    pub fn answer(&self, request: Request) -> Result<Response, LocalDetailError> {
-        Ok(match request {
-            Request::Services => Response::Catalog(self.menu()),
-            Request::Status => Response::Status(self.status_reply()),
-            Request::Stop => Response::Ack,
-            Request::LocalServiceDetail => return self.local_service_detail_reply(),
-        })
-    }
-
     fn local_service_detail_reply(&self) -> Result<Response, LocalDetailError> {
         let snapshot = match self.off.local_service_snapshot() {
             Ok(snapshot) => Ok(snapshot),
@@ -194,21 +176,26 @@ impl Resident {
     /// Serve the bound std listener until the teardown token fires: the third arm of the serve
     /// select. A slot is taken BEFORE each accept, so at the cap the loop parks on the semaphore and
     /// connections stay queued at the listener (the `MAX_SESSIONS` backpressure pattern) rather than
-    /// being accepted and dropped. Each accepted connection is uid-checked BEFORE a byte is read,
-    /// served one-shot under the read timeout, then closed.
+    /// being accepted and dropped. Each accepted connection is uid-checked BEFORE a byte is read and
+    /// served one-shot under the read timeout, then closed; an Open is handed to `opens` with its
+    /// control slot and its connection, which it keeps for the stream's life.
     pub async fn serve(
         self: Arc<Self>,
         listener: std::os::unix::net::UnixListener,
+        opens: &impl Opens,
     ) -> eyre::Result<()> {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
-        self.serve_accepting(|| async { listener.accept().await.map(|(stream, _)| stream) })
-            .await
+        self.serve_accepting(
+            || async { listener.accept().await.map(|(stream, _)| stream) },
+            opens,
+        )
+        .await
     }
 
     // Inject accept outcomes without exhausting process-wide descriptors in tests. Neither the
     // listener nor its streams need to outlive this arm or cross an executor boundary.
-    async fn serve_accepting<A, F, S>(&self, mut accept: A) -> eyre::Result<()>
+    async fn serve_accepting<A, F, S>(&self, mut accept: A, opens: &impl Opens) -> eyre::Result<()>
     where
         A: FnMut() -> F,
         F: Future<Output = std::io::Result<S>>,
@@ -232,8 +219,19 @@ impl Resident {
             match accepted {
                 Ok(stream) => {
                     handlers.push(async move {
-                        let _permit = permit;
-                        self.serve_one(stream).await;
+                        // The slot covers the uid check and the request read; an Open takes it
+                        // along, to release once its own checks pass.
+                        if let Some(opening) = self.serve_one(stream).await {
+                            opens
+                                .open(
+                                    opening.request,
+                                    opening.from_client,
+                                    opening.to_client,
+                                    opening.gone,
+                                    permit,
+                                )
+                                .await;
+                        }
                     });
                 }
                 Err(error) if accept_error_fatal(&error) => {
@@ -282,12 +280,12 @@ impl Resident {
     }
 
     /// Serve one accepted connection under the production peer-credential check and read deadline.
-    async fn serve_one<S>(&self, stream: S)
+    async fn serve_one<S>(&self, stream: S) -> Option<Opening<S>>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRawFd + Unpin,
     {
         self.serve_checked_with(stream, real_peer_uid, READ_TIMEOUT)
-            .await;
+            .await
     }
 
     /// Serve one connection under an injectable peer-credential checker and timeout: the uid check,
@@ -298,12 +296,16 @@ impl Resident {
     /// A `Stop` is acked BEFORE [`fire_stop`](Self::fire_stop) cancels the node: the write is the
     /// last thing between the request and the process teardown the request itself triggers, so the
     /// confirm can never lose the race to exit.
+    ///
+    /// An Open is not answered here: it comes back with its connection, still holding every byte the
+    /// client sent after the request, for the caller to answer.
     async fn serve_checked_with<S>(
         &self,
         stream: S,
         checker: fn(i32) -> std::io::Result<u32>,
         timeout: Duration,
-    ) where
+    ) -> Option<Opening<S>>
+    where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRawFd + Unpin,
     {
         let fd = stream.as_raw_fd();
@@ -311,11 +313,11 @@ impl Resident {
             Ok(uid) if uid == euid() => {}
             Ok(uid) => {
                 tracing::warn!(uid, "refusing control connection from another user");
-                return;
+                return None;
             }
             Err(error) => {
                 tracing::warn!(%error, "could not check control peer credentials; refusing");
-                return;
+                return None;
             }
         }
         self.served.fetch_add(1, Ordering::Relaxed);
@@ -325,13 +327,29 @@ impl Resident {
         let request =
             tokio::time::timeout(timeout, Request::read_observed(&mut reader, &mut observed)).await;
         let (response, stop, detail) = match request {
-            Ok(Ok(Request::Stop)) => (Response::Ack, true, false),
-            Ok(Ok(request)) => {
-                let detail = matches!(request, Request::LocalServiceDetail);
-                let Ok(response) = self.answer(request) else {
-                    return;
+            Ok(Ok(Request::Open(request))) => {
+                let gone = match ClientGone::watch(fd) {
+                    Ok(gone) => gone,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not watch an open's connection; closing it");
+                        return None;
+                    }
                 };
-                (response, false, detail)
+                return Some(Opening {
+                    request,
+                    from_client: reader,
+                    to_client: writer,
+                    gone,
+                });
+            }
+            Ok(Ok(Request::Stop)) => (Response::Ack, true, false),
+            Ok(Ok(Request::Services)) => (Response::Catalog(self.menu()), false, false),
+            Ok(Ok(Request::Status)) => (Response::Status(self.status_reply()), false, false),
+            Ok(Ok(Request::LocalServiceDetail)) => {
+                let Ok(response) = self.local_service_detail_reply() else {
+                    return None;
+                };
+                (response, false, true)
             }
             Ok(Err(ControlError::TooLarge(_))) => {
                 // EOF is the contract for an oversized DECLARED frame: the codec refuses the length
@@ -339,16 +357,16 @@ impl Resident {
                 // reply. Replying `Error` would answer an attacker-chosen length while the client
                 // may still be sending the payload it declared, so the close is the whole response.
                 // The serve-level test (`oversized_declared_frame_ends_the_connection`) pins this.
-                return;
+                return None;
             }
             Ok(Err(error)) => {
                 let Ok(response) = Response::request_error(error, observed) else {
-                    return;
+                    return None;
                 };
                 (response, false, true)
             }
             Err(_elapsed) => {
-                return;
+                return None;
             }
         };
         self.reply_then_fire(&mut writer, &response, stop, timeout)
@@ -357,6 +375,7 @@ impl Resident {
         if !detail {
             let _ = writer.shutdown().await;
         }
+        None
     }
 
     /// Write the reply, THEN fire the stop it answered: the order is the stop-Ack contract, the
@@ -377,6 +396,15 @@ impl Resident {
             self.fire_stop();
         }
     }
+}
+
+/// An Open read off a control connection, with the connection it is answered and spliced on. The
+/// reader keeps its buffer, so no byte the client sent after the request is lost at the switch.
+struct Opening<S> {
+    request: OpenRequest,
+    from_client: tokio::io::BufReader<tokio::io::ReadHalf<S>>,
+    to_client: tokio::io::WriteHalf<S>,
+    gone: ClientGone,
 }
 
 /// The resident is the in-process server implementation of the control contract: the same

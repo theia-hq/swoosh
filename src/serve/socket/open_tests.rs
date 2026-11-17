@@ -10,8 +10,9 @@ use super::{
     OpenRefusal, OpenRequest, PeerRefusal,
 };
 use crate::credential::LinkExt as _;
-use crate::peers::{Hints, TooManyHints};
+use crate::peers::{Hints, HintsError};
 use crate::serve::control_codec::{ControlError, Request, Response};
+use crate::serve::socket::RequestKind;
 use crate::testkit::{TestNode, TestRoot};
 
 fn peer() -> NodeId {
@@ -148,7 +149,7 @@ fn hint_count_is_at_most_16() {
     );
     // A built request cannot hold more: its hints are a `Hints`, which refuses a seventeenth.
     let addr: SocketAddr = "192.0.2.1:7".parse().unwrap();
-    assert_eq!(Hints::new(vec![addr; 17]), Err(TooManyHints));
+    assert_eq!(Hints::new(vec![addr; 17]), Err(HintsError::TooMany));
 }
 
 #[test]
@@ -264,7 +265,7 @@ fn invalid_key() -> [u8; 32] {
 
 #[test]
 fn a_full_open_round_trips_with_hint_order_and_duplicates() {
-    let longest: SocketAddr = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535"
+    let longest: SocketAddr = "[fe80:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535"
         .parse()
         .unwrap();
     let other: SocketAddr = "192.0.2.7:4433".parse().unwrap();
@@ -282,7 +283,7 @@ fn a_full_open_round_trips_with_hint_order_and_duplicates() {
     let encoded = request.encode().unwrap();
     // Spelled field by field from the table, so an encoder and decoder agreeing on a wrong layout
     // cannot pass.
-    let longest_text = b"[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".as_slice();
+    let longest_text = b"[fe80:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".as_slice();
     let mut spelled = vec![longest_text; 14];
     spelled.extend([b"192.0.2.7:4433".as_slice(), longest_text]);
     assert_eq!(
@@ -722,25 +723,30 @@ async fn the_generic_reader_still_calls_open_replies_unknown() {
 }
 
 #[tokio::test]
-async fn request_tags_4_and_5_stay_unknown_at_any_declared_length() {
-    // The serve's parser is unchanged: Open and Path name no operation yet, so the declaration is never
-    // read, whatever it says, including an Open declared one past its own cap.
-    for header in [
-        b"SWC1\x04\x40\x01".as_slice(),
-        b"SWC1\x04\x00\x00",
-        b"SWC1\x04\x20\x01",
-        b"SWC1\x05\x00\x19",
-    ] {
-        let mut reader = header;
-        let mut observed = None;
-        let error = Request::read_observed(&mut reader, &mut observed)
-            .await
-            .unwrap_err();
-        assert!(matches!(error, ControlError::Protocol(_)));
-        assert_eq!(observed, None);
-        assert_eq!(reader.len(), 2);
-    }
-    // Every known operation is still held to the frame ceiling on its declaration alone.
+async fn request_tag_4_is_held_to_its_own_cap_and_tag_5_stays_unknown() {
+    // An Open is declared up to 16384 bytes and refused past it before a byte of the body is read.
+    let mut reader = b"SWC1\x04\x40\x01".as_slice();
+    let mut observed = None;
+    assert!(matches!(
+        Request::read_observed(&mut reader, &mut observed).await,
+        Err(ControlError::TooLarge(16385))
+    ));
+    assert_eq!(observed, Some(RequestKind::Open));
+    // An empty Open is malformed by its grammar, a typed refusal and never a protocol guess.
+    assert!(matches!(
+        Request::read(&mut b"SWC1\x04\x00\x00".as_slice()).await,
+        Err(ControlError::Open(MalformedOpen::Truncated))
+    ));
+    // Path names no operation yet: its declaration is never read.
+    let mut reader = b"SWC1\x05\x00\x19".as_slice();
+    let mut observed = None;
+    let error = Request::read_observed(&mut reader, &mut observed)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ControlError::Protocol(_)));
+    assert_eq!(observed, None);
+    assert_eq!(reader.len(), 2);
+    // Every other known operation is still held to the frame ceiling on its declaration alone.
     for tag in [1, 2, 3, 6] {
         let header = [b'S', b'W', b'C', b'1', tag, 0x20, 0x01];
         let mut reader = header.as_slice();

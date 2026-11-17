@@ -22,9 +22,8 @@ use tokio::sync::Semaphore;
 use super::Lane::{Bulk, Main};
 use super::Presents::{Slip, Standing};
 use super::{
-    BULK_STREAMS, Carry, Class, DIAL_TIMEOUT, DialFailure, Hints, IDLE_EVICTION,
+    BULK_STREAMS, Carry, Class, DIAL_TIMEOUT, DialFailure, Hints, HintsError, IDLE_EVICTION,
     ISOLATED_CONNECTIONS, Key, MAIN_OPEN_TIMEOUT, MAIN_STREAMS, OPEN_TIMEOUT, OpenError, Peers,
-    TooManyHints,
 };
 use crate::home::Home;
 use crate::renewal::{Fetch as _, NodeFetch};
@@ -1558,7 +1557,7 @@ fn seventeen_hints_do_not_type() {
     assert_eq!(Hints::new([A]).unwrap().as_slice(), [A]);
     let sixteen = Hints::new([A; Hints::MAX]).unwrap();
     assert_eq!(sixteen.as_slice(), [A; 16]);
-    assert_eq!(Hints::new([A; Hints::MAX + 1]), Err(TooManyHints));
+    assert_eq!(Hints::new([A; Hints::MAX + 1]), Err(HintsError::TooMany));
 }
 
 #[test]
@@ -1569,6 +1568,69 @@ fn a_mapped_hint_is_held_as_ipv4_in_order_with_repeats() {
     assert_eq!(hints.as_slice(), [A, scoped, A, A]);
     // A hint prints only as a count.
     assert_eq!(format!("{hints:?}"), "Hints(4)");
+}
+
+#[test]
+fn an_ipv6_hint_drops_its_flow_label_and_keeps_its_scope() {
+    let labelled = SocketAddr::V6(core::net::SocketAddrV6::new(
+        "fe80::1".parse().unwrap(),
+        1,
+        7,
+        3,
+    ));
+    let held = Hints::new([labelled]).unwrap();
+    let SocketAddr::V6(held) = held.as_slice()[0] else {
+        panic!("an IPv6 hint stays IPv6");
+    };
+    assert_eq!((held.flowinfo(), held.scope_id()), (0, 3));
+}
+
+#[test]
+fn a_hint_no_machine_answers_at_is_refused_after_the_fold() {
+    for unusable in [
+        "0.0.0.0:1",
+        "[::]:1",
+        "[::ffff:0.0.0.0]:1",
+        "192.0.2.1:0",
+        "224.0.0.251:1",
+        "[ff02::1]:1",
+        "[::ffff:239.1.1.1]:1",
+        "255.255.255.255:1",
+        "[::ffff:255.255.255.255]:1",
+    ] {
+        let addr: SocketAddr = unusable.parse().unwrap();
+        assert_eq!(
+            Hints::new([A, addr]),
+            Err(HintsError::Unusable),
+            "{unusable}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn loopback_and_link_local_hints_still_dial() {
+    let near: [SocketAddr; 4] = [
+        "127.0.0.1:1".parse().unwrap(),
+        "[::1]:1".parse().unwrap(),
+        "169.254.1.1:1".parse().unwrap(),
+        "[fe80::1%3]:1".parse().unwrap(),
+    ];
+    let probe = Probe::new([Script::Lists(vec![])]);
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    drop(
+        peers
+            .open(
+                peer(),
+                Hints::new(near).unwrap(),
+                service(),
+                Main,
+                Standing(None),
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(*probe.state.seen.borrow(), [near.to_vec()]);
 }
 
 #[tokio::test]

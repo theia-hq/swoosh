@@ -232,7 +232,7 @@ pub async fn resolve(cred: Credential, node: NodeId, home: &Home) -> eyre::Resul
 /// The body of [`resolve`], with the expiry warning routed to an injected `warn` sink so a test can
 /// drive it with its own writer and assert precisely when the line is (and is not) emitted, rather than
 /// trying to capture the process stderr. Mirrors [`SecretSource::resolve_to`](crate::secret::SecretSource).
-async fn resolve_to<W: std::io::Write>(
+pub(crate) async fn resolve_to<W: std::io::Write>(
     cred: Credential,
     node: NodeId,
     home: &Home,
