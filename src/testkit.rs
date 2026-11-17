@@ -704,7 +704,10 @@ impl bifrost::Session for HostilePeer {
         Err(bifrost::Error::Closed)
     }
 
-    async fn wait_closed(&self) {}
+    /// Open until dropped, so an owner holding it reuses it rather than redialing a closed session.
+    async fn wait_closed(&self) {
+        core::future::pending::<()>().await;
+    }
 
     /// A double that carries nothing has nothing to end.
     fn close(&self) {}
@@ -876,7 +879,10 @@ impl bifrost::Session for ScriptedPeer {
         Err(bifrost::Error::Closed)
     }
 
-    async fn wait_closed(&self) {}
+    /// Open until dropped, so an owner holding it reuses it rather than redialing a closed session.
+    async fn wait_closed(&self) {
+        core::future::pending::<()>().await;
+    }
 
     /// A double that carries nothing has nothing to end.
     fn close(&self) {}

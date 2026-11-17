@@ -4875,8 +4875,9 @@ async fn a_round_that_finds_no_sibling_still_opens_stop() {
             panic!("a round no sibling answered left control.stop refused")
         }
     }
+    // A Main open's own four-second deadline ends the ask on a silent nas, inside the exchange bound.
     assert!(
-        started.elapsed() >= swoosh::sync::EACH,
+        started.elapsed() >= Duration::from_secs(4),
         "the round waited out nas's bound: {:?}",
         started.elapsed()
     );

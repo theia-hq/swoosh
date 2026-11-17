@@ -93,7 +93,7 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         self,
         node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
-        _peers: &'p swoosh::peers::Peers<'n, T, D>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         T::Session: 'static,
@@ -105,6 +105,7 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         };
         self.run_speed(
             node,
+            peers,
             machine,
             ctx.bound,
             ctx.present,
@@ -116,11 +117,16 @@ impl swoosh::reaching::Reaching for SpeedCmd {
 }
 
 impl SpeedCmd {
-    /// Dial the machine, run the transfer while a ticker prints the rate each interval,
-    /// then report the settled connection path and the per-direction totals.
-    async fn run_speed<T: Transport, D: Discovery>(
+    /// Dial the machine on a connection of its own, run the transfer while a ticker prints the rate each
+    /// interval, then report the settled connection path and the per-direction totals.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the uniform reach context, unpacked"
+    )]
+    async fn run_speed<'n, T: Transport, D: Discovery>(
         self,
-        node: &Node<T, D>,
+        node: &'n Node<T, D>,
+        peers: &swoosh::peers::Peers<'n, T, D>,
         machine: &Machine,
         bound: &transport::Bound,
         present: Option<Link>,
@@ -136,16 +142,18 @@ impl SpeedCmd {
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads a slip itself.
         let service: Service = reach::SPEED_SERVICE.parse()?;
-        let (session, connector) = reach::dial_service(
-            node,
-            machine,
-            &self.peer,
-            &service,
+        // Isolated, never a held session: the rate and the path line it prints belong to this run's own
+        // connection, not to whatever else shares a session to the machine.
+        let session = peers
+            .isolated(machine.key())
+            .await
+            .map_err(|error| reach::open_failed(&self.peer, error, bound))?;
+        let connector = reach::gated(
+            machine.key(),
+            Service::clone(&service),
             Option::clone(&present),
             Option::clone(&membership),
-            bound,
-        )
-        .await?;
+        );
         // Its first admitted stream tells the composition root it may ask which root vouches for the machine.
         let session = admitted.watch(session, connector);
         let label = machine.label();

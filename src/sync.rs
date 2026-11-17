@@ -43,12 +43,15 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, Petname};
 use crate::home::{Home, HomeWrite};
+use crate::peers::{Lane, OpenError, Presents};
 use crate::roster::{Epoch, FoldError, Folded, MAX_ROSTER_BLOB, fold, fold_fork, read_held};
 use crate::serve::SYNC_SERVICE;
 use crate::standing::Standing;
 
 /// How long one exchange may take.
 pub const EACH: Duration = Duration::from_secs(5);
+// A Main open must time out inside the ask that waits on it, or a stalled session is never evicted.
+const _: () = assert!(crate::peers::MAIN_OPEN_TIMEOUT.as_millis() < EACH.as_millis());
 
 /// How old `synced` may be before a dialing verb exchanges on its connection.
 pub const STALE: Duration = Duration::from_secs(60 * 60);
@@ -473,10 +476,10 @@ impl<T: Transport, D: Discovery> NodeDial<'_, '_, T, D> {
             .map_err(|error| eyre::eyre!(error))?;
         let (writer, reader) = self
             .peers
-            .open(peer, service, badge)
+            .open(peer, service, Lane::Main, Presents::Standing(badge))
             .await
             .map_err(|error| match error {
-                bifrost::Error::Refused(bifrost::Refusal::NotAdmitted) => {
+                OpenError::Open(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted)) => {
                     ExchangeError::NotAdmitted
                 }
                 other => ExchangeError::Dial(eyre::eyre!(other)),

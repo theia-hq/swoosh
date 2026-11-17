@@ -119,9 +119,11 @@ async fn a_refused_speed_to_your_device_names_the_cause() {
         local: false,
         reach: transport::Reach::default(),
     };
+    let peers = swoosh::peers::Peers::new(&node);
     let error = cmd
         .run_speed(
             &node,
+            &peers,
             &machine,
             &bound,
             None,
@@ -140,4 +142,60 @@ async fn a_refused_speed_to_your_device_names_the_cause() {
         .map(|request| request.service)
         .collect();
     assert_eq!(asked, ["speed", "control.services"]);
+    assert_eq!(peer.dials(), 2, "its own connection, then the follow-up's");
+}
+
+/// `speed` takes its connection from the run's owner as an isolated one, so the owner's per-peer cap
+/// holds it: with four isolated connections to the machine live, it is refused before it dials.
+#[tokio::test]
+async fn speed_opens_isolated() {
+    use clap::Parser as _;
+    use swoosh::testkit::ScriptedPeer;
+    use swoosh::transport;
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        speed: super::SpeedCmd,
+    }
+
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x69; 32]);
+    let mut contacts = swoosh::contacts::Contacts::default();
+    contacts
+        .save(&"me/nas".parse().expect("a device"), key)
+        .expect("the name is free");
+    let cmd = Wrap::try_parse_from(["x", "me/nas"])
+        .expect("speed parses")
+        .speed;
+    let machine = cmd.peer.machine(&contacts).expect("one machine");
+    let peer = ScriptedPeer::new(key, []);
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(peers.isolated(key).await.expect("below the cap"));
+    }
+    let bound = transport::Bound {
+        transport: transport::Transport::Iroh,
+        local: false,
+        reach: transport::Reach::default(),
+    };
+    let error = cmd
+        .run_speed(
+            &node,
+            &peers,
+            &machine,
+            &bound,
+            None,
+            None,
+            swoosh::learn::Admitted::unheard(),
+        )
+        .await
+        .expect_err("a fifth isolated connection is refused");
+    assert_eq!(
+        format!("{error:#}"),
+        "too many streams open to this machine; try again when one closes"
+    );
+    assert_eq!(peer.dials(), 4, "refused before it dials");
+    assert!(peer.requests().is_empty());
 }

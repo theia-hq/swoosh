@@ -242,10 +242,10 @@ impl core::fmt::Display for Machine {
     }
 }
 
-/// The most local connections one forward or proxy holds at once, carried or waiting for a stream. Above a
-/// QUIC peer's usual concurrent-stream limit (100 on iroh), and far enough below a default descriptor limit
-/// (256 on macOS) that connections waiting for a stream cannot exhaust the process. Past it, new
-/// connections wait in the kernel's listen backlog.
+/// The most local connections one forward or proxy holds at once, carried or waiting for a stream. Below
+/// the streams one iroh session carries (at least 224), and far enough below a default descriptor limit (256 on
+/// macOS) that connections waiting for a stream cannot exhaust the process. Past it, new connections wait
+/// in the kernel's listen backlog.
 pub const MAX_PIPES: usize = 128;
 
 /// How long a local listener waits before accepting again after an accept fails. An error such as running
