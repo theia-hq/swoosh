@@ -391,7 +391,8 @@ pub const OPEN_RENEWAL: Duration = Duration::from_secs(8);
 
 const _: () = assert!(OPEN_ASKS.as_millis() + OPEN_LOCK.as_millis() == OPEN_RENEWAL.as_millis());
 // The first device always gets a whole ask, so on a stalled Main session its open's own deadline fires
-// and evicts before the ask is cut.
+// and evicts before the ask is cut. A second or later device gets only what is left of the asks, which
+// may be less than the Main open deadline, so its ask can be cut first and cannot evict a stalled session.
 const _: () = assert!(EACH.as_millis() <= OPEN_ASKS.as_millis());
 
 /// How long after a miss an `Open` does not ask again. The hourly round keeps asking meanwhile.

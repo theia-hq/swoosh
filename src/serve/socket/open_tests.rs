@@ -9,6 +9,7 @@ use super::{
     MAX_ATTACHED, MAX_OPEN_BODY, MAX_OPEN_ERROR, MAX_OPEN_REFUSAL, MalformedOpen, OpenLane,
     OpenRefusal, OpenRequest, PeerRefusal,
 };
+use crate::credential::LinkExt as _;
 use crate::serve::control_codec::{ControlError, Request, Response};
 use crate::testkit::{TestNode, TestRoot};
 
@@ -16,10 +17,22 @@ fn peer() -> NodeId {
     TestNode::seeded(0x63).node_id()
 }
 
+fn until() -> SystemTime {
+    SystemTime::now() + Duration::from_secs(3600)
+}
+
+/// A slip the peer issued, so the node it addresses is the request's peer.
 fn slip() -> Link {
-    TestRoot::seeded(1)
-        .device_badge(peer(), SystemTime::now() + Duration::from_secs(3600))
+    TestNode::seeded(0x63)
+        .slip(&"ssh".parse().unwrap(), until())
         .unwrap()
+        .link()
+        .unwrap()
+}
+
+/// A well-formed link that addresses another node: a badge rooted elsewhere, for the peer.
+fn foreign_slip() -> Link {
+    TestRoot::seeded(1).device_badge(peer(), until()).unwrap()
 }
 
 /// An Open body spelled field by field, each length written from the bytes given, so a test can put
@@ -110,13 +123,11 @@ fn observation_one_is_malformed_exactly_like_two() {
             Some(MalformedOpen::Observation)
         );
     }
-    // The same answer with a valid slip and every hint: nothing in the body is taken before the byte.
-    let slip = slip();
-    let hints = [b"192.0.2.1:7".as_slice(); 16];
-    assert_eq!(
-        decode(&body(&hints, b"ssh", 2, Some(slip.as_str().as_bytes()), 1)).err(),
-        Some(MalformedOpen::Observation)
-    );
+    // The same answer when every typed field would fail its parse: the byte is read before any field
+    // is turned into a value, so a decoder that parses first answers with a field instead.
+    let mut bytes = body(&[b"999"], b"no spaces", 2, Some(b"not a link"), 1);
+    bytes[..32].copy_from_slice(&invalid_key());
+    assert_eq!(decode(&bytes).err(), Some(MalformedOpen::Observation));
 }
 
 #[test]
@@ -234,13 +245,17 @@ fn every_short_body_is_truncated_and_a_bad_key_is_refused() {
             "{end}"
         );
     }
-    let invalid = (0..=u8::MAX)
+    let mut bytes = minimal();
+    bytes[..32].copy_from_slice(&invalid_key());
+    assert_eq!(decode(&bytes).err(), Some(MalformedOpen::Peer));
+}
+
+/// 32 bytes that are not an Ed25519 key.
+fn invalid_key() -> [u8; 32] {
+    (0..=u8::MAX)
         .map(|byte| [byte; 32])
         .find(|key| NodeId::try_new(bifrost::CryptoKind::Ed25519, *key).is_err())
-        .unwrap();
-    let mut bytes = minimal();
-    bytes[..32].copy_from_slice(&invalid);
-    assert_eq!(decode(&bytes).err(), Some(MalformedOpen::Peer));
+        .unwrap()
 }
 
 #[test]
@@ -290,6 +305,57 @@ fn a_slip_is_bare_link_text_never_the_person_facing_form() {
 }
 
 #[test]
+fn a_slip_that_addresses_another_node_is_refused_both_ways() {
+    assert_eq!(slip().dial_node().unwrap(), peer());
+    let foreign = foreign_slip();
+    assert_ne!(foreign.dial_node().unwrap(), peer());
+    let ssh = || "ssh".parse().unwrap();
+    assert_eq!(
+        OpenRequest::new(
+            peer(),
+            Vec::new(),
+            ssh(),
+            OpenLane::Main,
+            Some(foreign.clone())
+        )
+        .err(),
+        Some(MalformedOpen::SlipPeer)
+    );
+    assert_eq!(
+        decode(&body(&[], b"ssh", 0, Some(foreign.as_str().as_bytes()), 0)).err(),
+        Some(MalformedOpen::SlipPeer)
+    );
+    // The peer's own slip is taken on every lane, built or read.
+    for lane in [OpenLane::Main, OpenLane::Bulk, OpenLane::Isolated] {
+        let built = OpenRequest::new(peer(), Vec::new(), ssh(), lane, Some(slip())).unwrap();
+        assert_eq!(decode(&built.encode().unwrap()).unwrap().lane(), lane);
+    }
+}
+
+#[test]
+fn into_slip_hands_over_the_slip_itself() {
+    let slip = slip();
+    let request = OpenRequest::new(
+        peer(),
+        Vec::new(),
+        "ssh".parse().unwrap(),
+        OpenLane::Main,
+        Some(slip.clone()),
+    )
+    .unwrap();
+    assert_eq!(request.into_slip().unwrap().as_str(), slip.as_str());
+    let bare = OpenRequest::new(
+        peer(),
+        Vec::new(),
+        "ssh".parse().unwrap(),
+        OpenLane::Main,
+        None,
+    )
+    .unwrap();
+    assert!(bare.into_slip().is_none());
+}
+
+#[test]
 fn debug_names_no_hint_and_no_slip() {
     let slip = slip();
     let hint: SocketAddr = "192.0.2.7:4433".parse().unwrap();
@@ -301,10 +367,12 @@ fn debug_names_no_hint_and_no_slip() {
         Some(slip.clone()),
     )
     .unwrap();
+    // The slip's own text is what follows its root key, which Debug may print as the peer.
+    let (_, token) = slip.as_str().split_once('.').unwrap();
     let wrapped: Result<Option<OpenRequest>, ()> = Ok(Some(request));
     for shown in [format!("{wrapped:?}"), format!("{wrapped:#?}")] {
-        assert!(!shown.contains(slip.as_str()), "{shown}");
-        assert!(!shown.contains(&slip.as_str()[..16]), "{shown}");
+        assert!(!shown.contains(token), "{shown}");
+        assert!(!shown.contains(&token[..16]), "{shown}");
         assert!(!shown.contains("192.0.2.7"), "{shown}");
         assert!(!shown.contains("4433"), "{shown}");
         assert!(shown.contains("<redacted>"), "{shown}");
@@ -569,6 +637,22 @@ fn a_peer_class_is_the_transport_refusal_exactly() {
         error,
         bifrost::Error::Refused(Refusal::Unavailable { detail }) if detail == self::detail(4)
     ));
+}
+
+#[test]
+fn each_known_peer_refusal_is_its_own_wire_class() {
+    assert_eq!(
+        OpenRefusal::from(Refusal::NotAdmitted),
+        OpenRefusal::Peer(PeerRefusal::NotAdmitted)
+    );
+    assert_eq!(
+        OpenRefusal::from(Refusal::BadRequest { detail: detail(2) }),
+        OpenRefusal::Peer(PeerRefusal::BadRequest(detail(2)))
+    );
+    assert_eq!(
+        OpenRefusal::from(Refusal::Unavailable { detail: detail(4) }),
+        OpenRefusal::Peer(PeerRefusal::Unavailable(detail(4)))
+    );
 }
 
 #[tokio::test]

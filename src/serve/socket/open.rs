@@ -14,6 +14,7 @@ use nauthy::{Link, Service};
 use tokio::io;
 
 use super::{ControlError, MAX_FRAME, local_detail};
+use crate::credential::LinkExt as _;
 
 /// The largest body request 4 (Open) may declare. Every other request and every reply keeps
 /// [`MAX_FRAME`]. Declaring more than the grammar can use buys nothing: the decoder requires exact
@@ -139,6 +140,9 @@ pub enum MalformedOpen {
     /// The slip is not a link.
     #[error("open request slip is not a link")]
     Slip,
+    /// The slip addresses a node other than the peer, or none bifrost can dial.
+    #[error("open request slip does not address its peer")]
+    SlipPeer,
     /// The observation byte is not the one this build reads.
     #[error("open request observation mode is unsupported")]
     Observation,
@@ -152,6 +156,9 @@ pub enum MalformedOpen {
 /// Built only through [`new`](Self::new) or [`decode`](Self::decode), so a value always encodes.
 /// Hints keep their order and duplicates; they are addresses, never names to resolve. Not `Clone`:
 /// one request owns its slip, and a copy would be a second credential body to account for.
+///
+/// Decoded bytes need not re-encode to the same bytes: a hint is parsed into an address and rendered
+/// afresh, never kept as the text that arrived, so two spellings of one address encode as one.
 pub struct OpenRequest {
     peer: NodeId,
     hints: Vec<SocketAddr>,
@@ -165,9 +172,10 @@ impl OpenRequest {
     ///
     /// # Errors
     ///
-    /// [`MalformedOpen::HintCount`] past 16 hints, so a request the resident would refuse is never
-    /// built. A slip needs no check: a parsed link's token is held to 13,200 bytes, so its text
-    /// always fits the slip field.
+    /// [`MalformedOpen::HintCount`] past 16 hints, and [`MalformedOpen::SlipPeer`] for a slip that
+    /// does not address `peer`, so a request the resident would refuse is never built. A slip's length
+    /// needs no check: a parsed link's token is held to 13,200 bytes, so its text always fits the slip
+    /// field.
     pub fn new(
         peer: NodeId,
         hints: Vec<SocketAddr>,
@@ -178,6 +186,7 @@ impl OpenRequest {
         if hints.len() > MAX_HINTS {
             return Err(MalformedOpen::HintCount);
         }
+        Self::slip_addresses(peer, slip.as_ref())?;
         Ok(Self {
             peer,
             hints,
@@ -210,6 +219,23 @@ impl OpenRequest {
     /// The link presented for this stream only, when the caller typed the peer as one.
     pub fn slip(&self) -> Option<&Link> {
         self.slip.as_ref()
+    }
+
+    /// The slip by value, ending the request: a handler that presents it needs no copy of the
+    /// credential. Read the other fields first.
+    pub fn into_slip(self) -> Option<Link> {
+        self.slip
+    }
+
+    /// Refuse a slip that does not address `peer`. A slip is good only at the node it addresses, so
+    /// one naming another node is refused where the request is built or read, before it can cause a
+    /// credential lookup, a renewal, a hint or a dial.
+    fn slip_addresses(peer: NodeId, slip: Option<&Link>) -> Result<(), MalformedOpen> {
+        match slip.map(|slip| slip.dial_node()) {
+            None => Ok(()),
+            Some(Ok(node)) if node == peer => Ok(()),
+            Some(_) => Err(MalformedOpen::SlipPeer),
+        }
     }
 
     /// The body as it goes on the wire. The observation byte is always the unobserved value.
@@ -279,6 +305,7 @@ impl OpenRequest {
                     .ok_or(MalformedOpen::Slip)?,
             ),
         };
+        Self::slip_addresses(peer, slip.as_ref())?;
         Ok(Self {
             peer,
             hints,
@@ -434,7 +461,9 @@ pub enum OpenRefusal {
 /// A peer's refusal class, closed over the classes the wire names.
 ///
 /// Its own type rather than [`Refusal`], which is non-exhaustive: an encoder over it needs no arm
-/// for a class the wire cannot carry.
+/// for a class the wire cannot carry. A class this build cannot name never becomes one of these; it
+/// reaches the wire as [`OpenRefusal::PeerUnreadable`] (see the `From<Refusal>` impl on
+/// [`OpenRefusal`]), so a newer peer's class is never read as a ruling it did not make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerRefusal {
     /// The peer's gate did not admit this dial.
@@ -453,6 +482,22 @@ impl From<PeerRefusal> for Refusal {
             PeerRefusal::NotAdmitted => Self::NotAdmitted,
             PeerRefusal::BadRequest(detail) => Self::BadRequest { detail },
             PeerRefusal::Unavailable(detail) => Self::Unavailable { detail },
+        }
+    }
+}
+
+impl From<Refusal> for OpenRefusal {
+    /// A peer's refusal as the wire carries it: each class this build knows to its own wire class,
+    /// and any other to [`PeerUnreadable`](Self::PeerUnreadable), never
+    /// [`NotAdmitted`](PeerRefusal::NotAdmitted), which would tell the caller a credential was judged
+    /// when nothing this build can read said so.
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::NotAdmitted => Self::Peer(PeerRefusal::NotAdmitted),
+            Refusal::BadRequest { detail } => Self::Peer(PeerRefusal::BadRequest(detail)),
+            Refusal::Unavailable { detail } => Self::Peer(PeerRefusal::Unavailable(detail)),
+            // The upstream refusal's own words, held to the detail bound at a character boundary.
+            unknown => Self::PeerUnreadable(RefusalDetail::bounded(unknown.to_string())),
         }
     }
 }
@@ -583,6 +628,9 @@ pub(super) fn encode_attached(info: &ConnInfo) -> io::Result<Vec<u8>> {
 
 /// Decode an Attached body. A path reference is a protocol error: this build never asks for one, so
 /// a reply carrying one answered some other request.
+///
+/// Decoded bytes need not re-encode to the same bytes: the relay URL and the remote address are
+/// parsed into typed values, never kept as the text that arrived, and render in their canonical form.
 pub(super) fn decode_attached(body: &[u8]) -> Result<ConnInfo, ControlError> {
     let mut cursor = Cursor(body);
     match cursor.byte().ok_or_else(truncated)? {

@@ -581,7 +581,12 @@ async fn an_open_renews_first_only_when_it_presents_this_homes_standing() {
     let laptop = lapsed_laptop("presents-laptop").await;
     let door = Door::new(LAPTOP, [(NAS, nas)]);
     let renewal = OpenRenewal::new(&laptop, &door);
-    let slip = standing(&root(), LAPTOP, now() + DAY);
+    // A slip the nas issued, so it addresses the nas the Open names.
+    let slip = TestNode::seeded(NAS)
+        .slip(&"ssh".parse().unwrap(), at(now() + DAY))
+        .unwrap()
+        .link()
+        .unwrap();
 
     // A slip presents itself; an exchange presents its standing as it is; a proven-only route presents
     // nothing. None of them asks a device.
@@ -723,4 +728,50 @@ async fn an_open_after_an_abandoned_renewal_asks_afresh() {
         "a whole bound, not the abandoned flight's"
     );
     assert_eq!(silent.asked(), 3, "two fresh asks");
+}
+
+/// Open A starts a flight and B joins it, then A leaves before the flight lands: B's outcome, once
+/// `gated`'s devices answer.
+async fn after_the_starter_leaves(renewal: &OpenRenewal<'_, Held>, gated: &Held) -> PickUp {
+    let (ssh, web) = (open("ssh", None), open("web", None));
+    let mut first = Box::pin(renewal.before(&ssh));
+    let mut second = Box::pin(renewal.before(&web));
+    while gated.asked() == 0 {
+        assert!(futures::poll!(&mut first).is_pending());
+        tokio::task::yield_now().await;
+    }
+    assert!(futures::poll!(&mut second).is_pending());
+    assert!(matches!(
+        &*renewal.state.borrow(),
+        Asking::Flying(flight) if flight.waiters.get() == 2
+    ));
+    drop(first);
+    gated.gate.add_permits(8);
+    second.await
+}
+
+#[tokio::test]
+async fn a_joined_open_takes_the_renewal_after_its_starter_leaves() {
+    let (nas, _) = nas_renewing("starter-leaves-nas", now() + 90 * DAY).await;
+    let laptop = lapsed_laptop("starter-leaves-laptop").await;
+    let gated = Held::new(Door::new(LAPTOP, [(NAS, nas)]));
+    let renewal = OpenRenewal::new(&laptop, &gated);
+
+    let took = after_the_starter_leaves(&renewal, &gated).await;
+
+    assert!(matches!(took, PickUp::Took(renewed) if renewed.from == "me/nas"));
+    assert_eq!(gated.asked(), 1, "the joined Open read the one flight");
+}
+
+#[tokio::test]
+async fn a_joined_open_reads_the_miss_after_its_starter_leaves() {
+    let laptop = lapsed_laptop("starter-leaves-miss").await;
+    // The nas is not there to answer.
+    let gated = Held::new(Door::new(LAPTOP, []));
+    let renewal = OpenRenewal::new(&laptop, &gated);
+
+    let missed = after_the_starter_leaves(&renewal, &gated).await;
+
+    assert_eq!(missed, PickUp::Missed);
+    assert_eq!(gated.asked(), 1, "the joined Open read the one flight");
 }
