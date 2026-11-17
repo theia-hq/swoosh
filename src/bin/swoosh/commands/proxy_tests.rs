@@ -9,13 +9,14 @@ use std::sync::Arc;
 use bifrost::{Announced, Session};
 use clap::Parser as _;
 use swoosh::credential::Credential;
+use swoosh::peers::{Lane, Peers, Presents};
 use swoosh::reaching::{BindRole, Reaching as _};
 use swoosh::testkit::TestNode;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::{
-    BadHead, HEAD_TIMEOUT, Head, Local, Parsed, ProxyCmd, Refused, accept_each, origin_url,
+    BadHead, Exit, HEAD_TIMEOUT, Head, Local, Parsed, ProxyCmd, Refused, accept_each, origin_url,
 };
 
 /// A fixed token, so a test can write the request a downloader sends to the printed URL.
@@ -323,11 +324,14 @@ enum Script {
     Answer(u16, &'static str, &'static str),
 }
 
-/// A session whose streams are in-memory pipes, with the far half driven by a [`Script`]. Declares the
-/// announced profile, so a request that carries a credential refuses before any byte.
+/// A machine whose sessions' streams are in-memory pipes, with the far half driven by a [`Script`].
+/// Declares the announced profile, so a request that carries a credential refuses before any byte. A
+/// dial hands back a clone sharing its counts.
+#[derive(Clone)]
 struct Scripted {
     script: Script,
     opened: Arc<AtomicUsize>,
+    dials: Arc<AtomicUsize>,
 }
 
 impl Scripted {
@@ -335,8 +339,37 @@ impl Scripted {
         Self {
             script,
             opened: Arc::new(AtomicUsize::new(0)),
+            dials: Arc::new(AtomicUsize::new(0)),
         }
     }
+}
+
+impl bifrost::Transport for Scripted {
+    type Security = Announced;
+    type Session = Self;
+
+    fn node_id(&self) -> bifrost::NodeId {
+        Session::peer(self)
+    }
+
+    fn local_addr(&self) -> bifrost::Addr {
+        bifrost::Addr::from_node(Session::peer(self))
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
+    }
+
+    async fn connect(&self, _addr: bifrost::Addr) -> Result<Self, bifrost::Error> {
+        self.dials.fetch_add(1, Ordering::SeqCst);
+        Ok(self.clone())
+    }
+
+    async fn accept(&self) -> Result<Self, bifrost::Error> {
+        Err(bifrost::Error::Closed)
+    }
+
+    async fn close(&self) {}
 }
 
 impl Session for Scripted {
@@ -413,13 +446,24 @@ fn proxy(extra: &[&str]) -> ProxyCmd {
     Wrap::try_parse_from(argv).expect("proxy parses").proxy
 }
 
-/// Write `head` to a fresh local listener, serve that one connection with `session`, and return what
-/// `serve` returned and the whole HTTP response the local client read.
+/// Write `head` to a fresh local listener, serve that one connection through a run's owner dialing
+/// `session`, and return what `serve` returned and the whole HTTP response the local client read.
 async fn exchange(
     head: impl FnOnce(&Local) -> String,
     cmd: &ProxyCmd,
     session: &Scripted,
     present: Option<&nauthy::Link>,
+) -> (eyre::Result<()>, String) {
+    let node = bifrost::Node::new(session.clone(), bifrost::NoDiscovery);
+    let peers = Peers::new(&node);
+    exchange_on(head, cmd, &exit(&peers, present)).await
+}
+
+/// [`exchange`] through `exit`, whose owner the caller holds.
+async fn exchange_on(
+    head: impl FnOnce(&Local) -> String,
+    cmd: &ProxyCmd,
+    exit: &Exit<'_, '_, Scripted, bifrost::NoDiscovery>,
 ) -> (eyre::Result<()>, String) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let local = local_at(listener.local_addr().unwrap());
@@ -427,10 +471,22 @@ async fn exchange(
     let (server, _) = listener.accept().await.unwrap();
     client.write_all(head(&local).as_bytes()).await.unwrap();
 
-    let served = cmd.serve(server, &local, session, present, None).await;
+    let served = cmd.serve(server, &local, exit).await;
     let mut response = Vec::new();
     client.read_to_end(&mut response).await.unwrap();
     (served, String::from_utf8_lossy(&response).into_owned())
+}
+
+/// The scripted machine as every request's exit, presenting `present` as this home's standing.
+fn exit<'p, 'n>(
+    peers: &'p Peers<'n, Scripted, bifrost::NoDiscovery>,
+    present: Option<&nauthy::Link>,
+) -> Exit<'p, 'n, Scripted, bifrost::NoDiscovery> {
+    Exit {
+        peers,
+        key: bifrost::NodeId::from_ed25519_secret(&[0u8; 32]),
+        presents: Presents::Standing(present.cloned()),
+    }
 }
 
 /// The request a downloader sends to the printed URL.
@@ -538,11 +594,13 @@ async fn a_client_that_sends_no_head_is_let_go() {
     let mut client = TcpStream::connect(local.addr).await.unwrap();
     let (server, _) = listener.accept().await.unwrap();
     let session = Scripted::new(Script::Silent);
+    let node = bifrost::Node::new(session.clone(), bifrost::NoDiscovery);
+    let peers = Peers::new(&node);
     let cmd = proxy(&[]);
 
     let served = tokio::time::timeout(
         HEAD_TIMEOUT * 6,
-        cmd.serve(server, &local, &session, None, None),
+        cmd.serve(server, &local, &exit(&peers, None)),
     )
     .await
     .expect("the head timeout lets the connection go before the test's own bound");
@@ -607,6 +665,7 @@ async fn a_refused_proxy_refuses_before_its_url() {
         ],
     );
     let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let peers = Peers::new(&node);
     let bound = swoosh::transport::Bound {
         transport: swoosh::transport::Transport::Iroh,
         local: false,
@@ -614,7 +673,7 @@ async fn a_refused_proxy_refuses_before_its_url() {
     };
     let error = tokio::time::timeout(
         Duration::from_secs(5),
-        cmd.run_proxy(&node, &contacts, &machine, &bound, None, None),
+        cmd.run_proxy(&node, &peers, &contacts, &machine, &bound, None, None),
     )
     .await
     .expect("a refused proxy ends, never serving")
@@ -629,4 +688,47 @@ async fn a_refused_proxy_refuses_before_its_url() {
         .map(|request| request.service)
         .collect();
     assert_eq!(asked, ["proxy", "control.services"]);
+}
+
+/// Every request rides the Bulk lane: with the machine's Main lane full, a request still passes, on a
+/// held session of its own.
+#[tokio::test]
+async fn proxy_requests_ride_the_bulk_lane() {
+    let session = Scripted::new(Script::Answer(200, "X-Note", "fine"));
+    let node = bifrost::Node::new(session.clone(), bifrost::NoDiscovery);
+    let peers = Peers::new(&node);
+    let key = Session::peer(&session);
+    let mut main = Vec::new();
+    for _ in 0..64 {
+        main.push(
+            peers
+                .open(
+                    key,
+                    "proxy".parse().unwrap(),
+                    Lane::Main,
+                    Presents::Standing(None),
+                )
+                .await
+                .expect("below the Main cap"),
+        );
+    }
+    assert!(matches!(
+        peers
+            .open(
+                key,
+                "proxy".parse().unwrap(),
+                Lane::Main,
+                Presents::Standing(None)
+            )
+            .await,
+        Err(swoosh::peers::OpenError::Busy)
+    ));
+    let (served, text) = exchange_on(printed, &proxy(&[]), &exit(&peers, None)).await;
+    assert!(served.is_ok(), "{served:?}");
+    assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+    assert_eq!(
+        session.dials.load(Ordering::SeqCst),
+        2,
+        "one session per lane"
+    );
 }

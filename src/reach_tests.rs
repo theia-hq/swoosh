@@ -167,7 +167,7 @@ async fn a_hostile_connect_failure_prints_escaped() {
     assert_eq!(format!("{error:#}"), escaped_unreached(&target));
 }
 
-// `dial_service`, the gated reach `speed` takes: the same chain, through its own failure path.
+// `dial_service`, the gated reach `ping` and `status` take: the same chain, by its own path.
 #[tokio::test]
 async fn a_hostile_service_connect_failure_prints_escaped() {
     let (node, target, machine) = unreachable();

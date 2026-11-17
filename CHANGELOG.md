@@ -110,6 +110,11 @@ All notable changes to swoosh, newest first.
   changes, instead of on every probe line.
 - **A received file's line names who sent it.** It now reads
   `<service>: received <path> (<bytes> bytes) from <key>`, where `<key>` is the machine that sent the file.
+- **Connections to one machine are limited, each kind apart.** At most 64 ordinary streams, 128 `proxy`
+  pipes and 4 `speed` connections at a time, so one kind cannot starve another. Past a limit, the command
+  says `too many streams open to this machine; try again when one closes`. A machine that does not answer
+  a request to open a stream within 10 seconds reads `the machine did not answer the request to open a
+  stream in time`.
 - **`send` waits at most 10 minutes for the receiver to answer each file.** Then it reports
   `the receiver did not answer within 10 minutes; the file may have arrived`. Before, it had no limit.
 

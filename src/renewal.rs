@@ -26,6 +26,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::home::Home;
+use crate::peers::{Lane, OpenError, Presents};
 use crate::roster::{MAX_BADGE, read_held};
 use crate::serve::RENEWAL_SERVICE;
 use crate::standing::Standing;
@@ -170,9 +171,13 @@ impl<T: Transport, D: Discovery> Fetch for NodeFetch<'_, '_, T, D> {
             .map_err(|error| eyre::eyre!("{error}"))?;
         // The route refuses a key it does not know, and every key while its slots are full: to the dialer
         // that is the same miss as the one byte. No badge lookup belongs on this path, even for a key.
-        let (_writer, reader) = match self.peers.open(peer, service, None).await {
+        let (_writer, reader) = match self
+            .peers
+            .open(peer, service, Lane::Main, Presents::Standing(None))
+            .await
+        {
             Ok(stream) => stream,
-            Err(bifrost::Error::Refused(_)) => return Ok(None),
+            Err(OpenError::Open(bifrost::Error::Refused(_))) => return Ok(None),
             Err(other) => return Err(eyre::eyre!(other).into()),
         };
         read_answer(reader).await

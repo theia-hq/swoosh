@@ -4,7 +4,6 @@
 
 use core::cell::{Cell, RefCell};
 use core::future::pending;
-use std::io;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -14,7 +13,12 @@ use nauthy::{Link, Service};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::sync::Semaphore;
 
-use super::{DIAL_TIMEOUT, IDLE_EVICTION, Key, MAIN_STREAMS, OPEN_TIMEOUT, Peers};
+use super::Lane::{Bulk, Main};
+use super::Presents::{Slip, Standing};
+use super::{
+    BULK_STREAMS, Carry, Class, DIAL_TIMEOUT, DialFailure, IDLE_EVICTION, ISOLATED_CONNECTIONS,
+    Key, MAIN_STREAMS, OPEN_TIMEOUT, OpenError, Peers,
+};
 use crate::home::Home;
 use crate::renewal::{Fetch as _, NodeFetch};
 use crate::serve::{RENEWAL_SERVICE, SYNC_SERVICE};
@@ -84,7 +88,7 @@ async fn credentialed_key_and_slots_use_one_badge_snapshot() {
     }
     let keys: Vec<_> = peers.entries.borrow().keys().cloned().collect();
     assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].standing.as_deref(), Some(first.as_str()));
+    assert!(keys[0].carry == main_carry(Some(first.as_str().to_owned())));
     crate::config::write_badge(&crate::testkit::lock(), &home, &badge(2)).unwrap();
     gate.add_permits(1);
     assert!(
@@ -160,9 +164,9 @@ async fn concurrent_opens_share_the_flight_and_cancelled_waiters_release_their_c
     *probe.state.dial_gate.borrow_mut() = Some(Rc::clone(&gate));
     let node = Node::new(probe.clone(), NoDiscovery);
     let peers = Peers::new(&node);
-    let mut leader = Box::pin(peers.open(peer(), service(), None));
-    let mut waiter = Box::pin(peers.open(peer(), service(), None));
-    let mut cancelled = Box::pin(peers.open(peer(), service(), None));
+    let mut leader = Box::pin(peers.open(peer(), service(), Main, Standing(None)));
+    let mut waiter = Box::pin(peers.open(peer(), service(), Main, Standing(None)));
+    let mut cancelled = Box::pin(peers.open(peer(), service(), Main, Standing(None)));
     assert!(poll!(&mut leader).is_pending());
     assert!(poll!(&mut waiter).is_pending());
     assert!(poll!(&mut cancelled).is_pending());
@@ -177,12 +181,20 @@ async fn concurrent_opens_share_the_flight_and_cancelled_waiters_release_their_c
     gate.add_permits(1);
     drop(waiter.await.unwrap());
     assert_eq!(probe.state.pending.get(), 0);
-    assert_eq!(peers.counts.borrow()[&peer()].strong_count(), 0);
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    assert_eq!(
+        peers.counts.borrow()[&(peer(), Class::Main)].strong_count(),
+        0
+    );
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     assert_eq!(probe.state.dials.get(), 1);
     // With no waiter left, even an uncompleted dial is dropped, not kept dormant in the cache.
     let other = TestNode::seeded(9).node_id();
-    let mut abandoned = Box::pin(peers.open(other, service(), None));
+    let mut abandoned = Box::pin(peers.open(other, service(), Main, Standing(None)));
     assert!(poll!(&mut abandoned).is_pending());
     drop(abandoned);
     assert_eq!(probe.state.pending.get(), 0);
@@ -200,19 +212,19 @@ async fn credentialed_flights_and_retries_preserve_other_cohorts() {
     let b = badge(2);
     let a_key = Key {
         peer: peer(),
-        standing: Some(a.as_str().to_owned()),
+        carry: main_carry(Some(a.as_str().to_owned())),
     };
     let b_key = Key {
         peer: peer(),
-        standing: Some(b.as_str().to_owned()),
+        carry: main_carry(Some(b.as_str().to_owned())),
     };
     let none_key = Key {
         peer: peer(),
-        standing: None,
+        carry: main_carry(None),
     };
-    let mut leader = Box::pin(peers.open(peer(), service(), Some(a.clone())));
-    let mut other = Box::pin(peers.open(peer(), service(), Some(b)));
-    let mut waiter = Box::pin(peers.open(peer(), service(), Some(a.clone())));
+    let mut leader = Box::pin(peers.open(peer(), service(), Main, Standing(Some(a.clone()))));
+    let mut other = Box::pin(peers.open(peer(), service(), Main, Standing(Some(b))));
+    let mut waiter = Box::pin(peers.open(peer(), service(), Main, Standing(Some(a.clone()))));
     assert!(poll!(&mut leader).is_pending());
     assert!(poll!(&mut other).is_pending());
     assert!(poll!(&mut waiter).is_pending());
@@ -234,7 +246,10 @@ async fn credentialed_flights_and_retries_preserve_other_cohorts() {
     let (_a_stream, _b_stream) = (a_stream.unwrap(), b_stream.unwrap());
     assert_eq!(probe.state.dials.get(), 2);
     *probe.state.dial_gate.borrow_mut() = None;
-    let _none_stream = peers.open(peer(), service(), None).await.unwrap();
+    let _none_stream = peers
+        .open(peer(), service(), Main, Standing(None))
+        .await
+        .unwrap();
     let (b_entry, reused) = peers.session(&b_key).await.unwrap();
     assert!(reused);
     let (none_entry, reused) = peers.session(&none_key).await.unwrap();
@@ -244,7 +259,7 @@ async fn credentialed_flights_and_retries_preserve_other_cohorts() {
     let retry_gate = Rc::new(Semaphore::new(0));
     *probe.state.dial_gate.borrow_mut() = Some(Rc::clone(&retry_gate));
     probe.state.fail_opens.set(1);
-    let mut retry = Box::pin(peers.open(peer(), service(), Some(a)));
+    let mut retry = Box::pin(peers.open(peer(), service(), Main, Standing(Some(a))));
     assert!(poll!(&mut retry).is_pending());
     assert_eq!(probe.state.dials.get(), 4);
     assert_eq!(probe.state.pending.get(), 1);
@@ -276,7 +291,7 @@ async fn a_failed_flight_reaches_all_waiters_and_is_not_cached() {
     let node = Node::new(probe.clone(), NoDiscovery);
     let peers = Peers::new(&node);
     let mut asks: Vec<_> = (0..8)
-        .map(|_| Box::pin(peers.open(peer(), service(), None)))
+        .map(|_| Box::pin(peers.open(peer(), service(), Main, Standing(None))))
         .collect();
     for ask in &mut asks {
         assert!(poll!(ask).is_pending());
@@ -284,15 +299,20 @@ async fn a_failed_flight_reaches_all_waiters_and_is_not_cached() {
     assert_eq!(probe.state.dials.get(), 1);
     gate.add_permits(1);
     let first = asks.pop().unwrap();
-    assert!(matches!(first.await, Err(bifrost::Error::Connect(_))));
+    assert!(matches!(first.await, Err(OpenError::Unreachable(_))));
     assert_eq!(asks.len(), 7);
     assert!(peers.entries.borrow().is_empty());
     for ask in asks {
-        assert!(matches!(ask.await, Err(bifrost::Error::Connect(_))));
+        assert!(matches!(ask.await, Err(OpenError::Unreachable(_))));
     }
     assert!(peers.entries.borrow().is_empty());
     *probe.state.dial_gate.borrow_mut() = None;
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     assert_eq!(probe.state.dials.get(), 2);
 }
 
@@ -301,14 +321,24 @@ async fn a_reused_broken_entry_redials_once_but_not_after_a_fresh_failure() {
     let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
     let node = Node::new(probe.clone(), NoDiscovery);
     let peers = Peers::new(&node);
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     probe.state.fail_opens.set(1);
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     assert_eq!(probe.state.dials.get(), 2);
     probe.state.fail_opens.set(2);
     assert!(matches!(
-        peers.open(peer(), service(), None).await,
-        Err(bifrost::Error::Closed)
+        peers.open(peer(), service(), Main, Standing(None)).await,
+        Err(OpenError::Open(bifrost::Error::Closed))
     ));
     assert_eq!(
         probe.state.dials.get(),
@@ -320,8 +350,8 @@ async fn a_reused_broken_entry_redials_once_but_not_after_a_fresh_failure() {
     let node = Node::new(fresh.clone(), NoDiscovery);
     let peers = Peers::new(&node);
     assert!(matches!(
-        peers.open(peer(), service(), None).await,
-        Err(bifrost::Error::Closed)
+        peers.open(peer(), service(), Main, Standing(None)).await,
+        Err(OpenError::Open(bifrost::Error::Closed))
     ));
     assert_eq!(fresh.state.dials.get(), 1);
 }
@@ -334,9 +364,14 @@ async fn refusal_and_wrong_peer_never_retry_or_cache_admission() {
     let probe = Probe::new([Script::Lists(vec![]), Script::Refuse(refusal.clone())]);
     let node = Node::new(probe.clone(), NoDiscovery);
     let peers = Peers::new(&node);
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     assert!(
-        matches!(peers.open(peer(), service(), None).await, Err(bifrost::Error::Refused(r)) if r == refusal)
+        matches!(peers.open(peer(), service(), Main, Standing(None)).await, Err(OpenError::Open(bifrost::Error::Refused(r))) if r == refusal)
     );
     assert_eq!(
         probe.gate.requests().len(),
@@ -344,8 +379,10 @@ async fn refusal_and_wrong_peer_never_retry_or_cache_admission() {
         "the second stream checks admission"
     );
     probe.state.wrong_peer.set(true);
-    assert!(matches!(peers.open(peer(), service(), None).await,
-        Err(bifrost::Error::Stream(cause)) if cause.is::<tightbeam::tunnel::WrongPeer>()));
+    assert!(
+        matches!(peers.open(peer(), service(), Main, Standing(None)).await,
+        Err(OpenError::Open(bifrost::Error::Stream(cause))) if cause.is::<tightbeam::tunnel::WrongPeer>())
+    );
     assert_eq!(
         probe.gate.requests().len(),
         2,
@@ -359,10 +396,13 @@ async fn eviction_checks_entry_identity_and_keeps_the_old_live_stream() {
     let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
     let node = Node::new(probe.clone(), NoDiscovery);
     let peers = Peers::new(&node);
-    let stream = peers.open(peer(), service(), None).await.unwrap();
+    let stream = peers
+        .open(peer(), service(), Main, Standing(None))
+        .await
+        .unwrap();
     let key = Key {
         peer: peer(),
-        standing: None,
+        carry: main_carry(None),
     };
     let (old, _) = peers.session(&key).await.unwrap();
     peers.evict(&key, &old);
@@ -385,25 +425,39 @@ async fn deadlines_evict_stalls_and_cancellation_releases_open_occupancy() {
     let peers = Peers::new(&node);
     let started = tokio::time::Instant::now();
     assert!(matches!(
-        peers.open(peer(), service(), None).await,
-        Err(bifrost::Error::Connect(_))
+        peers.open(peer(), service(), Main, Standing(None)).await,
+        Err(OpenError::Unreachable(DialFailure::TimedOut))
     ));
     assert_eq!(started.elapsed(), DIAL_TIMEOUT);
+    // Worded as every verb's own dial words a timeout, so a reach through the owner prints the same line.
+    assert_eq!(
+        DialFailure::TimedOut.to_string(),
+        "timed out after 10s with no response"
+    );
     assert!(peers.entries.borrow().is_empty());
     *probe.state.dial_gate.borrow_mut() = None;
     probe.state.stall_open.set(true);
     let started = tokio::time::Instant::now();
-    assert!(matches!(peers.open(peer(), service(), None).await,
-        Err(bifrost::Error::Stream(cause)) if cause.downcast_ref::<io::Error>()
-            .is_some_and(|error| error.kind() == io::ErrorKind::TimedOut)));
+    assert!(matches!(
+        peers.open(peer(), service(), Main, Standing(None)).await,
+        Err(OpenError::Timeout)
+    ));
     assert_eq!(started.elapsed(), OPEN_TIMEOUT);
     assert!(peers.entries.borrow().is_empty());
-    let mut opening = Box::pin(peers.open(peer(), service(), None));
+    let mut opening = Box::pin(peers.open(peer(), service(), Main, Standing(None)));
     assert!(poll!(&mut opening).is_pending());
     drop(opening);
-    assert_eq!(peers.counts.borrow()[&peer()].strong_count(), 0);
+    assert_eq!(
+        peers.counts.borrow()[&(peer(), Class::Main)].strong_count(),
+        0
+    );
     probe.state.stall_open.set(false);
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -413,22 +467,38 @@ async fn a_caller_cancelling_a_stalled_open_evicts_only_its_own_entry() {
     let peers = Peers::new(&node);
     let key = Key {
         peer: peer(),
-        standing: None,
+        carry: main_carry(None),
     };
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     // Callers bound an exchange below the open deadline, so only the cancellation can evict here.
     probe.state.stall_open.set(true);
     let started = tokio::time::Instant::now();
     assert!(
-        tokio::time::timeout(crate::sync::EACH, peers.open(peer(), service(), None))
-            .await
-            .is_err()
+        tokio::time::timeout(
+            crate::sync::EACH,
+            peers.open(peer(), service(), Main, Standing(None))
+        )
+        .await
+        .is_err()
     );
     assert!(started.elapsed() < OPEN_TIMEOUT);
-    assert_eq!(peers.counts.borrow()[&peer()].strong_count(), 0);
+    assert_eq!(
+        peers.counts.borrow()[&(peer(), Class::Main)].strong_count(),
+        0
+    );
     assert_eq!(*probe.state.closed.borrow(), vec![1]);
     probe.state.stall_open.set(false);
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         probe.state.dials.get(),
         2,
@@ -437,13 +507,18 @@ async fn a_caller_cancelling_a_stalled_open_evicts_only_its_own_entry() {
 
     // An attempt cancelled after its entry was replaced leaves the replacement cached.
     probe.state.stall_open.set(true);
-    let mut stalled = Box::pin(peers.open(peer(), service(), None));
+    let mut stalled = Box::pin(peers.open(peer(), service(), Main, Standing(None)));
     assert!(poll!(&mut stalled).is_pending());
     probe.state.stall_open.set(false);
     let (stalled_entry, _) = peers.session(&key).await.unwrap();
     peers.evict(&key, &stalled_entry);
     drop(stalled_entry);
-    drop(peers.open(peer(), service(), None).await.unwrap());
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
     let (replacement, _) = peers.session(&key).await.unwrap();
     drop(stalled);
     let (current, reused) = peers.session(&key).await.unwrap();
@@ -458,33 +533,51 @@ async fn both_halves_own_one_budget_and_idle_eviction_waits_for_the_last_half() 
     let peers = Peers::new(&node);
     let mut streams = Vec::new();
     for _ in 0..MAIN_STREAMS {
-        streams.push(peers.open(peer(), service(), None).await.unwrap());
+        streams.push(
+            peers
+                .open(peer(), service(), Main, Standing(None))
+                .await
+                .unwrap(),
+        );
     }
-    assert!(
-        matches!(peers.open(peer(), service(), Some(badge(1))).await,
-        Err(bifrost::Error::Stream(cause)) if cause.downcast_ref::<io::Error>()
-            .is_some_and(|error| error.kind() == io::ErrorKind::WouldBlock))
-    );
+    assert!(matches!(
+        peers
+            .open(peer(), service(), Main, Standing(Some(badge(1))))
+            .await,
+        Err(OpenError::Busy)
+    ));
     let (writer, reader) = streams.pop().unwrap();
     drop(writer);
     assert_eq!(
-        peers.counts.borrow()[&peer()].upgrade().unwrap().get(),
+        peers.counts.borrow()[&(peer(), Class::Main)]
+            .upgrade()
+            .unwrap()
+            .get(),
         MAIN_STREAMS
     );
     drop(reader);
     assert_eq!(
-        peers.counts.borrow()[&peer()].upgrade().unwrap().get(),
+        peers.counts.borrow()[&(peer(), Class::Main)]
+            .upgrade()
+            .unwrap()
+            .get(),
         MAIN_STREAMS - 1
     );
     let (writer, reader) = streams.pop().unwrap();
     drop(reader);
     assert_eq!(
-        peers.counts.borrow()[&peer()].upgrade().unwrap().get(),
+        peers.counts.borrow()[&(peer(), Class::Main)]
+            .upgrade()
+            .unwrap()
+            .get(),
         MAIN_STREAMS - 1
     );
     drop(writer);
     assert_eq!(
-        peers.counts.borrow()[&peer()].upgrade().unwrap().get(),
+        peers.counts.borrow()[&(peer(), Class::Main)]
+            .upgrade()
+            .unwrap()
+            .get(),
         MAIN_STREAMS - 2
     );
     tokio::time::advance(IDLE_EVICTION).await;
@@ -505,13 +598,365 @@ async fn both_halves_own_one_budget_and_idle_eviction_waits_for_the_last_half() 
 }
 
 #[tokio::test]
+async fn fan_out_rides_the_bulk_lane() {
+    let probe = Probe::new((0..101).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let mut pipes = Vec::new();
+    for _ in 0..100 {
+        pipes.push(
+            peers
+                .open(peer(), service(), Bulk, Standing(None))
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(probe.state.dials.get(), 1);
+    let _call = peers
+        .open(peer(), service(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(
+        probe.state.dials.get(),
+        2,
+        "Main never rides the Bulk session"
+    );
+    assert_eq!(peers.entries.borrow().len(), 2);
+}
+
+#[tokio::test]
+async fn each_lane_caps_its_own_streams_per_peer() {
+    let probe = Probe::new((0..usize::from(BULK_STREAMS) + 2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let mut pipes = Vec::new();
+    for _ in 0..BULK_STREAMS {
+        pipes.push(
+            peers
+                .open(peer(), service(), Bulk, Standing(None))
+                .await
+                .unwrap(),
+        );
+    }
+    assert!(matches!(
+        peers
+            .open(peer(), service(), Bulk, Standing(Some(badge(1))))
+            .await,
+        Err(OpenError::Busy)
+    ));
+    assert_eq!(
+        probe.gate.requests().len(),
+        usize::from(BULK_STREAMS),
+        "a refused open sends nothing"
+    );
+    drop(
+        peers
+            .open(peer(), service(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
+    pipes.pop();
+    drop(
+        peers
+            .open(peer(), service(), Bulk, Standing(None))
+            .await
+            .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn isolated_opens_a_connection_it_never_stores() {
+    let probe = Probe::new([]);
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let first = peers.isolated(peer()).await.unwrap();
+    let second = peers.isolated(peer()).await.unwrap();
+    assert_eq!(probe.state.dials.get(), 2, "one connection per caller");
+    assert!(peers.entries.borrow().is_empty());
+    assert_eq!(first.peer(), peer());
+    drop(first);
+    assert_eq!(*probe.state.closed.borrow(), vec![1]);
+    drop(second);
+    assert_eq!(*probe.state.closed.borrow(), vec![1, 2]);
+}
+
+#[tokio::test]
+async fn isolated_opens_cap_at_four_per_peer() {
+    let probe = Probe::new([]);
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let mut live = Vec::new();
+    for _ in 0..ISOLATED_CONNECTIONS {
+        live.push(peers.isolated(peer()).await.unwrap());
+    }
+    assert!(matches!(peers.isolated(peer()).await, Err(OpenError::Busy)));
+    assert_eq!(
+        probe.state.dials.get(),
+        u32::from(ISOLATED_CONNECTIONS),
+        "a fifth connection is never dialed"
+    );
+    live.pop();
+    live.push(peers.isolated(peer()).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_cancelled_isolated_dial_frees_its_count() {
+    let probe = Probe::new([]);
+    let gate = Rc::new(Semaphore::new(0));
+    *probe.state.dial_gate.borrow_mut() = Some(Rc::clone(&gate));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let mut dialing = Box::pin(peers.isolated(peer()));
+    assert!(poll!(&mut dialing).is_pending());
+    assert_eq!(
+        peers.counts.borrow()[&(peer(), Class::Isolated)]
+            .upgrade()
+            .unwrap()
+            .get(),
+        1
+    );
+    drop(dialing);
+    assert_eq!(probe.state.pending.get(), 0);
+    assert_eq!(
+        peers.counts.borrow()[&(peer(), Class::Isolated)].strong_count(),
+        0
+    );
+    *probe.state.dial_gate.borrow_mut() = None;
+    let mut live = Vec::new();
+    for _ in 0..ISOLATED_CONNECTIONS {
+        live.push(peers.isolated(peer()).await.unwrap());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bulk_open_timeout_evicts_only_the_bulk_session() {
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _call = peers
+        .open(peer(), service(), Main, Standing(None))
+        .await
+        .unwrap();
+    let main = Key {
+        peer: peer(),
+        carry: main_carry(None),
+    };
+    let (held, _) = peers.session(&main).await.unwrap();
+    drop(
+        peers
+            .open(peer(), service(), Bulk, Standing(None))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(peers.entries.borrow().len(), 2);
+    probe.state.stall_open.set(true);
+    let started = tokio::time::Instant::now();
+    assert!(matches!(
+        peers.open(peer(), service(), Bulk, Standing(None)).await,
+        Err(OpenError::Timeout)
+    ));
+    assert_eq!(started.elapsed(), OPEN_TIMEOUT);
+    let keys: Vec<_> = peers.entries.borrow().keys().cloned().collect();
+    assert!(keys == [main.clone()], "only the Bulk session is evicted");
+    let (current, reused) = peers.session(&main).await.unwrap();
+    assert!(reused && Rc::ptr_eq(&current, &held));
+    assert_eq!(*probe.state.closed.borrow(), vec![2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slip_open_timeout_evicts_only_the_slip_session() {
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _call = peers
+        .open(peer(), service(), Main, Standing(None))
+        .await
+        .unwrap();
+    let main = Key {
+        peer: peer(),
+        carry: main_carry(None),
+    };
+    let (held, _) = peers.session(&main).await.unwrap();
+    // One link: a badge minted again carries a new expiry, so it would be another slip.
+    let link = badge(1);
+    let slip = || Slip {
+        slip: link.clone(),
+        membership: None,
+    };
+    drop(peers.open(peer(), service(), Bulk, slip()).await.unwrap());
+    assert_eq!(peers.entries.borrow().len(), 2);
+    probe.state.stall_open.set(true);
+    let started = tokio::time::Instant::now();
+    assert!(matches!(
+        peers.open(peer(), service(), Main, slip()).await,
+        Err(OpenError::Timeout)
+    ));
+    assert_eq!(started.elapsed(), OPEN_TIMEOUT);
+    let keys: Vec<_> = peers.entries.borrow().keys().cloned().collect();
+    assert!(keys == [main.clone()], "only the slip session is evicted");
+    let (current, reused) = peers.session(&main).await.unwrap();
+    assert!(reused && Rc::ptr_eq(&current, &held));
+    assert_eq!(*probe.state.closed.borrow(), vec![2]);
+}
+
+#[tokio::test]
+async fn a_link_forward_rides_one_slip_session() {
+    let probe = Probe::new((0..61).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let slip = badge(1);
+    let presents = || Slip {
+        slip: slip.clone(),
+        membership: None,
+    };
+    let mut pipes = Vec::new();
+    for _ in 0..60 {
+        pipes.push(
+            peers
+                .open(peer(), service(), Bulk, presents())
+                .await
+                .unwrap(),
+        );
+    }
+    let _call = peers
+        .open(peer(), service(), Main, presents())
+        .await
+        .unwrap();
+    assert_eq!(
+        probe.state.dials.get(),
+        1,
+        "Main and Bulk share the slip's session"
+    );
+    let keys: Vec<_> = peers.entries.borrow().keys().cloned().collect();
+    assert!(matches!(
+        &keys[..],
+        [Key { carry: Carry::Slip { digest, membership: None }, .. }]
+            if digest == blake3::hash(slip.as_str().as_bytes()).as_bytes()
+    ));
+    assert!(
+        probe
+            .gate
+            .requests()
+            .iter()
+            .all(|request| request.capability.as_deref() == Some(slip.as_str()))
+    );
+}
+
+#[tokio::test]
+async fn a_different_slip_never_shares() {
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _a = peers
+        .open(
+            peer(),
+            service(),
+            Bulk,
+            Slip {
+                slip: badge(1),
+                membership: None,
+            },
+        )
+        .await
+        .unwrap();
+    let _b = peers
+        .open(
+            peer(),
+            service(),
+            Bulk,
+            Slip {
+                slip: badge(2),
+                membership: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(probe.state.dials.get(), 2);
+}
+
+#[tokio::test]
+async fn a_slip_open_never_rides_the_held_session() {
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let home = Key {
+        peer: peer(),
+        carry: main_carry(None),
+    };
+    let _own = peers
+        .open(peer(), service(), Main, Standing(None))
+        .await
+        .unwrap();
+    let (held, _) = peers.session(&home).await.unwrap();
+    let _slip = peers
+        .open(
+            peer(),
+            service(),
+            Main,
+            Slip {
+                slip: badge(1),
+                membership: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(probe.state.dials.get(), 2);
+    let (current, reused) = peers.session(&home).await.unwrap();
+    assert!(reused && Rc::ptr_eq(&current, &held));
+    assert_eq!(held.live.get(), 1, "the slip's stream is not on it");
+}
+
+#[tokio::test]
+async fn slips_share_the_peer_bulk_cap() {
+    let probe = Probe::new((0..usize::from(BULK_STREAMS)).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let mut pipes = Vec::new();
+    for generation in [1, 2] {
+        for _ in 0..BULK_STREAMS / 2 {
+            pipes.push(
+                peers
+                    .open(
+                        peer(),
+                        service(),
+                        Bulk,
+                        Slip {
+                            slip: badge(generation),
+                            membership: None,
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+    }
+    assert!(matches!(
+        peers
+            .open(
+                peer(),
+                service(),
+                Bulk,
+                Slip {
+                    slip: badge(3),
+                    membership: None
+                }
+            )
+            .await,
+        Err(OpenError::Busy)
+    ));
+}
+
+#[tokio::test]
 async fn structured_borrowers_and_owner_drop_before_node_close() {
     let probe = Probe::new([Script::Lists(vec![])]);
     let node = Node::new(probe.clone(), NoDiscovery);
     {
         let peers = Peers::new(&node);
         let work = async {
-            let _stream = peers.open(peer(), service(), None).await.unwrap();
+            let _stream = peers
+                .open(peer(), service(), Main, Standing(None))
+                .await
+                .unwrap();
             pending::<()>().await;
         };
         let mut work = Box::pin(work);
@@ -521,7 +966,10 @@ async fn structured_borrowers_and_owner_drop_before_node_close() {
         }
         assert!(probe.state.closed.borrow().is_empty());
         drop(work);
-        assert_eq!(peers.counts.borrow()[&peer()].strong_count(), 0);
+        assert_eq!(
+            peers.counts.borrow()[&(peer(), Class::Main)].strong_count(),
+            0
+        );
     }
     assert_eq!(*probe.state.closed.borrow(), vec![1]);
     node.close().await;
@@ -594,7 +1042,12 @@ async fn live_none_survives(end: StandingEnd) {
         let peers = Peers::new(&node);
         let fetch = NodeFetch::new(&peers);
         let (mut write, mut read) = peers
-            .open(host.node_id(), service(), Some(credential.clone()))
+            .open(
+                host.node_id(),
+                service(),
+                Main,
+                Standing(Some(credential.clone())),
+            )
             .await
             .unwrap();
         write.write_all(b"a").await.unwrap();
@@ -629,9 +1082,11 @@ async fn live_none_survives(end: StandingEnd) {
         assert!(
             matches!(
                 peers
-                    .open(host.node_id(), service(), Some(credential))
+                    .open(host.node_id(), service(), Main, Standing(Some(credential)))
                     .await,
-                Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+                Err(OpenError::Open(bifrost::Error::Refused(
+                    bifrost::Refusal::NotAdmitted
+                )))
             ),
             "the next credentialed stream still checks admission"
         );
@@ -682,6 +1137,12 @@ fn badge(generation: u8) -> Link {
             SystemTime::now() + core::time::Duration::from_secs(86400 * u64::from(generation)),
         )
         .unwrap()
+}
+fn main_carry(standing: Option<String>) -> Carry {
+    Carry::Home {
+        lane: Main,
+        standing,
+    }
 }
 fn scratch(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!(

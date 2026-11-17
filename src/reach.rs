@@ -18,6 +18,7 @@ use tokio::io::AsyncReadExt as _;
 
 use crate::escape::{Escaped, causes, escaped_report};
 use crate::peer::{Kind, Machine};
+use crate::peers::OpenError;
 use crate::serve::CONTROL_SERVICES_SERVICE;
 use crate::transport;
 
@@ -69,6 +70,22 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     let session = dial(node, machine, target, bound).await?;
     let connector = gated(machine.key(), Service::clone(service), present, membership);
     Ok((session, connector))
+}
+
+/// The error for an open through the run's [`Peers`](crate::peers::Peers) that gave no stream: a dial that
+/// reached no session reads as [`dial`]'s does, with the fix `bound` needs; any other failure keeps its
+/// chain, escaped, since it can carry the peer's text.
+pub fn open_failed(
+    target: &impl core::fmt::Display,
+    error: OpenError,
+    bound: &transport::Bound,
+) -> eyre::Report {
+    match error {
+        OpenError::Unreachable(failure) => {
+            hint(unreached(target, eyre::Report::new(failure)), bound)
+        }
+        other => escaped_report(other.into()),
+    }
 }
 
 /// The error for a machine the dial did not reach: the connect's cause chain under `could not reach
