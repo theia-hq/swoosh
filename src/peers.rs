@@ -4,9 +4,10 @@
 //! [`Lane::Main`] carries ordinary service streams and [`Lane::Bulk`] fan-out pipes, each on its own held
 //! session per peer, so a full fan-out never stalls an exchange. A slip rides held sessions of its own,
 //! shared only by streams presenting the identical slip, one per lane, so a slip's fan-out never stalls
-//! its exchanges either. [`Peers::isolated`] dials a connection per caller and never holds it. Every lane
-//! has a per-peer cap, enforced here for every run. An open that gets no answer in its lane's deadline
-//! evicts a session no other open got through on; dropping an open never removes a session.
+//! its exchanges either. [`Peers::isolated`] dials a connection per caller under the ten-second dial
+//! deadline and never holds it; its streams have no open deadline here. Every lane has a per-peer cap,
+//! enforced here for every run. An open that gets no answer in its lane's deadline evicts a session no
+//! other open got through on; dropping an open never removes a session.
 
 use core::cell::{Cell, RefCell};
 use core::pin::Pin;
@@ -219,8 +220,9 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     }
 
     /// Dial a connection of its own to `peer`, never held or shared, for a caller that must own the path
-    /// it measures. At most four live per peer, past which `Busy`; the count releases when the returned
-    /// connection drops, which closes it.
+    /// it measures. The dial has ten seconds; streams the caller opens on the connection have no deadline
+    /// from this owner. At most four live per peer, past which `Busy`; the count releases when the
+    /// returned connection drops, which closes it.
     pub async fn isolated(&self, peer: NodeId) -> Result<Isolated<T::Session>, OpenError> {
         let budget = self.reserve(peer, Class::Isolated)?;
         let session = dial(self.node, peer)

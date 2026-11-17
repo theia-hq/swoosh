@@ -606,6 +606,7 @@ async fn a_refused_open_is_not_progress() {
     let node = Node::new(probe.clone(), NoDiscovery);
     let peers = Peers::new(&node);
     probe.state.hold_next.set(1);
+    let started = tokio::time::Instant::now();
     let mut held = Box::pin(peers.open(peer(), service(), Main, Standing(None)));
     park(&mut held, &probe, 1).await;
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -615,6 +616,7 @@ async fn a_refused_open_is_not_progress() {
         Err(OpenError::Open(bifrost::Error::Refused(_)))
     ));
     assert!(matches!(held.await, Err(OpenError::Timeout)));
+    assert_eq!(started.elapsed(), MAIN_OPEN_TIMEOUT);
     assert!(
         peers.entries.borrow().is_empty(),
         "the stalled session is evicted"
@@ -1339,6 +1341,68 @@ async fn live_none_survives(end: StandingEnd) {
         cancel.cancel();
     };
     let (served, ()) = tokio::join!(exposer.run(&host, cancel.clone()), exercise);
+    served.unwrap();
+    node.close().await;
+    host.close().await;
+    std::fs::remove_dir_all(home.dir()).unwrap();
+}
+
+/// A full fan-out rides one held session: the transport carries every pipe the Bulk lane admits, so no
+/// open waits on stream credit, times out or dials a second session. Real iroh, since the mock has no
+/// stream limit.
+#[tokio::test]
+async fn home_bulk_128_ride_one_session() {
+    let (host, node, badge, store, home) = loopback_pair("bulk-128").await;
+    let exposer = tightbeam::tunnel::Router::new(nauthy::Gate::rooted(
+        TestRoot::seeded(1).verify_key(),
+        store,
+    ))
+    .echo(service())
+    .unwrap()
+    .expose()
+    .unwrap();
+    let cancel = tightbeam::tunnel::CancellationToken::new();
+    let exercise = async {
+        let peers = Peers::new(&node);
+        let open = || {
+            peers.open(
+                host.node_id(),
+                service(),
+                Bulk,
+                Standing(Some(badge.clone())),
+            )
+        };
+        let key = Key {
+            peer: host.node_id(),
+            carry: Carry::Home {
+                lane: Bulk,
+                standing: Some(badge.as_str().to_owned()),
+            },
+        };
+        let mut pipes = Vec::new();
+        pipes.push(open().await.unwrap());
+        let (held, _) = peers.session(&key).await.unwrap();
+        for _ in 1..BULK_STREAMS {
+            pipes.push(open().await.unwrap());
+        }
+        assert_eq!(
+            held.live.get(),
+            BULK_STREAMS,
+            "every pipe rides one session"
+        );
+        let (current, reused) = peers.session(&key).await.unwrap();
+        assert!(reused && Rc::ptr_eq(&current, &held), "no second dial");
+        assert_eq!(peers.entries.borrow().len(), 1);
+        assert!(matches!(open().await, Err(OpenError::Busy)));
+        drop((held, current, pipes));
+        cancel.cancel();
+    };
+    // A transport that stalls an open fails this test rather than hanging the suite.
+    let (served, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(exposer.run(&host, cancel.clone()), exercise)
+    })
+    .await
+    .expect("128 pipes attach well inside 30 s");
     served.unwrap();
     node.close().await;
     host.close().await;
