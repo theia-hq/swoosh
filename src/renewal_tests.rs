@@ -12,13 +12,13 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Protection};
-use nauthy::{Link, VerifyKey};
+use nauthy::{Link, Revocations as _, VerifyKey};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use super::{
-    Asking, Fetch, FetchError, OPEN_ASKS, OPEN_BACK_OFF, OPEN_LOCK, OpenRenewal, PickUp, answer,
-    is_due, pick_up, read_answer,
+    AFTER_REFUSAL, Asking, EACH, Fetch, FetchError, Kept, OPEN_ASKS, OPEN_BACK_OFF, OPEN_KEEP,
+    OPEN_LOCK, OPEN_RENEWAL, OpenRenewal, PickUp, Taken, answer, is_due, pick_up, read_answer,
 };
 use crate::config;
 use crate::contacts::{ContactsStore, DeviceLabel};
@@ -610,8 +610,25 @@ async fn an_open_renews_first_only_when_it_presents_this_homes_standing() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_opens_device_asks_end_together_within_six_seconds() {
-    let laptop = lapsed_laptop_of_three("asks-share").await;
+async fn an_opens_asks_go_to_every_device_at_once() {
+    let laptop = lapsed_laptop_of_three("at-once").await;
+    let silent = Held::new(Door::new(LAPTOP, []));
+    let renewal = OpenRenewal::new(&laptop, &silent);
+    let ssh = open("ssh", None);
+    let mut asking = Box::pin(renewal.before(&ssh));
+
+    while silent.asked() == 0 {
+        assert!(futures::poll!(&mut asking).is_pending());
+        tokio::task::yield_now().await;
+    }
+    assert!(futures::poll!(&mut asking).is_pending());
+
+    assert_eq!(silent.asked(), 3, "no device waits on another's answer");
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_ask_before_an_open_gets_a_whole_each() {
+    let laptop = lapsed_laptop_of_three("whole-each").await;
     let silent = Held::new(Door::new(LAPTOP, []));
     let renewal = OpenRenewal::new(&laptop, &silent);
     let start = Instant::now();
@@ -619,12 +636,49 @@ async fn an_opens_device_asks_end_together_within_six_seconds() {
     let missed = renewal.before(&open("ssh", None)).await;
 
     assert_eq!(missed, PickUp::Missed);
-    assert_eq!(
-        start.elapsed(),
-        OPEN_ASKS,
-        "one whole ask, then the share's last second"
-    );
-    assert_eq!(silent.asked(), 2, "the third device is never asked");
+    assert_eq!(start.elapsed(), EACH, "every ask started at once");
+    assert_eq!(silent.asked(), 3);
+}
+
+/// A [`Door`] where only `answers` answers, after `after`; every other device is asleep and never does.
+struct Asleep {
+    door: Door,
+    answers: NodeId,
+    after: Duration,
+}
+
+impl Fetch for Asleep {
+    async fn fetch(&self, peer: NodeId) -> Result<Option<Link>, FetchError> {
+        if peer != self.answers {
+            return core::future::pending().await;
+        }
+        tokio::time::sleep(self.after).await;
+        self.door.fetch(peer).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reachable_device_answers_beside_two_sleepers() {
+    // The order devices are listed in is drawn afresh each time, so ten flights all see the nas answer.
+    for flight in 0..10 {
+        let (nas, _) = nas_renewing(&format!("sleepers-nas-{flight}"), now() + 90 * DAY).await;
+        let laptop = lapsed_laptop_of_three(&format!("sleepers-laptop-{flight}")).await;
+        let asleep = Asleep {
+            door: Door::new(LAPTOP, [(NAS, nas)]),
+            answers: node(NAS),
+            after: Duration::from_millis(1500),
+        };
+        let renewal = OpenRenewal::new(&laptop, &asleep);
+        let start = Instant::now();
+
+        let took = renewal.before(&open("ssh", None)).await;
+
+        assert!(
+            matches!(&took, PickUp::Took(renewed) if renewed.from == "me/nas"),
+            "flight {flight}: {took:?}"
+        );
+        assert_eq!(start.elapsed(), Duration::from_millis(1500));
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -649,6 +703,12 @@ async fn an_open_waits_two_seconds_for_home_lock_and_writes_nothing() {
         config::load_badge(&laptop).await.unwrap().unwrap().as_str(),
         before.as_str(),
     );
+
+    // Not a miss: the next Open writes the standing the flight kept, asking nobody again.
+    let took = renewal.before(&open("ssh", None)).await;
+    assert!(matches!(took, PickUp::Took(renewed) if renewed.from == "me/nas"));
+    assert_eq!(door.asked(), vec![node(NAS)]);
+    assert_eq!(start.elapsed(), OPEN_LOCK, "no time passed");
 }
 
 #[tokio::test(start_paused = true)]
@@ -682,22 +742,17 @@ async fn opens_that_arrive_together_share_one_renewal() {
     let gated = Held::new(Door::new(LAPTOP, [(NAS, nas)]));
     let renewal = OpenRenewal::new(&laptop, &gated);
     let (ssh, web) = (open("ssh", None), open("web", None));
-    // Answer only once both Opens are waiting: on one flight, or each on its own ask.
-    let release = async {
-        loop {
-            let waiting = match &*renewal.state.borrow() {
-                Asking::Flying(flight) => flight.waiters.get(),
-                Asking::Idle | Asking::Missed(_) => 0,
-            };
-            if waiting == 2 || gated.asked() == 2 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        gated.gate.add_permits(2);
-    };
+    let mut first = Box::pin(renewal.before(&ssh));
+    let mut second = Box::pin(renewal.before(&web));
+    // The second Open arrives while the first's ask waits; a second flight would ask again.
+    while gated.asked() == 0 {
+        assert!(futures::poll!(&mut first).is_pending());
+        tokio::task::yield_now().await;
+    }
+    assert!(futures::poll!(&mut second).is_pending());
+    gated.gate.add_permits(2);
 
-    let (first, second, ()) = tokio::join!(renewal.before(&ssh), renewal.before(&web), release);
+    let (first, second) = tokio::join!(first, second);
 
     assert!(matches!(first, PickUp::Took(_)));
     assert_eq!(first, second, "both Opens read the one flight's outcome");
@@ -705,29 +760,81 @@ async fn opens_that_arrive_together_share_one_renewal() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_open_after_an_abandoned_renewal_asks_afresh() {
+async fn an_abandoned_flight_runs_to_its_end_on_the_run() {
     let laptop = lapsed_laptop_of_three("abandoned").await;
     let silent = Held::new(Door::new(LAPTOP, []));
     let renewal = OpenRenewal::new(&laptop, &silent);
     let ssh = open("ssh", None);
 
-    // The only Open waiting leaves a second into the first ask.
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), renewal.before(&ssh))
-            .await
-            .is_err()
-    );
-    assert_eq!(silent.asked(), 1);
-    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::select! {
+        never = renewal.drive() => match never {},
+        () = async {
+            // The only Open waiting leaves a second into the asks; only the run polls the flight after.
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), renewal.before(&ssh))
+                    .await
+                    .is_err()
+            );
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        } => {}
+    }
+    assert_eq!(silent.asked(), 3);
 
-    let start = Instant::now();
-    assert_eq!(renewal.before(&ssh).await, PickUp::Missed);
     assert_eq!(
-        start.elapsed(),
-        OPEN_ASKS,
-        "a whole bound, not the abandoned flight's"
+        renewal.before(&ssh).await,
+        PickUp::Skipped,
+        "the abandoned flight's miss counts"
     );
-    assert_eq!(silent.asked(), 3, "two fresh asks");
+    assert_eq!(silent.asked(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn opens_cancelled_in_a_loop_start_one_flight() {
+    let laptop = lapsed_laptop("cancel-loop").await;
+    let silent = Held::new(Door::new(LAPTOP, []));
+    let renewal = OpenRenewal::new(&laptop, &silent);
+    let ssh = open("ssh", None);
+
+    tokio::select! {
+        never = renewal.drive() => match never {},
+        () = async {
+            for _ in 0..100 {
+                let _ = tokio::time::timeout(Duration::from_millis(10), renewal.before(&ssh)).await;
+            }
+        } => {}
+    }
+
+    assert_eq!(silent.asked(), 1, "every Open joined the one flight");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_flight_abandoned_after_its_fetch_still_writes() {
+    let (nas, standing) = nas_renewing("abandoned-write-nas", now() + 90 * DAY).await;
+    let laptop = lapsed_laptop("abandoned-write-laptop").await;
+    let door = Door::new(LAPTOP, [(NAS, nas)]);
+    let renewal = OpenRenewal::new(&laptop, &door);
+    let ssh = open("ssh", None);
+    let held = crate::home::HomeWrite::take(&laptop).await.unwrap();
+
+    tokio::select! {
+        never = renewal.drive() => match never {},
+        () = async {
+            // The Open leaves while the flight waits for home.lock with the standing it fetched.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(500), renewal.before(&ssh))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(door.asked(), vec![node(NAS)]);
+            drop(held);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        } => {}
+    }
+
+    assert_eq!(
+        config::load_badge(&laptop).await.unwrap().unwrap().as_str(),
+        standing.as_str(),
+    );
 }
 
 /// Open A starts a flight and B joins it, then A leaves before the flight lands: B's outcome, once
@@ -741,10 +848,7 @@ async fn after_the_starter_leaves(renewal: &OpenRenewal<'_, Held>, gated: &Held)
         tokio::task::yield_now().await;
     }
     assert!(futures::poll!(&mut second).is_pending());
-    assert!(matches!(
-        &*renewal.state.borrow(),
-        Asking::Flying(flight) if flight.waiters.get() == 2
-    ));
+    assert!(matches!(&*renewal.state.borrow(), Asking::Flying(_)));
     drop(first);
     gated.gate.add_permits(8);
     second.await
@@ -774,4 +878,366 @@ async fn a_joined_open_reads_the_miss_after_its_starter_leaves() {
 
     assert_eq!(missed, PickUp::Missed);
     assert_eq!(gated.asked(), 1, "the joined Open read the one flight");
+}
+
+/// The update at `number` listing `members` and revoking the standing `revoked`'s id, signed by the root.
+fn update_revoking_id(number: u64, members: Vec<Member>, revoked: &Link) -> Vec<u8> {
+    let id = crate::codec::Id {
+        expires: revoked
+            .cap()
+            .expiry()
+            .unwrap()
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        id: revoked.cap().root_revocation_id().unwrap(),
+    };
+    let doc = RosterDoc::with_revocations(Epoch(number), members, vec![id], Vec::new()).unwrap();
+    root().sign_update(&doc)
+}
+
+/// What the same-root write does with `standing` on `home`: when it ends, if it was taken.
+async fn take(home: &Home, standing: &Link) -> Option<SystemTime> {
+    crate::joining::take_renewal(
+        &crate::home::HomeWrite::take(home).await.unwrap(),
+        home,
+        standing,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_renewal_for_a_key_the_held_update_revokes_is_never_taken() {
+    let laptop = lapsed_laptop("held-revokes-key").await;
+    holding(
+        &laptop,
+        &update(2, vec![row(NAS, "nas", STANDING_UNTIL)], vec![key(LAPTOP)]),
+    )
+    .await;
+    // The revocations file never holds this machine's own key, so only the update says it is revoked.
+    assert!(
+        !crate::revoked::open(&laptop)
+            .unwrap()
+            .is_revoked_key(&key(LAPTOP))
+    );
+
+    let renewed = standing(&root(), LAPTOP, now() + 90 * DAY);
+
+    assert_eq!(take(&laptop, &renewed).await, None);
+}
+
+#[tokio::test]
+async fn a_renewal_whose_id_the_held_update_revokes_is_never_taken() {
+    let laptop = lapsed_laptop("held-revokes-id").await;
+    let renewed = standing(&root(), LAPTOP, now() + 90 * DAY);
+    holding(
+        &laptop,
+        &update_revoking_id(2, vec![row(NAS, "nas", STANDING_UNTIL)], &renewed),
+    )
+    .await;
+
+    assert_eq!(take(&laptop, &renewed).await, None);
+}
+
+/// Write `bytes` at `path` as they are, with no fold: the revocations file learns nothing from them.
+fn unfolded(path: &std::path::Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[tokio::test]
+async fn a_renewal_whose_id_an_unfolded_update_revokes_is_never_taken() {
+    let laptop = lapsed_laptop("unfolded-revokes-id").await;
+    let renewed = standing(&root(), LAPTOP, now() + 90 * DAY);
+    unfolded(
+        &laptop.devices(),
+        &update_revoking_id(2, vec![row(NAS, "nas", STANDING_UNTIL)], &renewed),
+    );
+    assert!(
+        !crate::revoked::open(&laptop)
+            .unwrap()
+            .is_revoked(renewed.cap())
+    );
+
+    assert_eq!(take(&laptop, &renewed).await, None);
+}
+
+#[tokio::test]
+async fn a_renewal_for_a_key_a_kept_fork_revokes_is_never_taken() {
+    let laptop = lapsed_laptop("fork-revokes-key").await;
+    // Only the fork kept beside the held update says this machine is revoked.
+    unfolded(
+        &laptop.devices_conflict(),
+        &update(2, vec![row(NAS, "nas", STANDING_UNTIL)], vec![key(LAPTOP)]),
+    );
+
+    let renewed = standing(&root(), LAPTOP, now() + 90 * DAY);
+
+    assert_eq!(take(&laptop, &renewed).await, None);
+}
+
+#[tokio::test]
+async fn a_lapsed_standing_for_a_key_the_held_update_revokes_is_not_due() {
+    let laptop = lapsed_laptop("due-key").await;
+    assert!(is_due(&laptop, SystemTime::now()).await);
+
+    holding(
+        &laptop,
+        &update(2, vec![row(NAS, "nas", STANDING_UNTIL)], vec![key(LAPTOP)]),
+    )
+    .await;
+
+    // No renewal can be taken here, so waiting on one would only stall the verb.
+    assert!(!is_due(&laptop, SystemTime::now()).await);
+}
+
+#[tokio::test]
+async fn a_standing_whose_id_an_unfolded_update_revokes_is_due() {
+    let laptop = device("due-id-unfolded", LAPTOP, now() + DAY).await;
+    let held = config::load_badge(&laptop).await.unwrap().unwrap();
+    assert!(!is_due(&laptop, SystemTime::now()).await);
+
+    unfolded(
+        &laptop.devices(),
+        &update_revoking_id(1, vec![row(NAS, "nas", STANDING_UNTIL)], &held),
+    );
+    assert!(
+        !crate::revoked::open(&laptop)
+            .unwrap()
+            .is_revoked(held.cap())
+    );
+
+    assert!(is_due(&laptop, SystemTime::now()).await);
+}
+
+#[tokio::test]
+async fn a_standing_whose_id_the_held_update_revokes_is_due() {
+    let laptop = device("due-id", LAPTOP, now() + DAY).await;
+    let held = config::load_badge(&laptop).await.unwrap().unwrap();
+    assert!(!is_due(&laptop, SystemTime::now()).await);
+
+    holding(
+        &laptop,
+        &update_revoking_id(1, vec![row(NAS, "nas", STANDING_UNTIL)], &held),
+    )
+    .await;
+
+    assert!(is_due(&laptop, SystemTime::now()).await);
+}
+
+/// A renewal over `door` whose first flight fetched a standing while `home.lock` was held, and kept it.
+async fn kept<'a>(renewal: &OpenRenewal<'a, Door>, home: &Home) -> crate::home::HomeWrite {
+    let held = crate::home::HomeWrite::take(home).await.unwrap();
+    assert_eq!(renewal.before(&open("ssh", None)).await, PickUp::Missed);
+    assert!(matches!(&*renewal.state.borrow(), Asking::Kept(_)));
+    held
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_kept_standing_older_than_five_minutes_is_asked_for_again() {
+    let (nas, _) = nas_renewing("kept-old-nas", now() + 90 * DAY).await;
+    let laptop = lapsed_laptop("kept-old-laptop").await;
+    let door = Door::new(LAPTOP, [(NAS, nas)]);
+    let renewal = OpenRenewal::new(&laptop, &door);
+    drop(kept(&renewal, &laptop).await);
+
+    tokio::time::advance(OPEN_KEEP).await;
+    let took = renewal.before(&open("ssh", None)).await;
+
+    assert!(matches!(took, PickUp::Took(_)));
+    assert_eq!(door.asked(), vec![node(NAS), node(NAS)], "asked afresh");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_kept_standing_is_checked_again_under_the_lock() {
+    let (nas, renewed) = nas_renewing("kept-check-nas", now() + 90 * DAY).await;
+    let laptop = lapsed_laptop("kept-check-laptop").await;
+    let before = config::load_badge(&laptop).await.unwrap().unwrap();
+    let door = Door::new(LAPTOP, [(NAS, nas)]);
+    let renewal = OpenRenewal::new(&laptop, &door);
+    let held = kept(&renewal, &laptop).await;
+    // While the standing is kept, an update arrives that revokes its id.
+    assert_eq!(
+        fold(
+            &held,
+            &laptop,
+            &update_revoking_id(2, vec![row(NAS, "nas", STANDING_UNTIL)], &renewed),
+        )
+        .await
+        .unwrap(),
+        Folded::Newer
+    );
+    drop(held);
+
+    assert_eq!(renewal.before(&open("ssh", None)).await, PickUp::Missed);
+    assert_eq!(
+        config::load_badge(&laptop).await.unwrap().unwrap().as_str(),
+        before.as_str(),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_device_saying_no_backs_off() {
+    let nas = device("all-no-nas", NAS, STANDING_UNTIL).await;
+    holding(
+        &nas,
+        &update(
+            2,
+            vec![
+                row(NAS, "nas", STANDING_UNTIL),
+                row(LAPTOP, "laptop", now() - DAY),
+            ],
+            Vec::new(),
+        ),
+    )
+    .await;
+    let laptop = lapsed_laptop("all-no-laptop").await;
+    let door = Door::new(LAPTOP, [(NAS, nas)]);
+    let renewal = OpenRenewal::new(&laptop, &door);
+
+    assert_eq!(renewal.before(&open("ssh", None)).await, PickUp::Missed);
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    assert_eq!(renewal.before(&open("ssh", None)).await, PickUp::Skipped);
+    assert_eq!(door.asked(), vec![node(NAS)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lock_that_cannot_be_opened_is_a_miss() {
+    let (nas, _) = nas_renewing("lock-io-nas", now() + 90 * DAY).await;
+    let laptop = lapsed_laptop("lock-io-laptop").await;
+    // A directory where the lock file goes: taking the lock fails rather than waits.
+    let _ = std::fs::remove_file(laptop.home_lock());
+    std::fs::create_dir(laptop.home_lock()).unwrap();
+    let door = Door::new(LAPTOP, [(NAS, nas)]);
+    let renewal = OpenRenewal::new(&laptop, &door);
+
+    assert_eq!(renewal.before(&open("ssh", None)).await, PickUp::Missed);
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    assert_eq!(renewal.before(&open("ssh", None)).await, PickUp::Skipped);
+    assert_eq!(door.asked(), vec![node(NAS)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_for_home_lock_ends_with_the_flight() {
+    let laptop = lapsed_laptop("lock-end").await;
+    let renewed = standing(&root(), LAPTOP, now() + 90 * DAY);
+    let held = crate::home::HomeWrite::take(&laptop).await.unwrap();
+    let start = Instant::now();
+
+    let taken = super::take_by(&laptop, &renewed, start + Duration::from_millis(500)).await;
+
+    assert!(matches!(taken, Taken::LockHeld));
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_millis(500),
+        "not a whole OPEN_LOCK"
+    );
+    drop(held);
+}
+
+#[tokio::test(start_paused = true)]
+async fn asks_after_a_slow_kept_write_end_six_seconds_in() {
+    let laptop = lapsed_laptop("asks-end").await;
+    let renewed = standing(&root(), LAPTOP, now() + 90 * DAY);
+    let silent = Held::new(Door::new(LAPTOP, []));
+    let renewal = OpenRenewal::new(&laptop, &silent);
+    *renewal.state.borrow_mut() = Asking::Kept(Kept {
+        standing: renewed.clone(),
+        from: "me/nas".to_owned(),
+        at: Instant::now(),
+    });
+    let held = crate::home::HomeWrite::take(&laptop).await.unwrap();
+    // While it is kept, an update arrives that revokes its id, so the write refuses it once the lock is
+    // handed back.
+    assert_eq!(
+        fold(
+            &held,
+            &laptop,
+            &update_revoking_id(
+                2,
+                vec![
+                    row(NAS, "nas", STANDING_UNTIL),
+                    row(LAPTOP, "laptop", now() - DAY)
+                ],
+                &renewed
+            ),
+        )
+        .await
+        .unwrap(),
+        Folded::Newer
+    );
+    let start = Instant::now();
+
+    let ((missed, elapsed), ()) = tokio::join!(
+        async {
+            let missed = renewal.before(&open("ssh", None)).await;
+            (missed, start.elapsed())
+        },
+        async {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            drop(held);
+        },
+    );
+
+    assert_eq!(missed, PickUp::Missed);
+    assert_eq!(silent.asked(), 1);
+    // The asks start 1.5 s in, so a whole `EACH` would run to 6.5 s.
+    assert_eq!(elapsed, OPEN_ASKS);
+}
+
+/// A [`Fetch`] where each listed device hands over its standing after its wait, with no read of a home;
+/// every other device is asleep and never answers.
+struct Hands(Vec<(NodeId, Duration, Link)>);
+
+impl Fetch for Hands {
+    async fn fetch(&self, peer: NodeId) -> Result<Option<Link>, FetchError> {
+        let Some((_, after, standing)) = self.0.iter().find(|(key, ..)| *key == peer) else {
+            return core::future::pending().await;
+        };
+        tokio::time::sleep(*after).await;
+        Ok(Some(standing.clone()))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_write_ends_eight_seconds_in() {
+    let laptop = lapsed_laptop_of_three("flight-end").await;
+    // Standings bound to another key, so the write refuses each one it gets the lock for.
+    let hands = Hands(vec![
+        (
+            node(NAS),
+            Duration::from_millis(4800),
+            standing(&root(), STRANGER, now() + 90 * DAY),
+        ),
+        (
+            node(PHONE),
+            Duration::from_millis(4900),
+            standing(&root(), STRANGER, now() + 90 * DAY),
+        ),
+    ]);
+    let renewal = OpenRenewal::new(&laptop, &hands);
+    // The nas's refusal is slow, so the phone's answer, in by 4.9 s, is written only at 6.3 s, while
+    // another change holds the lock.
+    AFTER_REFUSAL.set(Some(Duration::from_millis(1500)));
+    let start = Instant::now();
+
+    let ((missed, elapsed), ()) = tokio::join!(
+        async {
+            let missed = renewal.before(&open("ssh", None)).await;
+            (missed, start.elapsed())
+        },
+        async {
+            tokio::time::sleep(Duration::from_millis(5500)).await;
+            let held = crate::home::HomeWrite::take(&laptop).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(held);
+        },
+    );
+
+    assert_eq!(missed, PickUp::Missed);
+    // A whole `OPEN_LOCK` from 6.3 s would run to 8.3 s.
+    assert_eq!(elapsed, OPEN_RENEWAL);
 }

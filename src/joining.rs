@@ -81,7 +81,9 @@ impl InvitedBy {
 
 /// Take a renewed standing that one of your devices handed this machine, under `home.lock`, through the
 /// same-root write a join makes: only one bound to this machine's key, rooted at the pin, ending after the
-/// one held, and neither its id nor this key revoked here. When it ends, if it was taken.
+/// one held, its id revoked neither here nor by the update held here, and this key revoked neither here
+/// nor by a list held here ([`own_key_revoked`](crate::root::own_key_revoked)). When it ends, if it was
+/// taken.
 ///
 /// It never writes the pin, so a standing fetched from the network can renew this machine and never move
 /// it to another root.
@@ -111,7 +113,10 @@ pub async fn take_renewal(
         .verify_member_at_root_without_revocation(SystemTime::now(), own, pin)
         .is_ok();
     let revocations = crate::revoked::open(home)?;
-    let blocked = revocations.is_revoked(cap) || revocations.is_revoked_peer(&own);
+    let blocked = revocations.is_revoked(cap)
+        || revocations.is_revoked_peer(&own)
+        || crate::root::own_key_revoked(home, pin)?
+        || crate::renewal::held_update_revokes_id(home, pin, standing);
     if !bound || until <= held || blocked {
         return Ok(None);
     }
