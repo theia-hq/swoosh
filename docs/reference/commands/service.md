@@ -26,7 +26,7 @@ If detail exceeds its display limits, the listing fails without partial rows. Th
 
 `add` and `rm` change this machine's list, which a bare `swoosh serve` serves; `add` takes
 `serve`'s forms ([Services](../services.md)). A running `serve` serves an added service from its next start and
-stops serving a removed one at once. `off` and `on` turn a saved service off and back on, live, and `off` holds across
+stops serving a removed one at once. `off` turns any named service off, saved or not, and `on` clears that, for a saved service or a name marked off. Both act live, and `off` holds across
 restarts. None of them ends a session already open: `swoosh stop` or a [revoke](revoke.md) does. They act on
 this machine only; for another of your machines, run them there: `swoosh ssh me/nas -- swoosh service off ssh`.
 

@@ -1482,6 +1482,51 @@ fn disabled_read_is_bounded() {
     }
 }
 
+/// Past the count cap, a refused name this run bound is kept however many marks sort before it: the cut
+/// drops only marks no route here answers, so `status` never reports a refused bound name as answering.
+#[test]
+fn a_capped_disabled_list_keeps_the_refused_names_this_run_bound() {
+    use super::DISABLED_NAMES_CAP;
+
+    let dir = scratch_dir("disabled-bound");
+    let mut marks: Vec<String> = (0..DISABLED_NAMES_CAP + 8)
+        .map(|i| format!("\"svc{i:05}\""))
+        .collect();
+    marks.push("\"zzz\"".to_owned());
+    std::fs::write(
+        dir.join("serve.toml"),
+        format!("off = [{}]\n", marks.join(", ")),
+    )
+    .expect("write many marks");
+    let home = crate::home::Home::resolve(Some(dir.clone())).expect("a scratch home");
+    let off = crate::serve_toml::LiveServeToml::load(&home).expect("the services off load");
+    off.serving(&crate::serve::Started::Named(vec!["zzz=ping:".to_owned()]));
+    let resident = Resident::new(
+        NodeId::from_ed25519_secret(&[9u8; 32]),
+        None,
+        empty_catalog(),
+        off,
+        CancellationToken::new(),
+        Arc::default(),
+    );
+    match resident.disabled_names() {
+        DisabledList::Known(names) => {
+            assert_eq!(
+                names.len(),
+                DISABLED_NAMES_CAP,
+                "the reported count is capped"
+            );
+            assert_eq!(
+                names.first().map(String::as_str),
+                Some("zzz"),
+                "the bound name leads"
+            );
+        }
+        DisabledList::Unknown(reason) => panic!("a many-name file above the count cap: {reason}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// While `serve.toml` cannot be read the status reports the services off as unknown, never as a list
 /// the gate does not follow, and a good read reports the list again.
 #[test]

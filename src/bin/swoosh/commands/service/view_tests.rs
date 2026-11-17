@@ -659,36 +659,93 @@ async fn service_empty_membership_keeps_off_only_rows() {
     );
 }
 
-/// A bound name the file does not hold is shown, yet `on` and `off` still refuse it and write nothing: being
-/// visible does not make it individually controllable.
+/// A bound name the file does not hold is shown, and `off` turns it off by name, as the row then says,
+/// while `on` clears the mark again: neither saves it, so it stays a row that is not saved.
 #[tokio::test]
-async fn service_visibility_does_not_imply_runtime_toggle_support() {
+async fn service_off_and_on_control_a_bound_name_not_saved() {
     let fixture = Fixture::new();
     fixture.list(&["web=tcp:localhost:3000"], &[]).await;
-    let out = fixture
-        .output(Some(&[
-            ("api", "tcp:localhost:8080", false),
-            ("web", "tcp:localhost:3000", false),
-        ]))
-        .await;
-    assert!(out.contains("\n  api  tcp:localhost:8080  "), "{out}");
-    let before = std::fs::read(fixture.0.serve_toml()).unwrap();
-    for way in [Way::On, Way::Off] {
-        let refused = ServiceToggleCmd {
+    let pairs = [
+        ("api", "tcp:localhost:8080", false),
+        ("web", "tcp:localhost:3000", false),
+    ];
+    let out = fixture.output(Some(&pairs)).await;
+    assert!(
+        out.contains("\n  api  tcp:localhost:8080  on, not saved\n"),
+        "{out}"
+    );
+    for (way, row) in [(Way::Off, "off, not saved"), (Way::On, "on, not saved")] {
+        ServiceToggleCmd {
             service: Slot::Service(swoosh::names::service("api").unwrap()),
             machine: None,
         }
         .run(&fixture.0, way)
         .await
-        .map(|()| "turned");
-        let expected = match way {
-            Way::On => "api is not saved here; add it: swoosh service add api=tcp:<address>:<port>",
-            Way::Off => "api is not saved here",
-        };
+        .unwrap();
+        let file = ServeToml::read(&fixture.0).unwrap();
         assert_eq!(
-            refused.map_err(|error| format!("{error:#}")),
-            Err(expected.to_owned())
+            file.services,
+            Some(vec!["web=tcp:localhost:3000".to_owned()]),
+            "api is never saved"
         );
-        assert_eq!(std::fs::read(fixture.0.serve_toml()).unwrap(), before);
+        let out = fixture.output(Some(&pairs)).await;
+        assert!(
+            out.contains(&format!("\n  api  tcp:localhost:8080  {row}\n")),
+            "{out}"
+        );
     }
+}
+
+/// `off` of a name neither saved nor bound, a typo, is shown as a mark with no service saved, and `on`
+/// clears it, so the row goes.
+#[tokio::test]
+async fn service_shows_a_typo_mark_and_on_clears_it() {
+    let fixture = Fixture::new();
+    fixture.list(&["web=tcp:localhost:3000"], &[]).await;
+    let toggle = |way| {
+        ServiceToggleCmd {
+            service: Slot::Service(swoosh::names::service("wbe").unwrap()),
+            machine: None,
+        }
+        .run(&fixture.0, way)
+    };
+    toggle(Way::Off).await.unwrap();
+    let out = fixture.output(None).await;
+    assert!(
+        out.contains("\n  wbe                      off, no service saved\n"),
+        "{out}"
+    );
+    toggle(Way::On).await.unwrap();
+    let out = fixture.output(None).await;
+    assert!(!out.contains("wbe"), "{out}");
+}
+
+/// `off` asks no `serve`: beside a listener at the control socket that never answers, it writes the mark
+/// and returns, and no connection was ever made. A pin: no code here opens the socket to remove.
+#[tokio::test]
+async fn service_off_needs_no_resident() {
+    let fixture = Fixture::new();
+    let socket = fixture.0.control_socket().unwrap();
+    let dir = socket.parent().unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(fixture.0.serve_lock(), std::process::id().to_string()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    tokio::time::timeout(
+        core::time::Duration::from_secs(5),
+        ServiceToggleCmd {
+            service: Slot::Service(swoosh::names::service("api").unwrap()),
+            machine: None,
+        }
+        .run(&fixture.0, Way::Off),
+    )
+    .await
+    .expect("off never waits on a serve")
+    .unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert!(ServeToml::read(&fixture.0).unwrap().off.contains("api"));
 }

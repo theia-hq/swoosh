@@ -7,7 +7,7 @@
 //!
 //! `add` and `rm` change the saved list under `home.lock`. Added services start
 //! with the next serve; removed services are refused live. `on` and `off` change
-//! whether a listed service answers, and off marks persist across restarts.
+//! whether a service answers by name, saved or not, and off marks persist across restarts.
 //!
 //! A machine typed after `on` or `off` is refused with exit 2 until remote
 //! toggles are supported.
