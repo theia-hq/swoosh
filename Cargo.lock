@@ -310,7 +310,7 @@ dependencies = [
 [[package]]
 name = "bifrost"
 version = "0.8.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -320,7 +320,7 @@ dependencies = [
 [[package]]
 name = "bifrost-core"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "data-encoding",
  "ed25519-dalek 2.2.0",
@@ -332,7 +332,7 @@ dependencies = [
 [[package]]
 name = "bifrost-iroh"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -348,7 +348,7 @@ dependencies = [
 [[package]]
 name = "bifrost-mdns"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "bifrost-core",
  "blake3",
@@ -366,7 +366,7 @@ dependencies = [
 [[package]]
 name = "bifrost-mem"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -377,7 +377,7 @@ dependencies = [
 [[package]]
 name = "bifrost-noise"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -391,7 +391,7 @@ dependencies = [
 [[package]]
 name = "bifrost-quirk"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -402,7 +402,7 @@ dependencies = [
 [[package]]
 name = "bifrost-transport"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "bifrost-core",
  "tokio",
@@ -411,7 +411,7 @@ dependencies = [
 [[package]]
 name = "bifrost-wire"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=88d097439e4b41d5c03d6ffa79c7aa51a658887b#88d097439e4b41d5c03d6ffa79c7aa51a658887b"
+source = "git+https://github.com/theia-hq/bifrost?rev=e8a7fb3bb9754f008712d7098318c95bbd52a076#e8a7fb3bb9754f008712d7098318c95bbd52a076"
 dependencies = [
  "blake3",
  "thiserror 2.0.20",
@@ -1288,7 +1288,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "fetch"
 version = "0.6.0"
-source = "git+https://github.com/theia-hq/services?rev=c54afe9821caf35e798a08e4a9804866c4b13feb#c54afe9821caf35e798a08e4a9804866c4b13feb"
+source = "git+https://github.com/theia-hq/services?rev=02b218ec1e6d6188f3384788f1611db981d0e3f9#02b218ec1e6d6188f3384788f1611db981d0e3f9"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
@@ -2475,7 +2475,7 @@ checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 [[package]]
 name = "measure"
 version = "0.7.0"
-source = "git+https://github.com/theia-hq/services?rev=c54afe9821caf35e798a08e4a9804866c4b13feb#c54afe9821caf35e798a08e4a9804866c4b13feb"
+source = "git+https://github.com/theia-hq/services?rev=02b218ec1e6d6188f3384788f1611db981d0e3f9#02b218ec1e6d6188f3384788f1611db981d0e3f9"
 dependencies = [
  "bifrost",
  "futures",
@@ -4528,7 +4528,7 @@ dependencies = [
 [[package]]
 name = "sshh"
 version = "0.8.0"
-source = "git+https://github.com/theia-hq/services?rev=c54afe9821caf35e798a08e4a9804866c4b13feb#c54afe9821caf35e798a08e4a9804866c4b13feb"
+source = "git+https://github.com/theia-hq/services?rev=02b218ec1e6d6188f3384788f1611db981d0e3f9#02b218ec1e6d6188f3384788f1611db981d0e3f9"
 dependencies = [
  "blake3",
  "libc",
@@ -4759,7 +4759,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.18.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=b55689722bde29e71ec21a8e5fc7cf8e5317da61#b55689722bde29e71ec21a8e5fc7cf8e5317da61"
+source = "git+https://github.com/theia-hq/tightbeam?rev=7ae1c45247b212828732eaeb08aa30faee5313a4#7ae1c45247b212828732eaeb08aa30faee5313a4"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
@@ -4783,7 +4783,7 @@ dependencies = [
 [[package]]
 name = "tightbeam-handler"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=b55689722bde29e71ec21a8e5fc7cf8e5317da61#b55689722bde29e71ec21a8e5fc7cf8e5317da61"
+source = "git+https://github.com/theia-hq/tightbeam?rev=7ae1c45247b212828732eaeb08aa30faee5313a4#7ae1c45247b212828732eaeb08aa30faee5313a4"
 dependencies = [
  "bifrost-core",
  "nauthy",
@@ -5115,7 +5115,7 @@ dependencies = [
 [[package]]
 name = "transfer"
 version = "0.7.0"
-source = "git+https://github.com/theia-hq/services?rev=c54afe9821caf35e798a08e4a9804866c4b13feb#c54afe9821caf35e798a08e4a9804866c4b13feb"
+source = "git+https://github.com/theia-hq/services?rev=02b218ec1e6d6188f3384788f1611db981d0e3f9#02b218ec1e6d6188f3384788f1611db981d0e3f9"
 dependencies = [
  "blake3",
  "nauthy",
