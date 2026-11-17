@@ -32,4 +32,8 @@ ignore = [
     # proc-macro-error2 is unmaintained, and no fix exists. A build-time proc macro, reached through
     # nauthy's biscuit-auth (biscuit-quote), so none of its code runs in a built binary.
     { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc macro, via biscuit-auth's biscuit-quote" },
+    # chrono is unmaintained, and no fix exists. On Windows, via iroh's netwatch, using wmi with its
+    # chrono feature: compiled in, but netwatch reads no WMI dates, so no chrono code runs. Also via
+    # russh's russh-util, but only on wasm32, and swoosh builds no wasm32 target.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained; compiled via iroh's netwatch (wmi, Windows), never run; russh-util uses it on wasm32 only" },
 ]
