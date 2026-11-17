@@ -172,7 +172,12 @@ async fn speed_opens_isolated() {
     let peers = swoosh::peers::Peers::new(&node);
     let mut held = Vec::new();
     for _ in 0..4 {
-        held.push(peers.isolated(key).await.expect("below the cap"));
+        held.push(
+            peers
+                .isolated(key, swoosh::peers::Hints::NONE)
+                .await
+                .expect("below the cap"),
+        );
     }
     let bound = transport::Bound {
         local: false,

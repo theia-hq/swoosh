@@ -24,7 +24,7 @@ use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::peer::{Machine, Peer};
-use swoosh::peers::{Lane, OpenError, Peers, Presents};
+use swoosh::peers::{Hints, Lane, OpenError, Peers, Presents};
 use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
 use swoosh::unbound::Unbound;
@@ -322,6 +322,7 @@ impl<T: Transport, D: Discovery> Exit<'_, '_, T, D> {
         self.peers
             .open(
                 self.key,
+                Hints::NONE,
                 Service::clone(service),
                 Lane::Bulk,
                 Presents::clone(&self.presents),

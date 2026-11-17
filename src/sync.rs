@@ -43,7 +43,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, Petname};
 use crate::home::{Home, HomeWrite};
-use crate::peers::{Lane, OpenError, Presents};
+use crate::peers::{Hints, Lane, OpenError, Presents};
 use crate::roster::{Epoch, FoldError, Folded, MAX_ROSTER_BLOB, fold, fold_fork, read_held};
 use crate::serve::SYNC_SERVICE;
 use crate::standing::Standing;
@@ -476,7 +476,13 @@ impl<T: Transport, D: Discovery> NodeDial<'_, '_, T, D> {
             .map_err(|error| eyre::eyre!(error))?;
         let (writer, reader) = self
             .peers
-            .open(peer, service, Lane::Main, Presents::Standing(badge))
+            .open(
+                peer,
+                Hints::NONE,
+                service,
+                Lane::Main,
+                Presents::Standing(badge),
+            )
             .await
             .map_err(|error| match error {
                 OpenError::Open(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted)) => {

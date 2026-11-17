@@ -145,7 +145,7 @@ impl SpeedCmd {
         // Isolated, never a held session: the rate and the path line it prints belong to this run's own
         // connection, not to whatever else shares a session to the machine.
         let session = peers
-            .isolated(machine.key())
+            .isolated(machine.key(), swoosh::peers::Hints::NONE)
             .await
             .map_err(|error| reach::open_failed(&self.peer, error, bound))?;
         let connector = reach::gated(

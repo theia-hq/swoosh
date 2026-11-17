@@ -8,8 +8,15 @@
 //! deadline and never holds it; its streams have no open deadline here. Every lane has a per-peer cap,
 //! enforced here for every run. An open that gets no answer in its lane's deadline evicts a session no
 //! other open got through on; dropping an open never removes a session.
+//!
+//! A caller's [`Hints`] go into the address feed of a dial it starts, ahead of the run's own addresses
+//! and mDNS, and into no other dial's feed; what the transport keeps of them is
+//! [`Node::connect_hinted`]'s to say. A caller that joins a dial in flight or reuses a held session has
+//! its hints ignored, and never causes a second dial.
 
 use core::cell::{Cell, RefCell};
+use core::fmt;
+use core::net::SocketAddr;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use core::time::Duration;
@@ -47,6 +54,65 @@ pub enum Lane {
     Main,
     /// Fan-out pipes, one stream per local connection, kept off Main so they never take its slots.
     Bulk,
+}
+
+/// The addresses one open puts in the feed of the dial it starts, at most [`Hints::MAX`], ahead of the
+/// run's own addresses and mDNS.
+///
+/// Order and repeats are kept as given. An IPv4-mapped IPv6 address is held in its IPv4 form. `Debug`
+/// prints only the count: a hint says where the caller expects the peer, which no log line needs.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct Hints(Vec<SocketAddr>);
+
+impl Hints {
+    /// The most addresses one open may hand its dial.
+    pub const MAX: usize = 16;
+
+    /// No hints: the dial reads only the run's addresses and mDNS.
+    pub const NONE: Self = Self(Vec::new());
+
+    /// Hold `addrs` as one open's hints.
+    ///
+    /// # Errors
+    ///
+    /// [`TooManyHints`] past [`MAX`](Self::MAX) addresses.
+    pub fn new(addrs: impl IntoIterator<Item = SocketAddr>) -> Result<Self, TooManyHints> {
+        let mut hints = Vec::new();
+        for addr in addrs {
+            if hints.len() == Self::MAX {
+                return Err(TooManyHints);
+            }
+            hints.push(canonical(addr));
+        }
+        Ok(Self(hints))
+    }
+
+    /// The addresses, in the order the caller gave them.
+    pub fn as_slice(&self) -> &[SocketAddr] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Hints {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Hints").field(&self.0.len()).finish()
+    }
+}
+
+/// More than [`Hints::MAX`] addresses for one open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("at most {} dial hints per open", Hints::MAX)]
+pub struct TooManyHints;
+
+/// An IPv4-mapped IPv6 address as its IPv4 form; any other address unchanged, scope and flow included.
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => SocketAddr::from((v4, v6.port())),
+            None => addr,
+        },
+        SocketAddr::V4(_) => addr,
+    }
 }
 
 /// What a stream presents, which also picks the held session it rides.
@@ -155,9 +221,13 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     /// a session from the cache, at any instant on any lane, and leaves its idle clock where it was. The
     /// per-peer lane budget includes pending opens and remains occupied until both returned halves have
     /// dropped; past it, `Busy`.
+    ///
+    /// `hints` go into the feed of a dial this open starts, a cold one or its redial. They are ignored
+    /// when the open reuses a held session or joins a dial already in flight.
     pub async fn open(
         &self,
         peer: NodeId,
+        hints: Hints,
         service: Service,
         lane: Lane,
         presents: Presents,
@@ -172,7 +242,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
             Lane::Main => MAIN_OPEN_TIMEOUT,
             Lane::Bulk => OPEN_TIMEOUT,
         };
-        let (mut entry, reused) = self.session(&key).await?;
+        let (mut entry, reused) = self.session(&key, &hints).await?;
         let mut retry = reused;
         loop {
             let mut active = Active::new(Rc::clone(&entry));
@@ -203,7 +273,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                 Ok(Err(error)) if retry && retryable(&error) => {
                     self.evict(&key, &entry);
                     drop(active);
-                    entry = self.session(&key).await?.0;
+                    entry = self.session(&key, &hints).await?.0;
                     retry = false;
                 }
                 Ok(Err(error)) => return Err(OpenError::Open(error)),
@@ -222,10 +292,14 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     /// Dial a connection of its own to `peer`, never held or shared, for a caller that must own the path
     /// it measures. The dial has ten seconds; streams the caller opens on the connection have no deadline
     /// from this owner. At most four live per peer, past which `Busy`; the count releases when the
-    /// returned connection drops, which closes it.
-    pub async fn isolated(&self, peer: NodeId) -> Result<Isolated<T::Session>, OpenError> {
+    /// returned connection drops, which closes it. `hints` go into this dial's feed only.
+    pub async fn isolated(
+        &self,
+        peer: NodeId,
+        hints: Hints,
+    ) -> Result<Isolated<T::Session>, OpenError> {
         let budget = self.reserve(peer, Class::Isolated)?;
-        let session = dial(self.node, peer)
+        let session = dial(self.node, peer, &hints)
             .await
             .map_err(OpenError::Unreachable)?;
         Ok(Isolated {
@@ -242,7 +316,13 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         }
     }
 
-    async fn session(&self, key: &Key) -> Result<(Rc<Entry<T::Session>>, bool), OpenError> {
+    /// The held session for `key`, joining a dial in flight or starting one. Only a dial this call
+    /// starts carries `hints`.
+    async fn session(
+        &self,
+        key: &Key,
+        hints: &Hints,
+    ) -> Result<(Rc<Entry<T::Session>>, bool), OpenError> {
         let flight = {
             let mut entries = self.entries.borrow_mut();
             // A session the transport already closed would fail the open; dialing now spends the
@@ -257,10 +337,13 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                 None => {
                     let node = self.node;
                     let peer = key.peer;
+                    // The flight owns its starter's hints, so a starter that leaves keeps them for the
+                    // waiters still on the dial, and they end with the dial.
+                    let hints = hints.clone();
                     // Shared polling keeps a waiter from depending on the original caller's lifetime.
                     // The map holds the future only while at least one caller is waiting for it.
                     let future = async move {
-                        let session = dial(node, peer).await?;
+                        let session = dial(node, peer, &hints).await?;
                         Ok(Rc::new(Entry {
                             session,
                             live: Cell::new(0),
@@ -344,12 +427,14 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     }
 }
 
-/// Dial `peer` under the ten-second deadline.
+/// Dial `peer` under the ten-second deadline, `hints` ahead of what the node's discovery finds in its feed.
+/// No hints is a plain dial.
 async fn dial<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     peer: NodeId,
+    hints: &Hints,
 ) -> Result<T::Session, DialFailure> {
-    match tokio::time::timeout(DIAL_TIMEOUT, node.connect(peer)).await {
+    match tokio::time::timeout(DIAL_TIMEOUT, node.connect_hinted(peer, hints.as_slice())).await {
         Ok(Ok(session)) => Ok(session),
         Ok(Err(error)) => Err(DialFailure::Failed(Arc::new(error))),
         Err(_elapsed) => Err(DialFailure::TimedOut),
