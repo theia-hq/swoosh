@@ -1782,7 +1782,19 @@ async fn the_name_status_prints_is_the_name_service_on_takes() {
         crate::Cli::try_parse_from(["swoosh", "service", "on", name]).unwrap();
         turn(&home, name, Way::On).await;
     }
-    assert_eq!(serving_row(&status(&home).await), "serving: web, proxy");
+    // `(off)` reads the file, but whether the serve still refuses a name is its own view of the file,
+    // re-statted at most once per `STAT_DEBOUNCE`: having seen both off, it can refuse both for up to one
+    // debounce after they are turned on, so the plain row shows within a few of them.
+    let serving = "serving: web, proxy";
+    let mut row = String::new();
+    for _ in 0..20 {
+        row = serving_row(&status(&home).await).to_owned();
+        if row == serving {
+            break;
+        }
+        tokio::time::sleep(nauthy::STAT_DEBOUNCE).await;
+    }
+    assert_eq!(row, serving);
 }
 
 #[tokio::test]

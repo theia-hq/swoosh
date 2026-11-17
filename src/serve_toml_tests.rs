@@ -609,6 +609,12 @@ impl std::io::Write for LogCapture {
 /// a failure retried at every stat never logs at every stat.
 #[test]
 fn a_failing_read_is_logged_once_and_its_recovery_once() {
+    // tracing caches whether a log line's callsite is wanted the first time any thread reaches it. With
+    // one dispatcher registered it asks only the reaching thread's default, so a sibling test failing a
+    // read on its own thread, with no subscriber, would cache this test's lines as never wanted. A second
+    // registered dispatcher, kept alive for the test, makes that first reach ask every registered one.
+    let _asks_every_dispatcher =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let writer = std::sync::Arc::clone(&log);
     let subscriber = tracing_subscriber::fmt()

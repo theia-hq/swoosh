@@ -83,6 +83,39 @@ async fn a_root_left_by_a_stopped_serve_admits_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What `probe` answers once `busy` stops holding for it, or its answer at a two-second bound. flock
+/// belongs to the open file description, so a child a sibling test forks while this test has `serve.lock`
+/// open (a `ServeLock` it just dropped, or the probe `presence` opens and closes) holds the lock until its
+/// exec closes the O_CLOEXEC copy. A lock that is never let go still answers busy at the bound.
+async fn within_bound<T>(mut probe: impl FnMut() -> T, busy: impl Fn(&T) -> bool) -> T {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let answer = probe();
+        if !busy(&answer) || tokio::time::Instant::now() >= deadline {
+            return answer;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// What `presence` answers once no forked copy of a closed descriptor holds `serve.lock`.
+async fn free_within_bound(guard: &HomeWrite, home: &Home) -> super::ResidentPresence {
+    within_bound(
+        || ServeLock::presence(guard, home).unwrap(),
+        |presence| *presence == super::ResidentPresence::Held,
+    )
+    .await
+}
+
+/// `ServeLock::take`, once no forked copy of a closed descriptor holds `serve.lock`.
+async fn take_within_bound(guard: &HomeWrite, home: &Home) -> Result<ServeLock, ServeLockError> {
+    within_bound(
+        || ServeLock::take(guard, home),
+        |taken| matches!(taken, Err(ServeLockError::Held)),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn presence_uses_the_flock_without_mutating_or_retaining_it() {
     let (home, dir) = scratch("presence");
@@ -102,11 +135,11 @@ async fn presence_uses_the_flock_without_mutating_or_retaining_it() {
     ] {
         std::fs::write(home.serve_lock(), &text).unwrap();
         assert_eq!(
-            ServeLock::presence(&guard, &home).unwrap(),
+            free_within_bound(&guard, &home).await,
             super::ResidentPresence::Free
         );
         assert_eq!(std::fs::read_to_string(home.serve_lock()).unwrap(), text);
-        let held = ServeLock::take(&guard, &home).unwrap();
+        let held = take_within_bound(&guard, &home).await.unwrap();
         // Empty/startup, PID-only and damaged records all remain held. No admitted root
         // or valid PID is required to exclude another holder.
         std::fs::write(home.serve_lock(), &text).unwrap();
@@ -117,7 +150,7 @@ async fn presence_uses_the_flock_without_mutating_or_retaining_it() {
         assert_eq!(std::fs::read_to_string(home.serve_lock()).unwrap(), text);
         drop(held);
     }
-    let held = ServeLock::take(&guard, &home).unwrap();
+    let held = take_within_bound(&guard, &home).await.unwrap();
     held.record(&guard, Some(TestRoot::seeded(0x43).node_id()))
         .unwrap();
     assert_eq!(
