@@ -1797,12 +1797,19 @@ async fn status_keeps_the_marks_when_admitting() {
     );
     // Emptying the file unbinds nothing, but a bare serve now refuses both: neither reads as plainly serving.
     service_list(&home, &[], &[]).await;
-    assert_eq!(
-        serving_row(&status(&home).await),
-        format!(
-            "serving: ssh (refusing new connections), web (refusing new connections), admitting root:{root}"
-        )
+    let refused = format!(
+        "serving: ssh (refusing new connections), web (refusing new connections), admitting root:{root}"
     );
+    // The serve re-stats the file at most once per `STAT_DEBOUNCE`, so the edit shows within a few of them.
+    let mut row = String::new();
+    for _ in 0..20 {
+        row = serving_row(&status(&home).await).to_owned();
+        if row == refused {
+            break;
+        }
+        tokio::time::sleep(nauthy::STAT_DEBOUNCE).await;
+    }
+    assert_eq!(row, refused);
     overwrite(
         &home.serve_toml(),
         b"services = ['ssh=sshd:', 'ssh=sshd:']\n",
