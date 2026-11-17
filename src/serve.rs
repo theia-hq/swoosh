@@ -39,8 +39,9 @@ pub mod control_codec {
     pub use super::socket::{
         ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, LocalDetailLimit,
         LocalServiceName, LocalServicePair, LocalServicePairs, LocalServiceSnapshot,
-        LocalServiceTarget, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING, MAX_WARM_ENTRIES,
-        PeerEntry, Request, Response, ServiceMenu, StatusReply, WireVersion,
+        LocalServiceTarget, MAX_DISABLED_NAMES, MAX_FRAME, MAX_OPEN_REQUEST, MAX_STATUS_STRING,
+        MAX_WARM_ENTRIES, MalformedOpen, OpenLane, OpenRefusal, OpenRequest, PeerEntry,
+        PeerRefusal, Request, Response, ServiceMenu, StatusReply, WireVersion,
     };
 }
 pub use activity::{Activity, RecvLines};
