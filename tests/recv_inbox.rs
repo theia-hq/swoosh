@@ -17,8 +17,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::Instant;
 
 use bifrost::{Node, NodeId, Session as _};
-use bifrost_noise::Noise;
-use bifrost_quirk::Endpoint;
+use bifrost_iroh::Endpoint;
 use swoosh::credential::Credential;
 use swoosh::reaching::BindRole;
 use swoosh::transport::PeerHint;
@@ -118,7 +117,7 @@ impl Scratch {
         command
     }
 
-    /// `swoosh [--home <home>] serve --transport quirk+noise <args>`, with `HOME` set to `user` and started
+    /// `swoosh [--home <home>] serve --local <args>`, with `HOME` set to `user` and started
     /// in `cwd`.
     fn serve(&self, cwd: &Path, args: &[&str]) -> Command {
         use std::os::unix::fs::PermissionsExt as _;
@@ -126,8 +125,7 @@ impl Scratch {
         let run = self.base.join("run");
         std::fs::create_dir_all(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut command =
-            self.swoosh(&[&["serve", "--transport", "quirk+noise"][..], args].concat());
+        let mut command = self.swoosh(&[&["serve", "--local"][..], args].concat());
         command.current_dir(cwd).env("XDG_RUNTIME_DIR", &run);
         command
     }
@@ -318,11 +316,9 @@ fn issue(scratch: &Scratch, service: &str) -> nauthy::Link {
 
 /// Push `payload` as `name` to `service` on `served`, presenting `link`, the way `swoosh send` does.
 async fn push(served: &Served, service: &str, link: nauthy::Link, name: &[u8], payload: &[u8]) {
-    let seed = [0x51; 32];
-    let inner = Endpoint::bind_with_secret(&seed)
+    let transport = Endpoint::bind_local_with_secret(&[0x51; 32])
         .await
-        .expect("bind quirk on loopback");
-    let transport = Noise::new(inner, &seed).expect("wrap quirk under its own identity");
+        .expect("bind iroh on loopback");
     let hint: PeerHint = format!("{}={}", served.key, served.addr).parse().unwrap();
     let discovery = PeerHint::discovery(&transport, [hint], &DIALING).discovery;
     let node = Node::new(transport, discovery);

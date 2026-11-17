@@ -436,17 +436,12 @@ fn swoosh(args: &[&str]) -> std::process::Output {
         .expect("the swoosh binary runs")
 }
 
-/// Run `swoosh join` on the machine at `home` with `extra` flags, the invite on stdin, over loopback so its
-/// first exchange with the machine that made the invite, which runs nowhere here, ends at once.
+/// Run `swoosh join` on the machine at `home` with `extra` flags, the invite on stdin, with `--local` so its
+/// first exchange with the machine that made the invite, which runs nowhere here, looks on this network only
+/// and ends within a few seconds.
 fn join(home: &Path, invite: &str, extra: &[&str]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
-        .args([
-            "join",
-            "--transport",
-            "quirk+noise",
-            "--home",
-            path_str(home),
-        ])
+        .args(["join", "--local", "--home", path_str(home)])
         .args(extra)
         .env("HOME", std::env::temp_dir())
         .env_remove("SWOOSH_HOME")

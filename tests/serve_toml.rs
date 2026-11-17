@@ -125,7 +125,7 @@ fn swoosh_in(home: &Path, run: &Path, args: &[&str]) -> Output {
         .expect("swoosh runs")
 }
 
-/// Start `swoosh serve <args>` on `home` over sealed quirk, which reaches no server, and wait for its
+/// Start `swoosh serve <args>` on `home` with `--local`, which reaches no server, and wait for its
 /// banner. Returns the child, the banner, and its stderr lines as they come.
 fn serve(
     home: &Path,
@@ -138,7 +138,7 @@ fn serve(
         Command::new(env!("CARGO_BIN_EXE_swoosh"))
             .arg("--home")
             .arg(home)
-            .args(["serve", "--transport", "quirk+noise"])
+            .args(["serve", "--local"])
             .args(args)
             .env("XDG_RUNTIME_DIR", run)
             .env_remove("SWOOSH_HOME")

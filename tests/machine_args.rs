@@ -149,7 +149,7 @@ fn yours(scratch: &Scratch) {
 fn a_bare_person_with_one_machine_dials_it_and_says_so() {
     let scratch = Scratch::new("one");
     save(&scratch, "alice/laptop", &key(1));
-    let out = swoosh(&scratch, &["ping", "alice", "--transport", "quirk"]);
+    let out = swoosh(&scratch, &["ping", "alice", "--local"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.starts_with("alice is alice/laptop.\n"), "{stderr}");
@@ -160,7 +160,7 @@ fn a_bare_person_with_one_machine_dials_it_and_says_so() {
     );
     assert_eq!(
         text(&out.stdout),
-        "alice/laptop via quirk: unreachable\n",
+        "alice/laptop via iroh: unreachable\n",
         "it dialed the one machine"
     );
 }
@@ -226,7 +226,7 @@ fn a_bare_person_never_fans_out() {
     save(&scratch, "alice/laptop", &key(1));
     save(&scratch, "alice/nas", &key(2));
     for verb in ["ping", "status"] {
-        let out = swoosh(&scratch, &[verb, "alice", "--transport", "quirk"]);
+        let out = swoosh(&scratch, &[verb, "alice", "--local"]);
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{verb}: {stderr}");
         assert!(out.stdout.is_empty(), "{verb}: {}", text(&out.stdout));
@@ -382,7 +382,7 @@ fn a_bare_person_refuses_before_the_key_is_read() {
 fn an_unanswered_dial_teaches_no_service() {
     let scratch = Scratch::new("unanswered");
     for verb in ["ping", "speed"] {
-        let out = swoosh(&scratch, &[verb, &key(6), "--transport", "quirk"]);
+        let out = swoosh(&scratch, &[verb, &key(6), "--local"]);
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{verb}: {stderr}");
         assert!(stderr.contains("could not reach"), "{verb}: {stderr}");

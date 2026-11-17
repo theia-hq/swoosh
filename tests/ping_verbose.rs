@@ -1,13 +1,12 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! `ping -v` end to end: the compiled binary serves `ping` over `quirk+noise` on loopback, and the compiled
+//! `ping -v` end to end: the compiled binary serves `ping` over iroh with `--local` on loopback, and the compiled
 //! binary pings it with `-v`, presenting a link the host issued.
 //!
 //! What is proven is the wiring, not the helper: `-v` hands the session's own path stream to the probe run,
-//! so the first live line is the path in force, and the probe lines carry no path of their own. quirk's
-//! path never moves (its stream says `direct` once and ends), so the run also proves an ended stream lets
-//! every probe finish.
+//! so the first live line is the path in force, and the probe lines carry no path of their own. On
+//! loopback with no relay, iroh's path is direct from the first probe and never moves, so it prints once.
 
 use core::time::Duration;
 use std::io::{BufRead as _, BufReader};
@@ -129,7 +128,7 @@ fn readiness_rejects_colon_records_and_a_silent_open_pipe_is_bounded() {
     );
 }
 
-/// Serve `home` with `entries` over `quirk+noise`, and wait for its banner: the key it answers at and its
+/// Serve `home` with `entries` over iroh with `--local`, and wait for its banner: the key it answers at and its
 /// loopback address, from the transport block `--verbose` adds.
 fn serve(home: &Path, entries: &[&str]) -> Served {
     use std::os::unix::fs::PermissionsExt as _;
@@ -140,7 +139,7 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
     let child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(home)
-        .args(["serve", "--transport", "quirk+noise", "--verbose"])
+        .args(["serve", "--local", "--verbose"])
         .args(entries)
         .env("XDG_RUNTIME_DIR", &runtime)
         .env_remove("SWOOSH_HOME")
@@ -209,7 +208,7 @@ fn stdout(home: &Path, args: &[&str]) -> String {
 }
 
 /// `ping -v` prints the path the session reports before the first probe, then the probe lines without a
-/// path, over a transport whose path stream says `direct` once and ends.
+/// path, over a path that stays `direct` for the whole run.
 #[test]
 fn ping_v_prints_the_sessions_path_before_its_probes() {
     let scratch = Scratch::new("path");
@@ -224,8 +223,7 @@ fn ping_v_prints_the_sessions_path_before_its_probes() {
         &scratch.0.join("holder"),
         &[
             "ping",
-            "--transport",
-            "quirk+noise",
+            "--local",
             "--peer",
             &hint,
             "-v",
@@ -238,10 +236,10 @@ fn ping_v_prints_the_sessions_path_before_its_probes() {
         ],
     );
     let lines: Vec<&str> = printed.lines().collect();
-    // The device block's head is `<label> via quirk+noise` alone: the label the live lines must carry.
+    // The device block's head is `<label> via iroh` alone: the label the live lines must carry.
     let head = lines
         .iter()
-        .find(|line| line.ends_with(" via quirk+noise"))
+        .find(|line| line.ends_with(" via iroh"))
         .unwrap_or_else(|| panic!("no device block: {printed}"));
     assert_eq!(
         lines.first().copied(),
