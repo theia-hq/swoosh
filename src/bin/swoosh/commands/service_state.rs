@@ -7,8 +7,9 @@ use keystore::KeyFile;
 use nauthy::Service;
 use swoosh::home::{Home, HomeWrite, ProcessId, ResidentPresence, ServeLock};
 use swoosh::identity;
+use swoosh::names::Name;
 use swoosh::node_client::{ControlClient, NodeClient as _};
-use swoosh::serve::control_codec::{ControlError, LocalServiceSnapshot};
+use swoosh::serve::control_codec::{ControlError, DisabledList, LocalServiceSnapshot};
 use swoosh::serve::{ServedTarget, ServingError, Started};
 use swoosh::serve_toml::{ServeToml, ServeTomlError};
 use tightbeam::tunnel::ServiceCatalog;
@@ -23,12 +24,13 @@ pub(super) enum ReadMode {
 /// One answering resident, never independently acquired targets and membership.
 #[derive(Debug)]
 pub(super) enum ResidentObservation {
-    Membership(Option<ServiceCatalog>),
+    /// The bound catalog and the names its gate refuses, from one status reply.
+    Membership(Option<(ServiceCatalog, DisabledList)>),
     Detail(Option<LocalServiceSnapshot>),
 }
 
-/// Configured entries determine printable names and order. The selected resident observation supplies
-/// membership or exact startup targets.
+/// Configured entries come first, in their order; bound names the file does not hold and off marks with no
+/// service follow. The selected resident observation supplies membership or exact startup targets.
 #[derive(Debug)]
 pub(super) struct ServiceState {
     /// Retains the distinction between an absent list and an explicitly emptied one, and its targets.
@@ -55,7 +57,7 @@ impl ServiceState {
         let resident = match mode {
             ReadMode::Membership => ResidentObservation::Membership(match client {
                 Some(client) => match client.status().await {
-                    Ok(status) => Some(status.menu.catalog),
+                    Ok(status) => Some((status.menu.catalog, status.menu.disabled)),
                     Err(ControlError::NoResident) => None,
                     Err(error) => return Err(ReadError::Daemon(error)),
                 },
@@ -90,10 +92,51 @@ impl ServiceState {
         match &self.resident {
             ResidentObservation::Membership(value) => value
                 .as_ref()
-                .is_some_and(|catalog| catalog.entries().any(|entry| entry.name == name)),
+                .is_some_and(|(catalog, _)| catalog.entries().any(|entry| entry.name == name)),
             ResidentObservation::Detail(value) => value
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.contains(name)),
+        }
+    }
+
+    /// The service names the resident bound, once each, in its order. Only a stored name passes, so an
+    /// internal route (dotted) or text that is no name never prints. Empty when no resident answered.
+    pub fn bound_names(&self) -> Vec<&str> {
+        let observed: Vec<&str> = match &self.resident {
+            ResidentObservation::Membership(value) => value
+                .iter()
+                .flat_map(|(catalog, _)| catalog.entries())
+                .map(|entry| entry.name.as_str())
+                .collect(),
+            ResidentObservation::Detail(value) => value
+                .iter()
+                .flat_map(|snapshot| snapshot.pairs())
+                .map(|pair| pair.name().as_str())
+                .collect(),
+        };
+        let mut names: Vec<&str> = Vec::with_capacity(observed.len());
+        for name in observed {
+            if Name::stored(name).is_ok() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// Whether the resident's gate refuses `name` now. Removal and an unreadable file cause this as well as
+    /// an off mark, so it is never read as off. A gate that cannot read its file refuses everything it bound.
+    pub fn refusing(&self, name: &str) -> bool {
+        match &self.resident {
+            ResidentObservation::Membership(value) => {
+                value.as_ref().is_some_and(|(_, disabled)| match disabled {
+                    DisabledList::Known(names) => names.iter().any(|held| held == name),
+                    DisabledList::Unknown(_) => true,
+                })
+            }
+            ResidentObservation::Detail(value) => value
+                .as_ref()
+                .and_then(|snapshot| snapshot.get(name))
+                .is_some_and(|pair| pair.refused()),
         }
     }
 }

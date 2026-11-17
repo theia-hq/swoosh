@@ -187,10 +187,7 @@ async fn service_names_a_retargets_next_target() {
             )
             .await;
         let out = fixture
-            .output(Some(&[
-                ("api", "tcp:localhost:3000", !off),
-                ("removed", "unix:/removed", true),
-            ]))
+            .output(Some(&[("api", "tcp:localhost:3000", off)]))
             .await;
         assert_eq!(
             out,
@@ -569,4 +566,129 @@ async fn rendering_propagates_sink_failure() {
     let row = state(&["web=tcp:x:1"], &[("web", "tcp:x:1", false)]).await;
     // Fail inside complete target formatting, not at the initial row indentation.
     assert!(render(&row, &mut Broken(12)).is_err());
+}
+
+/// Saved, bound and off-only names are one view: a bound name the file does not hold and an off mark the file
+/// holds without a service each get a row, and neither claims where the bound route came from.
+#[tokio::test]
+async fn service_joins_saved_bound_and_off_only_names() {
+    let fixture = Fixture::new();
+    fixture.list(&["web=tcp:localhost:3000"], &["gone"]).await;
+    let pad = " ".repeat(18);
+    assert_eq!(
+        fixture
+            .output(Some(&[
+                ("api", "tcp:localhost:8080", false),
+                ("web", "tcp:localhost:3000", false),
+            ]))
+            .await,
+        format!(
+            "  web   tcp:localhost:3000  on\n  api   tcp:localhost:8080  on, not saved\n  gone  {pad}  off, no service saved\n"
+        )
+    );
+    // A bound name the file still marks off after removing it is one bound row, never an off-only row too.
+    fixture.list(&["web=tcp:localhost:3000"], &["api"]).await;
+    assert_eq!(
+        fixture
+            .output(Some(&[
+                ("api", "tcp:localhost:8080", true),
+                ("web", "tcp:localhost:3000", false),
+            ]))
+            .await,
+        "  web  tcp:localhost:3000  on\n  api  tcp:localhost:8080  off, not saved\n"
+    );
+}
+
+/// The resident's refusal bit is not the file's off mark: a refusing route that is not off reads neither `on`
+/// nor `off`, and an off route reads `off` from the file whatever the bit says.
+#[tokio::test]
+async fn service_distinguishes_off_refusal_and_health() {
+    let fixture = Fixture::new();
+    fixture
+        .list(
+            &["web=tcp:localhost:3000", "db=tcp:localhost:5432"],
+            &["db"],
+        )
+        .await;
+    assert_eq!(
+        fixture
+            .output(Some(&[
+                ("db", "tcp:localhost:5432", false),
+                ("old", "tcp:localhost:7000", true),
+                ("web", "tcp:localhost:3000", true),
+            ]))
+            .await,
+        "  web  tcp:localhost:3000  refusing new connections\n  db   tcp:localhost:5432  off\n  old  tcp:localhost:7000  refusing new connections, not saved\n"
+    );
+    // Refusing beside a saved target that differs, and beside a saved relative path, keeps both facts.
+    fixture.list(&["api=tcp:localhost:9090"], &[]).await;
+    assert_eq!(
+        fixture
+            .output(Some(&[("api", "tcp:localhost:3000", true)]))
+            .await,
+        "  api\n    tcp:localhost:3000\n    refusing new connections, tcp:localhost:9090 from the next start\n"
+    );
+    fixture.list(&["site=file:./site"], &[]).await;
+    assert_eq!(
+        fixture
+            .output(Some(&[("site", "file:/a/site", true)]))
+            .await,
+        "  site\n    file:/a/site\n    refusing new connections, saved file:./site resolves where swoosh serve\n    starts\n"
+    );
+}
+
+/// An emptied list stays empty, defaults do not come back, and an off mark it still holds stays visible.
+#[tokio::test]
+async fn service_empty_membership_keeps_off_only_rows() {
+    let fixture = Fixture::new();
+    fixture.list(&[], &["ssh"]).await;
+    for pairs in [None, Some([].as_slice())] {
+        assert_eq!(
+            fixture.output(pairs).await,
+            "  ssh    off, no service saved\n\nServing nothing.\nTo add a service:\n  swoosh service add <service>\n"
+        );
+    }
+    // A name too long to align stacks with no target line.
+    let long = "a".repeat(60);
+    fixture.list(&[], &[&long]).await;
+    assert_eq!(
+        fixture.output(None).await,
+        format!(
+            "  {long}\n    off, no service saved\n\nServing nothing.\nTo add a service:\n  swoosh service add <service>\n"
+        )
+    );
+}
+
+/// A bound name the file does not hold is shown, yet `on` and `off` still refuse it and write nothing: being
+/// visible does not make it individually controllable.
+#[tokio::test]
+async fn service_visibility_does_not_imply_runtime_toggle_support() {
+    let fixture = Fixture::new();
+    fixture.list(&["web=tcp:localhost:3000"], &[]).await;
+    let out = fixture
+        .output(Some(&[
+            ("api", "tcp:localhost:8080", false),
+            ("web", "tcp:localhost:3000", false),
+        ]))
+        .await;
+    assert!(out.contains("\n  api  tcp:localhost:8080  "), "{out}");
+    let before = std::fs::read(fixture.0.serve_toml()).unwrap();
+    for way in [Way::On, Way::Off] {
+        let refused = ServiceToggleCmd {
+            service: Slot::Service(swoosh::names::service("api").unwrap()),
+            machine: None,
+        }
+        .run(&fixture.0, way)
+        .await
+        .map(|()| "turned");
+        let expected = match way {
+            Way::On => "api is not saved here; add it: swoosh service add api=tcp:<address>:<port>",
+            Way::Off => "api is not saved here",
+        };
+        assert_eq!(
+            refused.map_err(|error| format!("{error:#}")),
+            Err(expected.to_owned())
+        );
+        assert_eq!(std::fs::read(fixture.0.serve_toml()).unwrap(), before);
+    }
 }

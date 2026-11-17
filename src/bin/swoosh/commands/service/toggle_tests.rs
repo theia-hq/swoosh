@@ -106,11 +106,11 @@ async fn service_on_for_a_service_not_listed_names_service_add() {
     for (name, line) in [
         (
             "ssh",
-            "ssh is not listed here; add it: swoosh service add ssh",
+            "ssh is not saved here; add it: swoosh service add ssh",
         ),
         (
             "proxy",
-            "proxy is not listed here; add it: swoosh service add proxy:<url>",
+            "proxy is not saved here; add it: swoosh service add proxy:<url>",
         ),
     ] {
         let error = leaf(&[name])
@@ -133,7 +133,7 @@ async fn service_on_for_an_unknown_name_names_the_tcp_form() {
         .expect_err("db is not listed");
     assert_eq!(
         format!("{error:#}"),
-        "db is not listed here; add it: swoosh service add db=tcp:<address>:<port>"
+        "db is not saved here; add it: swoosh service add db=tcp:<address>:<port>"
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }
@@ -147,7 +147,7 @@ async fn service_off_for_a_service_not_listed_names_no_fix() {
         .run(&home, Way::Off)
         .await
         .expect_err("db is not listed");
-    assert_eq!(format!("{error:#}"), "db is not listed here");
+    assert_eq!(format!("{error:#}"), "db is not saved here");
     assert!(
         error.downcast_ref::<Usage>().is_none(),
         "exit 1, not a usage error"

@@ -1448,6 +1448,24 @@ struct LocalResident {
 
 impl LocalResident {
     fn start(home: &Home, names: &[&str], admit: Option<bifrost::NodeId>) -> Self {
+        let live = swoosh::serve_toml::LiveServeToml::load(home).unwrap();
+        Self::with(home, names, admit, live)
+    }
+
+    /// A resident that started bare from the saved file, so its gate refuses a name later removed from it.
+    fn bare(home: &Home, names: &[&str], admit: Option<bifrost::NodeId>) -> Self {
+        let live = swoosh::serve_toml::LiveServeToml::load(home).unwrap();
+        let file = swoosh::serve_toml::ServeToml::read(home).unwrap();
+        live.serving(&swoosh::serve::Started::bare(&file).unwrap());
+        Self::with(home, names, admit, live)
+    }
+
+    fn with(
+        home: &Home,
+        names: &[&str],
+        admit: Option<bifrost::NodeId>,
+        live: swoosh::serve_toml::LiveServeToml,
+    ) -> Self {
         use std::os::unix::fs::PermissionsExt as _;
         use std::sync::Arc;
 
@@ -1461,7 +1479,7 @@ impl LocalResident {
             TestNode::seeded(OWN).node_id(),
             None,
             catalog(names),
-            swoosh::serve_toml::LiveServeToml::load(home).unwrap(),
+            live,
             cancel.clone(),
             Arc::default(),
         ));
@@ -1507,7 +1525,7 @@ fn serving_row(out: &str) -> &str {
 async fn status_marks_a_listed_service_turned_off() {
     let home = home("listed-off");
     service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &[]).await;
-    // Catalog order and internal entries cannot become the printable-name source.
+    // Saved order leads, and internal entries never print.
     let _resident = LocalResident::start(&home, &["control.stop", "web", "ssh"], None);
     assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
     turn(&home, "web", crate::commands::service::toggle::Way::Off).await;
@@ -1516,8 +1534,10 @@ async fn status_marks_a_listed_service_turned_off() {
     assert_eq!(tree(home.dir()), before, "the report must not write");
 }
 
+/// A saved name the serve did not bind is left out; a bound name the file no longer holds stays, with no claim
+/// about why it is bound, and keeps an off mark the file still holds.
 #[tokio::test]
-async fn status_leaves_out_a_service_added_or_removed_while_serving() {
+async fn status_distinguishes_saved_only_from_bound_only() {
     use crate::commands::service::edit::{ServiceAddCmd, ServiceRmCmd};
 
     let home = home("added-removed");
@@ -1535,7 +1555,7 @@ async fn status_leaves_out_a_service_added_or_removed_while_serving() {
     .run(&home)
     .await
     .unwrap();
-    assert_eq!(serving_row(&status(&home).await), "serving: ssh");
+    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
 
     // Reusing the removed name with a new target still has the old bound route until restart.
     ServiceAddCmd {
@@ -1545,8 +1565,63 @@ async fn status_leaves_out_a_service_added_or_removed_while_serving() {
     .await
     .unwrap();
     assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
+    service_list(&home, &[], &["web"]).await;
+    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web (off)");
+}
+
+/// The live row prints plain bound names, never a target or `name=`, never an internal route, and never
+/// catalog text that is not a stored name.
+#[tokio::test]
+async fn status_names_do_not_imply_toggle_eligibility() {
+    let home = home("bound-only");
     service_list(&home, &[], &[]).await;
-    assert_eq!(serving_row(&status(&home).await), "serving: nothing");
+    let _resident = LocalResident::start(
+        &home,
+        &["api", "control.stop", "lookup.root", "x\u{1b}[2J", "api"],
+        None,
+    );
+    let out = status(&home).await;
+    assert_eq!(serving_row(&out), "serving: api");
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+}
+
+/// A bound name the serve refuses with no off mark reads apart from `(off)`, saved or not; the file's mark
+/// wins where both hold; a bound name not refused prints plain. A gate that cannot read its file refuses all
+/// it bound.
+#[test]
+fn status_tells_a_refusal_from_off() {
+    use swoosh::serve::control_codec::DisabledList;
+
+    use crate::commands::service_state::{ResidentObservation, ServiceState};
+
+    let observed = |disabled| ServiceState {
+        started: swoosh::serve::Started::Resumed(vec![
+            "ssh=tcp:localhost:22".to_owned(),
+            "web=tcp:localhost:3000".to_owned(),
+        ]),
+        off: ["ssh".to_owned()].into(),
+        resident: ResidentObservation::Membership(Some((
+            catalog(&["old", "ssh", "web"]),
+            disabled,
+        ))),
+    };
+    let known = DisabledList::Known(vec!["old".to_owned(), "ssh".to_owned(), "web".to_owned()]);
+    assert_eq!(
+        super::serving(&observed(known)),
+        "serving: ssh (off), web (refusing new connections), old (refusing new connections)"
+    );
+    assert_eq!(
+        super::serving(&observed(DisabledList::Known(vec!["web".to_owned()]))),
+        "serving: ssh (off), web (refusing new connections), old"
+    );
+    assert_eq!(
+        super::serving(&observed(DisabledList::Known(vec![]))),
+        "serving: ssh (off), web, old"
+    );
+    assert_eq!(
+        super::serving(&observed(DisabledList::Unknown("unreadable".to_owned()))),
+        "serving: ssh (off), web (refusing new connections), old (refusing new connections)"
+    );
 }
 
 #[tokio::test]
@@ -1715,15 +1790,18 @@ async fn status_keeps_the_marks_when_admitting() {
     let home = home("admit-marks");
     service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &["web"]).await;
     let root = TestRoot::seeded(ROOT).node_id();
-    let _resident = LocalResident::start(&home, &["ssh", "web"], Some(root));
+    let _resident = LocalResident::bare(&home, &["ssh", "web"], Some(root));
     assert_eq!(
         serving_row(&status(&home).await),
         format!("serving: ssh, web (off), admitting root:{root}")
     );
+    // Emptying the file unbinds nothing, but a bare serve now refuses both: neither reads as plainly serving.
     service_list(&home, &[], &[]).await;
     assert_eq!(
         serving_row(&status(&home).await),
-        format!("serving: nothing, admitting root:{root}")
+        format!(
+            "serving: ssh (refusing new connections), web (refusing new connections), admitting root:{root}"
+        )
     );
     overwrite(
         &home.serve_toml(),

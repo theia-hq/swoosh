@@ -119,7 +119,7 @@ pub enum EditError {
         asked: String,
     },
     /// `rm` was given a name the list does not hold.
-    #[error("{0} is not listed here")]
+    #[error("{0} is not saved here")]
     NotListed(String),
 }
 

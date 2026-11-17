@@ -25,8 +25,7 @@ is on stderr. `swoosh status --key` prints the key alone, for a script. Sections
 On a device, `devices:` is your root's list as of the last sync.
 
 `serving:` appears on every home with a key. It shows service names, with `(off)` beside those turned off.
-Use those names with `swoosh service on` or `swoosh service off`. While serving, names added or removed
-since start are left out; retargeted names still refer to the old route. When nothing runs, the row says
+Use those names with `swoosh service on` or `swoosh service off`. While serving, it names what is bound: a bound service that is not saved is listed after the saved ones, and a saved one not yet bound is left out. A name the serve is refusing reads `(refusing new connections)`; retargeted names still refer to the old route. When nothing runs, the row says
 what `swoosh serve` would start. An emptied list says `nothing, even when swoosh serve runs`. If
 `serve.toml` cannot be read or its service list is invalid, the row says `unknown`; stderr names the file
 and the reason, and `status` still exits 0. When admitting devices, `admitting root:` and the root key

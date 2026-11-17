@@ -22,6 +22,11 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`service` and `status` show what the running serve holds.** `swoosh service` lists a bound service
+  that is not saved (`on, not saved`) and a name marked off with no saved service (`off, no service saved`).
+  A service the serve is refusing, such as one just removed, reads `refusing new connections`; `status` shows
+  it as `(refusing new connections)` and names bound services that are not saved. `service on`, `off` and `rm`
+  say `not saved here` where they said `not listed here`.
 - **Every command that dials takes one machine.** It can be `me/<name>`, `<person>/<name>`, a key, a `swoosh:`
   link, or a file holding a link. A bare name of one of your devices (`desk`) is refused, with the command to
   type instead (`swoosh ping me/desk`). A person alone (`alice`) works when one of their machines is saved,

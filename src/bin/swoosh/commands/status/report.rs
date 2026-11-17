@@ -15,7 +15,7 @@ use keystore::{Health, KeyFile, Method, Stored};
 use nauthy::{Denylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME, Source};
 use swoosh::credential::short;
-use swoosh::escape::EscapedPath;
+use swoosh::escape::{Escaped, EscapedPath};
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::passphrase::{Asked, Prompt, Terminal};
@@ -440,7 +440,7 @@ impl Report {
         self.sections.push(Section { title, rows });
     }
 
-    /// The validated local list, intersected with bound names while the local resident runs. File
+    /// The validated local list, or the bound names while the local resident runs. File
     /// refusals report the file, never a daemon failure; neither changes status's successful exit.
     async fn serving_line(&mut self, home: &Home) -> String {
         match ServiceState::read(home, ReadMode::Membership).await {
@@ -637,19 +637,31 @@ fn admitting(serving: &str, root: NodeId) -> String {
     format!("{serving}, admitting root:{root}")
 }
 
-/// Only validated configured names can print. Catalog membership keeps a same-name retarget, whose old
-/// route still answers, but omits additions and removals until the next start.
+/// While a serve runs, the bound names: saved ones first, in the file's order, then bound ones the file does
+/// not hold, which say nothing of why they are bound. A saved name not bound is left out. `(off)` comes from
+/// the file alone. A bound name the serve refuses without an off mark says so apart from `(off)`, saved or
+/// not: a bare serve refuses a name removed from the file, and that must not read as plainly serving.
 fn serving(state: &ServiceState) -> String {
-    let names: Vec<String> = state
-        .started
-        .names()
-        .into_iter()
+    let saved = state.started.names();
+    let bound = state.bound_names();
+    let unsaved = bound
+        .iter()
+        .copied()
+        .filter(|name| !saved.iter().any(|held| held == name));
+    let names: Vec<String> = saved
+        .iter()
+        .map(String::as_str)
         .filter(|name| !state.resident_present() || state.contains_bound(name))
-        .map(|name| {
-            if state.off.contains(&name) {
+        .chain(unsaved)
+        .map(|name| (name, state.refusing(name)))
+        .map(|(name, refusing)| {
+            let name = Escaped(name);
+            if state.off.contains(name.0) {
                 format!("{name} (off)")
+            } else if refusing {
+                format!("{name} (refusing new connections)")
             } else {
-                name
+                name.to_string()
             }
         })
         .collect();
