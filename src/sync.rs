@@ -327,6 +327,10 @@ pub async fn answer(
     };
     if let Err(error) = forks.await {
         tracing::debug!(%error, "could not pass the forks kept in an exchange");
+        // The answer stands, so the stream still ends cleanly: a writer left unshut reaches the dialer as
+        // a reset, which may discard the answer before the dialer reads it. Best effort, since the
+        // failure may have been the stream's own.
+        let _ended = writer.shutdown().await;
     }
     touch_synced(home).await;
     Ok(())

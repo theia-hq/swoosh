@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use nauthy::{FileStamp, VerifyKey};
 use tightbeam::open_policy::ProvenOnly;
 use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served};
+use tokio::io::AsyncWriteExt as _;
 
 use crate::home::Home;
 use crate::roster::read_held_or_error;
@@ -39,12 +40,15 @@ impl Handler for Renewal {
     async fn serve(
         &self,
         served: Served<Self>,
-        writer: BoxWrite,
+        mut writer: BoxWrite,
         _reader: BoxRead,
     ) -> Result<(), ServeError> {
-        // An answer that fails is the dialer's to notice (it reads no answer); this node only logs it.
-        if let Err(error) = crate::renewal::answer(&self.home, served.peer(), writer).await {
+        // An answer that fails is the dialer's to notice (it reads no answer); this node only logs it,
+        // and ends the stream cleanly where it still can: a writer left unshut reaches the peer as a
+        // reset. Best effort, since only the stream's own failure brings this arm.
+        if let Err(error) = crate::renewal::answer(&self.home, served.peer(), &mut writer).await {
             tracing::debug!(%error, "a pick-up ended early");
+            let _ended = writer.shutdown().await;
         }
         Ok(())
     }

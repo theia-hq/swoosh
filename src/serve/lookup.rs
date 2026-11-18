@@ -43,12 +43,15 @@ impl Handler for Lookup {
     async fn serve(
         &self,
         served: Served<Self>,
-        writer: BoxWrite,
+        mut writer: BoxWrite,
         _reader: BoxRead,
     ) -> Result<(), ServeError> {
-        // An answer that fails is the asker's to notice; this node only logs it.
-        if let Err(error) = answer(&self.home, served.peer(), writer).await {
+        // An answer that fails is the asker's to notice; this node only logs it, and ends the stream
+        // cleanly where it still can: a writer left unshut reaches the peer as a reset. Best effort, since
+        // only the stream's own failure brings this arm.
+        if let Err(error) = answer(&self.home, served.peer(), &mut writer).await {
             tracing::debug!(%error, "a root lookup ended early");
+            let _ended = writer.shutdown().await;
         }
         Ok(())
     }

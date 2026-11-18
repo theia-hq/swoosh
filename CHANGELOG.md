@@ -22,6 +22,9 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **A forward, or a TCP service you serve, that the other machine cuts off now ends with a reset, not a clean
+  close.** A cut-off transfer no longer reads as complete. A forward's local client is also reset when the session
+  is lost or the stream is refused.
 - **`service off` takes any service name.** It no longer needs the name saved or a running serve, and says
   `It is not saved here.` when the name is not saved. `service on` takes a saved name or one marked off; for a
   marked name that is not saved it says `<name> is no longer off. It is not saved here.`. A change that would

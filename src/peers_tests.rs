@@ -1895,6 +1895,7 @@ impl tightbeam::tunnel::Handler for Flood {
                 self.stop.cancelled().await;
             }
         }
+        writer.shutdown().await?;
         Ok(())
     }
 }

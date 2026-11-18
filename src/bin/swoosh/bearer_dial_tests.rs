@@ -27,7 +27,7 @@ use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{
     BoxRead, BoxWrite, CancellationToken, Handler, Router, ServeError, Served,
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
 
 use crate::{Cli, Verb};
 
@@ -78,13 +78,14 @@ impl Handler for Recorder {
     async fn serve(
         &self,
         served: Served<Self>,
-        _writer: BoxWrite,
+        mut writer: BoxWrite,
         _reader: BoxRead,
     ) -> Result<(), ServeError> {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(served.peer());
+        writer.shutdown().await?;
         Ok(())
     }
 }

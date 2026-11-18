@@ -16,7 +16,10 @@ use keystore::{KeyFile, Protection};
 use nauthy::{RevocationId, VerifyKey};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
-use super::{Answer, Device, Dial as _, ExchangeError, Until, answer, digest, exchange, round};
+use super::{
+    Answer, Device, Dial as _, EXCHANGE, ExchangeError, REFUSED, SEND_YOURS, Until, answer, digest,
+    exchange, round,
+};
 use crate::codec::Id;
 use crate::config;
 use crate::contacts::{ContactsStore, DeviceLabel};
@@ -1096,4 +1099,86 @@ async fn a_fold_on_network_input_writes_only_what_it_takes() {
         before,
         "the answer renamed or deleted nothing"
     );
+}
+
+/// Serve `home`'s `control.sync` from an in-memory node, the way `serve` binds it, and open one stream to
+/// it as a device of the root: write `request`, end this side, and read what comes back to the stream's
+/// end. A clean end reads as `Ok`; a reset reads as `ConnectionReset`, which this transport delivers.
+async fn served_exchange(home: &Home, request: &[u8]) -> std::io::Result<Vec<u8>> {
+    use bifrost::{NoDiscovery, Node};
+    use bifrost_mem::MemTransport;
+    use tightbeam::tunnel::{CancellationToken, Router};
+
+    use crate::peers::{Hints, Lane, Peers, Presents};
+    use crate::serve::SYNC_SERVICE;
+
+    let store = Arc::new(nauthy::Denylist::load(home.dir().join("denylist")).unwrap());
+    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    let node = Node::new(MemTransport::bind(), NoDiscovery);
+    let badge = root()
+        .device_badge(
+            node.node_id(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL),
+        )
+        .unwrap();
+    let exposer = Router::new(nauthy::Gate::rooted(root().verify_key(), store))
+        .member_service(
+            SYNC_SERVICE.parse().unwrap(),
+            crate::serve::Exchange::new(home.clone()),
+        )
+        .unwrap()
+        .expose()
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let dialing = async {
+        let peers = Peers::new(&node);
+        let (mut write, mut read) = peers
+            .open(
+                host.node_id(),
+                Hints::NONE,
+                SYNC_SERVICE.parse().unwrap(),
+                Lane::Main,
+                Presents::Standing(Some(badge)),
+            )
+            .await
+            .unwrap();
+        write.write_all(request).await.unwrap();
+        write.shutdown().await.unwrap();
+        let mut answer = Vec::new();
+        let read = read.read_to_end(&mut answer).await.map(|_| answer);
+        cancel.cancel();
+        read
+    };
+    let ((), read) = tokio::join!(exposer.run(&host, cancel.clone()), dialing);
+    node.close().await;
+    host.close().await;
+    read
+}
+
+#[tokio::test]
+async fn an_exchange_the_server_cannot_answer_ends_clean_at_the_dialer() {
+    let nas = device("served-out-of-turn", NAS).await;
+    // Not the exchange request: the server answers nothing, and the dialer reads a clean end, the no
+    // answer a round counts as silent, never a reset.
+    assert_eq!(served_exchange(&nas, &[0xFF]).await.unwrap(), b"");
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test]
+async fn a_refusal_whose_forks_do_not_pass_reaches_the_dialer_whole() {
+    let nas = device("served-forks-break", NAS).await;
+    // Number zero with a digest the server does not hold, so it asks for the dialer's update; the update
+    // is not one the root signed, so it refuses it. The dialer then ends its side without passing a
+    // fork, so the forks fail after the answer was written.
+    let mut request = vec![EXCHANGE];
+    request.extend_from_slice(&0_u64.to_be_bytes());
+    request.extend_from_slice(&[0x5A; 32]);
+    request.extend_from_slice(&1_u32.to_be_bytes());
+    request.push(0x00);
+    assert_eq!(
+        served_exchange(&nas, &request).await.unwrap(),
+        [SEND_YOURS, REFUSED],
+        "the answer stands and the stream ends cleanly"
+    );
+    std::fs::remove_dir_all(nas.dir()).unwrap();
 }
