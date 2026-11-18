@@ -545,6 +545,34 @@ async fn an_upload_not_delivered_by_the_deadline_closes_without_landed() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_upload_the_peer_will_never_hold_keeps_its_download_without_landed() {
+    let pair = Pair::new();
+    let (mut client, mut peer, holds) = (pair.client, pair.peer, pair.holds);
+    client.write_all(&ended(b"an upload")).await.unwrap();
+    // The transport says the peer will never hold the upload, as one whose service stopped reading does.
+    drop(holds);
+    let far = async {
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).await.unwrap();
+        peer.write_all(b"a reply").await.unwrap();
+        peer.shutdown().await.unwrap();
+    };
+    let ((), (), read) = tokio::time::timeout(HANG_GUARD, async {
+        tokio::join!(pair.splice, far, read_all(&mut client))
+    })
+    .await
+    .expect("the splice did not end with its download");
+    assert_eq!(
+        read,
+        Read {
+            data: b"a reply".to_vec(),
+            end: true,
+            landed: false,
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_client_that_stops_reading_releases_the_splice_by_the_final_write_deadline() {
     // Room for one frame mark and part of a second.
     let pair = Pair::sized(HEADER + 4);

@@ -385,8 +385,9 @@ async fn attach<R, W, PR, PW>(
 /// download's End.
 ///
 /// Once the client's End is read and the peer's stream shut down, the peer must hold every byte and the
-/// end within [`HANGUP_DRAIN`] of that End, never extended. Then Landed is written; otherwise the splice
-/// ends at the deadline with no Landed, which is the client's cut-off. Only an isolated connection can
+/// end within [`HANGUP_DRAIN`] of that End, never extended. Then Landed is written. A transport that says
+/// the peer will never hold it gets no Landed, and the download still runs to its end; a deadline passed
+/// ends the splice with no Landed, which is the client's cut-off. Only an isolated connection can
 /// still reset the peer then, by its close; a held lane's stream has already ended cleanly.
 ///
 /// `hangup` resolves when the client has closed its socket in both directions. Then the direction toward
@@ -488,9 +489,13 @@ pub(crate) async fn splice<R, W, PR, PW>(
                                 let _ = landed.send(());
                                 break;
                             }
+                            // The peer will never hold it: Landed is withheld, and the download
+                            // still runs to its end, so a peer that stopped reading early still
+                            // hands the client its reply.
                             Ok(Err(error)) => {
                                 tracing::debug!(%error, "an upload did not land");
-                                break 'spliced None;
+                                drop(landed);
+                                break;
                             }
                             Err(_) => {
                                 tracing::debug!("an upload did not land by its deadline");
