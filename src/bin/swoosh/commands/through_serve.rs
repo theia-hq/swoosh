@@ -10,11 +10,11 @@
 //! only a busy `serve`, a `serve` that stopped under the pipe, a different `serve` version and a reach
 //! flag `serve` makes moot have lines of their own.
 
-use bifrost::Refusal;
+use bifrost::{NodeId, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::escaped_report;
-use swoosh::node_client::{Opened, UidSocket};
+use swoosh::node_client::{NodeClient, Opened, UidSocket};
 use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::{ControlError, OpenLane, OpenRefusal, OpenRequest, PeerRefusal};
@@ -93,7 +93,7 @@ impl Pipe<'_> {
         )?;
         let (read, write) = match connected.open(request).await {
             Ok(Opened::Attached { read, write, .. }) => (read, write),
-            Ok(Opened::Refused(refusal)) => return Err(self.refused(refusal)),
+            Ok(Opened::Refused(refusal)) => return Err(self.refused(refusal, socket).await),
             Ok(Opened::Error(reason)) => return Err(escaped_report(eyre::eyre!(reason))),
             Err(ControlError::Version { .. }) => return Err(Skew.into()),
             Err(error) => {
@@ -108,7 +108,8 @@ impl Pipe<'_> {
     }
 
     /// The line a refusal prints: the own bind's for the same outcome, except `Busy` and `NotHere`.
-    fn refused(&self, refusal: OpenRefusal) -> eyre::Report {
+    /// `serve` is asked its status only for an ended standing, whose remedy names this machine's key.
+    async fn refused(&self, refusal: OpenRefusal, serve: &impl NodeClient) -> eyre::Report {
         match refusal {
             // No session to ask one of your devices why, so the line names no cause it cannot tell.
             OpenRefusal::Peer(PeerRefusal::NotAdmitted) => {
@@ -127,7 +128,16 @@ impl Pipe<'_> {
                 escaped_report(bifrost::Error::Stream(detail.to_string().into()).into())
             }
             OpenRefusal::Busy => Busy.into(),
-            OpenRefusal::StandingEnded => StandingEnded.into(),
+            OpenRefusal::StandingEnded => {
+                let this = match serve.status().await {
+                    Ok(status) => Some(status.node_id),
+                    Err(error) => {
+                        tracing::debug!(%error, "serve's status for the ended standing's remedy failed");
+                        None
+                    }
+                };
+                StandingEnded(this).into()
+            }
             OpenRefusal::NotHere => ThisMachine::of(self.machine).into(),
         }
     }
@@ -195,13 +205,27 @@ pub struct ServeStopped(String);
 #[error("swoosh serve on this machine is a different version\n  Restart it with this version.")]
 pub struct Skew;
 
-/// This home's standing has ended and `serve` could not renew it.
-// The own bind's dead-badge line names the badge's date and a remedy keyed to this machine; reading
-// either here can load the root key, which a run through `serve` never does. So the line's own head,
-// with no date.
-#[derive(Debug, thiserror::Error)]
-#[error("this device's membership badge has ended, so a family-gated peer will refuse this dial")]
-pub struct StandingEnded;
+/// This home's standing has ended and `serve` could not renew it: the own bind's dead-badge line, with
+/// the remedy keyed to this machine's key as `serve`'s status gives it, or the head alone when that
+/// status cannot be read.
+// The own bind's line names the badge's date too; reading it here can load the root key, which a run
+// through `serve` never does, so the head says only that the badge has ended.
+#[derive(Debug)]
+pub struct StandingEnded(Option<NodeId>);
+
+impl core::fmt::Display for StandingEnded {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(
+            "this device's membership badge has ended, so a family-gated peer will refuse this dial",
+        )?;
+        match self.0 {
+            Some(this) => write!(f, "; {}", swoosh::badge::remedy(this)),
+            None => Ok(()),
+        }
+    }
+}
+
+impl core::error::Error for StandingEnded {}
 
 /// The machine typed is this one: a usage error, exit 2.
 #[derive(Debug, thiserror::Error)]
