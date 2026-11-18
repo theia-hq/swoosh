@@ -1,5 +1,6 @@
 use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served};
+use tokio::io::AsyncWriteExt as _;
 
 use crate::home::Home;
 
@@ -27,12 +28,15 @@ impl Handler for Exchange {
     async fn serve(
         &self,
         _served: Served<Self>,
-        writer: BoxWrite,
+        mut writer: BoxWrite,
         reader: BoxRead,
     ) -> Result<(), ServeError> {
-        // An exchange that fails is the dialer's to notice (it reads no answer); this node only logs it.
-        if let Err(error) = crate::sync::answer(&self.home, reader, writer).await {
+        // An exchange that fails is the dialer's to notice (it reads no answer); this node only logs it,
+        // and ends the stream cleanly: the dialer reads a clean end as no answer, and a writer left unshut
+        // reaches it as a reset. Best effort, since the failure may have been the stream's own.
+        if let Err(error) = crate::sync::answer(&self.home, reader, &mut writer).await {
             tracing::debug!(%error, "an exchange ended early");
+            let _ended = writer.shutdown().await;
         }
         Ok(())
     }
