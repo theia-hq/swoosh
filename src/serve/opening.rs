@@ -26,9 +26,11 @@ use super::socket::splice::{FramedWriter, UploadCut, upload};
 use super::socket::{OpenLane, OpenRefusal, OpenRequest, Response};
 use crate::credential::{Credential, admits_anyone_at};
 use crate::home::Home;
-use crate::peers::{DialFailure, Lane, OPEN_TIMEOUT, OpenError, Peers, Presents};
+use crate::peers::{
+    DIAL_TIMEOUT, DialFailure, Lane, MAIN_OPEN_TIMEOUT, OPEN_TIMEOUT, OpenError, Peers, Presents,
+};
 use crate::reaching::ResolveError;
-use crate::renewal::{Fetch, OpenRenewal};
+use crate::renewal::{Fetch, OPEN_RENEWAL, OpenRenewal};
 
 /// The most streams the run's Opens hold at once, across every peer and lane.
 pub const MAX_REACH: usize = 256;
@@ -80,6 +82,19 @@ pub fn raise_open_files() -> io::Result<()> {
 
 /// How long the reply to an Open, Attached or a refusal, may take to write.
 const REPLY_TIMEOUT: Duration = super::resident::READ_TIMEOUT;
+
+/// The longest an Open runs before its reply is written: a renewal, then a held lane's open that fails at
+/// its deadline, the one redial that follows and its open again, then the reply's write. An isolated
+/// connection's dial and its open fit within the same. A client waiting on the reply waits longer than
+/// this, so its own bound only ends a wait on a resident that has stopped answering.
+pub(crate) const OPEN_REPLY_BOUND: Duration = OPEN_RENEWAL
+    .saturating_add(OPEN_TIMEOUT)
+    .saturating_add(DIAL_TIMEOUT)
+    .saturating_add(OPEN_TIMEOUT)
+    .saturating_add(REPLY_TIMEOUT);
+
+// A Main open's deadline is the shorter, so the bound counts Bulk's.
+const _: () = assert!(MAIN_OPEN_TIMEOUT.as_millis() <= OPEN_TIMEOUT.as_millis());
 
 /// What the run lends the resident to answer Opens: its sessions, its renewal and its home, and the
 /// reach slots every Open takes for as long as its stream lives.
