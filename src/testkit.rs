@@ -636,7 +636,7 @@ impl Dial for Answering {
     }
 }
 
-/// A test double's stream write half: the writer it wraps, plus the [`bifrost::Abort`] every
+/// A test double's stream write half: the writer it wraps, plus the [`bifrost::WriteEnd`] every
 /// [`Session::Write`](bifrost::Session::Write) must carry.
 ///
 /// An abort drops the writer, so a later write or shutdown fails with `BrokenPipe`. The far end never
@@ -695,9 +695,17 @@ impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TestWrite<W> {
     }
 }
 
-impl<W> bifrost::Abort for TestWrite<W> {
+impl<W> bifrost::WriteEnd for TestWrite<W> {
     fn abort(&mut self) {
         self.0 = None;
+    }
+
+    /// Always `Unsupported`: a plain writer has no peer to ask whether it holds the bytes, and no test
+    /// here waits on delivery. A test that does needs a real transport.
+    // `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    fn delivered(self) -> impl Future<Output = std::io::Result<()>> + Send + 'static {
+        core::future::ready(Err(std::io::Error::from(std::io::ErrorKind::Unsupported)))
     }
 }
 
