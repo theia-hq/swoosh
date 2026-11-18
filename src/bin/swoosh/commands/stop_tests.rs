@@ -604,7 +604,7 @@ fn resident_reading(leaf: PathBuf, off: LiveServeToml) -> Running {
     ));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
-        async move { this.serve(listener).await }
+        async move { this.serve(listener, &swoosh::testkit::NoOpens).await }
     });
     let home = Home::resolve(Some(PathBuf::clone(&leaf))).expect("a scratch home");
     std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();

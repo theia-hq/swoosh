@@ -141,8 +141,9 @@ pub const MAX_WARM_ENTRIES: usize = 64;
 
 /// Requests accepted by the local control socket.
 ///
-/// Service edits change the saved configuration, not the resident through this protocol.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Service edits change the saved configuration, not the resident through this protocol. Not `Clone`:
+/// an Open owns its slip, and a copy would be a second credential body to account for.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     /// Read the served catalog (the `control.services` snapshot).
     Services,
@@ -152,24 +153,39 @@ pub enum Request {
     Stop,
     /// Read startup service targets and refusal bits over the local socket only.
     LocalServiceDetail,
+    /// Open one admitted stream to a peer, spliced onto this connection once attached.
+    Open(OpenRequest),
 }
 
 impl Request {
-    /// The one-byte tag identifying this request on the wire.
-    fn tag(&self) -> u8 {
+    /// The operation this request names.
+    pub(super) fn kind(&self) -> RequestKind {
         match self {
-            Self::Services => 1,
-            Self::Status => 2,
-            Self::Stop => 3,
-            Self::LocalServiceDetail => 6,
+            Self::Services => RequestKind::Services,
+            Self::Status => RequestKind::Status,
+            Self::Stop => RequestKind::Stop,
+            Self::LocalServiceDetail => RequestKind::LocalServiceDetail,
+            Self::Open(_) => RequestKind::Open,
         }
     }
 
-    /// Write one request frame: magic, tag, then the (empty) length-prefixed payload.
+    /// Write one request frame: magic, tag, then the length-prefixed payload, empty for every request
+    /// but an Open.
     pub async fn write<W: io::AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
+        let body = match self {
+            Self::Open(open) => open
+                .encode()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+            Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail => Vec::new(),
+        };
+        let len = u16::try_from(body.len())
+            .ok()
+            .filter(|&len| usize::from(len) <= self.kind().cap())
+            .ok_or(io::ErrorKind::InvalidInput)?;
         write_magic(writer).await?;
-        writer.write_all(&[self.tag()]).await?;
-        writer.write_all(&0u16.to_be_bytes()).await
+        writer.write_all(&[self.kind().tag()]).await?;
+        writer.write_all(&len.to_be_bytes()).await?;
+        writer.write_all(&body).await
     }
 
     /// Read one request frame, enforcing the magic and the frame cap.
@@ -199,8 +215,15 @@ impl Request {
         if len > kind.cap() {
             return Err(ControlError::TooLarge(len));
         }
-        // Requests carry no payload today; drain exactly what was declared so a padded frame
-        // cannot smuggle bytes past the read.
+        let request = match kind {
+            RequestKind::Open => return read_open(reader, len).await.map(Self::Open),
+            RequestKind::Services => Self::Services,
+            RequestKind::Status => Self::Status,
+            RequestKind::Stop => Self::Stop,
+            RequestKind::LocalServiceDetail => Self::LocalServiceDetail,
+        };
+        // Unit requests carry no payload; drain exactly what was declared so a padded frame cannot
+        // smuggle bytes past the read.
         let mut remaining = len;
         let mut rest = [0u8; 256];
         while remaining != 0 {
@@ -214,8 +237,26 @@ impl Request {
         if len != 0 {
             return Err(local_detail::protocol("unexpected request payload"));
         }
-        Ok(kind.into())
+        Ok(request)
     }
+}
+
+/// Read and parse an Open body of the declared `len`, already held to [`MAX_OPEN_REQUEST`]. The raw body
+/// holds the slip's text, so it is wiped and dropped here, once decoded or refused, and only the typed
+/// request leaves.
+async fn read_open<R: io::AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+) -> Result<OpenRequest, ControlError> {
+    let mut body = zeroize::Zeroizing::new(Vec::new());
+    body.try_reserve_exact(len)
+        .map_err(|_| LocalDetailError::ResourceUnavailable)?;
+    body.resize(len, 0);
+    reader
+        .read_exact(&mut body)
+        .await
+        .map_err(ControlError::Io)?;
+    Ok(OpenRequest::decode(&body)?)
 }
 
 /// Error diagnostics retain the operation without retaining an owning request or its payload.
@@ -229,15 +270,29 @@ pub(super) enum RequestKind {
     Stop,
     /// Read startup service targets and refusal bits over the local socket only.
     LocalServiceDetail,
+    /// Open one admitted stream to a peer.
+    Open,
 }
 
 impl RequestKind {
+    /// The one-byte tag identifying this operation on the wire.
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Services => 1,
+            Self::Status => 2,
+            Self::Stop => 3,
+            Self::Open => 4,
+            Self::LocalServiceDetail => 6,
+        }
+    }
+
     // Unknown tags must not acquire an operation's diagnostic policy.
     fn from_tag(tag: u8) -> Result<Self, ControlError> {
         match tag {
             1 => Ok(Self::Services),
             2 => Ok(Self::Status),
             3 => Ok(Self::Stop),
+            4 => Ok(Self::Open),
             6 => Ok(Self::LocalServiceDetail),
             other => {
                 // Keep the existing hex diagnostic without an infallible formatting allocation.
@@ -259,17 +314,8 @@ impl RequestKind {
     const fn cap(self) -> usize {
         match self {
             Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail => MAX_FRAME,
-        }
-    }
-}
-
-impl From<RequestKind> for Request {
-    fn from(kind: RequestKind) -> Self {
-        match kind {
-            RequestKind::Services => Self::Services,
-            RequestKind::Status => Self::Status,
-            RequestKind::Stop => Self::Stop,
-            RequestKind::LocalServiceDetail => Self::LocalServiceDetail,
+            // The one body that carries a whole link.
+            Self::Open => MAX_OPEN_REQUEST,
         }
     }
 }
@@ -809,6 +855,10 @@ pub enum ControlError {
     /// The resident refused the request, in the wire refusal vocabulary.
     #[error("the resident refused: {0}")]
     Refused(String),
+    /// An Open body that breaks its grammar. Fixed text naming the field, never its bytes, so it may
+    /// answer the request on the wire.
+    #[error(transparent)]
+    Open(#[from] MalformedOpen),
     /// Local service-detail failure, distinct from an absent resident or a wire-version mismatch.
     #[error(transparent)]
     LocalDetail(#[from] LocalDetailError),

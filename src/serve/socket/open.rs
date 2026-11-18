@@ -15,7 +15,7 @@ use tokio::io;
 
 use super::{ControlError, MAX_FRAME, local_detail};
 use crate::credential::LinkExt as _;
-use crate::peers::Hints;
+use crate::peers::{Hints, HintsError};
 
 /// The largest body request 4 (Open) may declare. Every other request and every reply keeps
 /// [`MAX_FRAME`]. Declaring more than the grammar can use buys nothing: the decoder requires exact
@@ -117,6 +117,9 @@ pub enum MalformedOpen {
     /// More than 16 hints.
     #[error("open request has too many hints")]
     HintCount,
+    /// A hint that can never be a peer's address: unspecified, multicast, limited broadcast or port 0.
+    #[error("open request hint cannot be a machine's address")]
+    HintUnusable,
     /// A hint's length is zero or over 64 bytes.
     #[error("open request hint length is out of bounds")]
     HintLength,
@@ -292,8 +295,11 @@ impl OpenRequest {
                 .ok_or(MalformedOpen::Hint)?;
             hints.push(hint);
         }
-        // The scan already held the count to the same bound.
-        let hints = Hints::new(hints).map_err(|_| MalformedOpen::HintCount)?;
+        let hints = Hints::new(hints).map_err(|error| match error {
+            // The scan already held the count to the same bound.
+            HintsError::TooMany => MalformedOpen::HintCount,
+            HintsError::Unusable => MalformedOpen::HintUnusable,
+        })?;
         let service = core::str::from_utf8(raw.service)
             .ok()
             .and_then(|text| text.parse().ok())
@@ -317,6 +323,19 @@ impl OpenRequest {
         })
     }
 }
+
+impl PartialEq for OpenRequest {
+    /// Field by field, a slip by its text, so comparing two requests prints and copies nothing.
+    fn eq(&self, other: &Self) -> bool {
+        self.peer == other.peer
+            && self.hints == other.hints
+            && self.service == other.service
+            && self.lane == other.lane
+            && self.slip.as_ref().map(Link::as_str) == other.slip.as_ref().map(Link::as_str)
+    }
+}
+
+impl Eq for OpenRequest {}
 
 impl fmt::Debug for OpenRequest {
     /// Names the peer, the service and the lane, and only counts what could identify the caller's
@@ -498,11 +517,14 @@ impl From<Refusal> for OpenRefusal {
             Refusal::NotAdmitted => Self::Peer(PeerRefusal::NotAdmitted),
             Refusal::BadRequest { detail } => Self::Peer(PeerRefusal::BadRequest(detail)),
             Refusal::Unavailable { detail } => Self::Peer(PeerRefusal::Unavailable(detail)),
-            // The upstream refusal's own words, held to the detail bound at a character boundary.
-            unknown => Self::PeerUnreadable(RefusalDetail::bounded(unknown.to_string())),
+            // Fixed words: the class is one this build cannot name, so nothing of it is read out.
+            _ => Self::PeerUnreadable(RefusalDetail::bounded(PEER_UNREADABLE)),
         }
     }
 }
+
+/// The detail a [`PeerUnreadable`](OpenRefusal::PeerUnreadable) refusal carries.
+const PEER_UNREADABLE: &str = "the machine refused in a way this version cannot read";
 
 impl OpenRefusal {
     pub(super) fn encode(&self) -> Vec<u8> {

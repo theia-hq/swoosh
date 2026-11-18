@@ -1483,7 +1483,8 @@ impl LocalResident {
             cancel.clone(),
             Arc::default(),
         ));
-        let task = tokio::spawn(async move { resident.serve(listener).await });
+        let task =
+            tokio::spawn(async move { resident.serve(listener, &swoosh::testkit::NoOpens).await });
         Self {
             cancel,
             task,

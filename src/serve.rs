@@ -23,6 +23,7 @@ use crate::home::{Home, canonical_to_be};
 mod activity;
 mod definition;
 mod lookup;
+mod opening;
 #[cfg(test)]
 #[path = "serve/recv_home_tests.rs"]
 mod recv_home_tests;
@@ -45,6 +46,7 @@ pub mod control_codec {
     };
 }
 pub use activity::{Activity, RecvLines};
+pub use opening::{ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, Opener, Opens};
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
 #[cfg(test)]

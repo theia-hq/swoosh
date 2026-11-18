@@ -72,7 +72,7 @@ async fn backends_agree() {
     let resident = Arc::new(test_resident(cancel.clone(), &leaf));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
-        async move { this.serve(listener).await }
+        async move { this.serve(listener, &crate::testkit::NoOpens).await }
     });
 
     let client = resolve_socket(socket).expect("the bound socket resolves");
@@ -121,7 +121,7 @@ async fn services_is_one_round_trip() {
     let resident = Arc::new(test_resident(CancellationToken::new(), &leaf));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
-        async move { this.serve(listener).await }
+        async move { this.serve(listener, &crate::testkit::NoOpens).await }
     });
     let client = resolve_socket(socket).expect("the bound socket resolves");
 

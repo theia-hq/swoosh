@@ -136,12 +136,18 @@ static ASKED_AT: std::sync::LazyLock<std::time::SystemTime> =
 /// that cannot admit anyone at all (expired, or for another service), which then dials as this home. It is
 /// asked at [`ASKED_AT`], so every ask in one run gets the same answer.
 pub fn admits_anyone(link: &Link, service: &str) -> bool {
+    admits_anyone_at(link, service, *ASKED_AT)
+}
+
+/// Whether `link` admits a dialer it was never bound to, for `service`, at `now`: [`admits_anyone`] for a
+/// process that answers many requests over its life, each asked at its own moment.
+pub fn admits_anyone_at(link: &Link, service: &str, now: std::time::SystemTime) -> bool {
     let (Ok(service), Ok(stranger)) = (service.parse::<Service>(), nauthy::Identity::generate())
     else {
         return false;
     };
     let mut request = Request::now(service).bound_to(stranger.verifying_key());
-    request.now = *ASKED_AT;
+    request.now = now;
     link.cap()
         .verify_at_root_without_revocation(&request, link.root())
         .is_ok()

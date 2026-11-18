@@ -116,10 +116,10 @@ async fn detail_capture_failures_never_write_a_success_header() {
         expected.extend_from_slice(&outcome);
         assert_eq!(bytes, expected);
         assert!(matches!(
-            resident.answer(Request::Status).unwrap(),
+            Response::Status(resident.status_reply()),
             Response::Status(_)
         ));
-        assert!(!format!("{:?}", resident.answer(Request::LocalServiceDetail)).contains("ping:"));
+        assert!(!format!("{:?}", resident.local_service_detail_reply()).contains("ping:"));
     }
 }
 
@@ -144,7 +144,7 @@ async fn detail_write_failure_is_terminal_without_retry_or_stop() {
     }
     let resident = detail_resident();
     for response in [
-        resident.answer(Request::LocalServiceDetail).unwrap(),
+        resident.local_service_detail_reply().unwrap(),
         Response::detail_unavailable().unwrap(),
     ] {
         let mut writer = BrokenWriter(0);
@@ -245,7 +245,7 @@ async fn detail_checks_accepted_credentials_before_reading_or_capturing() {
 #[tokio::test]
 async fn detail_capture_releases_guard_before_a_stalled_writer() {
     let resident = detail_resident();
-    let response = resident.answer(Request::LocalServiceDetail).unwrap();
+    let response = resident.local_service_detail_reply().unwrap();
     let mut writer = PendingWriter;
     let deadline = core::time::Duration::from_millis(30);
     let write = resident.reply_then_fire(&mut writer, &response, false, deadline);
@@ -665,7 +665,7 @@ async fn control_flood_queues_rather_than_drops() {
     let resident = Arc::new(test_resident_with(cancel.clone()));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
-        async move { this.serve(listener).await }
+        async move { this.serve(listener, &crate::testkit::NoOpens).await }
     });
 
     // Every slot held by a connected-but-silent client: each handler parks on the read timeout.
@@ -938,7 +938,7 @@ async fn a_lone_client_is_answered_while_the_next_accept_is_pending() {
     let socket = scratch_dir("lone").join("control.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let resident = Arc::new(test_resident());
-    let serving = Arc::clone(&resident).serve(listener);
+    let serving = Arc::clone(&resident).serve(listener, &crate::testkit::NoOpens);
     tokio::pin!(serving);
     assert!(futures::poll!(&mut serving).is_pending());
     let mut client = tokio::net::UnixStream::connect(&socket).await.unwrap();
@@ -970,7 +970,7 @@ async fn full_controls_drive_their_timeouts_before_accepting_the_queued_client()
     Request::Status.write(&mut queued).await.unwrap();
     events.push(Ok(server));
     let (accept, attempts) = scripted_accept(events);
-    let serving = resident.serve_accepting(accept);
+    let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
     tokio::pin!(serving);
     drive_until(serving.as_mut(), || {
         silent
@@ -1010,7 +1010,7 @@ async fn pending_accept_survives_multiple_control_completions() {
     let (mut first, server, first_observed) = observed_pair(WriteMode::Ready);
     let (mut second, second_server, second_observed) = observed_pair(WriteMode::Ready);
     let (accept, attempts) = scripted_accept([Ok(server), Ok(second_server)]);
-    let serving = resident.serve_accepting(accept);
+    let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
     tokio::pin!(serving);
     drive_until(serving.as_mut(), || {
         first_observed.reads.load(Ordering::Relaxed) > 0
@@ -1046,7 +1046,7 @@ async fn pending_permit_keeps_its_queue_position_while_controls_complete() {
         events.push(Ok(server));
     }
     let (accept, attempts) = scripted_accept(events);
-    let serving = resident.serve_accepting(accept);
+    let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
     tokio::pin!(serving);
     drive_until(serving.as_mut(), || {
         clients[..MAX_CONTROL_CONNS]
@@ -1080,7 +1080,7 @@ async fn a_partial_frame_deadline_releases_its_control_permit() {
     let (mut client, server, observed) = observed_pair(WriteMode::Ready);
     client.write_all(&MAGIC[..1]).await.unwrap();
     let (accept, _) = scripted_accept([Ok(server)]);
-    let serving = resident.serve_accepting(accept);
+    let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
     tokio::pin!(serving);
     drive_until(serving.as_mut(), || {
         observed.reads.load(Ordering::Relaxed) > 0
@@ -1116,7 +1116,7 @@ async fn stalled_responses_release_permits_and_stop_waits_for_its_ack_deadline()
         let (mut client, server, observed) = observed_pair(WriteMode::Stalled);
         request.write(&mut client).await.unwrap();
         let (accept, _) = scripted_accept([Ok(server)]);
-        let serving = resident.serve_accepting(accept);
+        let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
         tokio::pin!(serving);
         drive_until(serving.as_mut(), || {
             observed.writes.load(Ordering::Relaxed) > 0
@@ -1164,7 +1164,7 @@ async fn controls_progress_during_backoff_without_restarting_its_deadline() {
         Ok(second_server),
         Err(std::io::Error::from_raw_os_error(libc::EMFILE)),
     ]);
-    let serving = resident.serve_accepting(accept);
+    let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
     tokio::pin!(serving);
     drive_until(serving.as_mut(), || {
         first_observed.reads.load(Ordering::Relaxed) > 0
@@ -1238,7 +1238,7 @@ async fn dropping_the_outer_serve_drops_controls_without_firing_its_token() {
             events.push(Err(std::io::Error::from_raw_os_error(libc::ENOBUFS)));
         }
         let (accept, attempts) = scripted_accept(events);
-        let mut serving = Box::pin(resident.serve_accepting(accept));
+        let mut serving = Box::pin(resident.serve_accepting(accept, &crate::testkit::NoOpens));
         drive_until(serving.as_mut(), || {
             clients
                 .iter()
@@ -1300,7 +1300,7 @@ async fn cancellation_remains_responsive_at_every_control_wait() {
             events.push(Err(std::io::Error::from_raw_os_error(libc::EMFILE)));
         }
         let (accept, _) = scripted_accept(events);
-        let serving = resident.serve_accepting(accept);
+        let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
         tokio::pin!(serving);
         drive_until(serving.as_mut(), || {
             clients

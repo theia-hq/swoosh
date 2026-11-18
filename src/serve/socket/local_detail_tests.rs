@@ -507,7 +507,6 @@ async fn local_detail_request_six_has_exact_empty_framing() {
     for mut frame in [
         b"SWC1\x06\0\x01x".as_slice(),
         b"SWC1\xff\0\0",
-        b"SWC1\x04\0\0",
         b"SWC1\x05\0\0",
     ] {
         assert!(matches!(

@@ -1888,7 +1888,12 @@ fn the_control_socket_adds_no_service() {
         Request::LocalServiceDetail,
     ] {
         match request {
-            Request::Services | Request::Status | Request::Stop | Request::LocalServiceDetail => {}
+            // An Open reaches a peer's service; it never turns one here on or off.
+            Request::Services
+            | Request::Status
+            | Request::Stop
+            | Request::LocalServiceDetail
+            | Request::Open(_) => {}
         }
     }
 }

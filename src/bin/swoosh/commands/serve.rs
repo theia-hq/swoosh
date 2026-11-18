@@ -745,6 +745,9 @@ impl ServeCmd {
 
         let dial = swoosh::sync::NodeDial::new(peers, &home);
         let fetch = swoosh::renewal::NodeFetch::new(peers);
+        // The renewal an Open waits for, and what answers Opens on the control socket.
+        let renewal = swoosh::renewal::OpenRenewal::new(&home, &fetch);
+        let opener = swoosh::serve::Opener::new(peers, &renewal, &home, addr.node);
         // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
         // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. It is an
         // arm of the run, never a spawned task, so a run that stops first takes the timer with it.
@@ -753,8 +756,11 @@ impl ServeCmd {
         // SUCCESS (exit 0, so a CI action reads a clean teardown as green); only a genuine error exits
         // non-zero. Beside the run, this node's own exchanges with your devices: they end when the run does.
         let stopped = tokio::select! {
-            stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
+            stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock, &opener) => stopped?,
             never = expiry => match never {},
+            // A renewal an Open started runs to its end and its end counts, even when every Open
+            // waiting on it has gone: otherwise a parked flight would hold `home.lock`.
+            never = renewal.drive() => match never {},
             () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             () = saved.watch() => unreachable!("the root route's keys are read until the node stops"),
@@ -826,13 +832,14 @@ async fn run_until_stopped<T: Transport, D: Discovery>(
     resident: std::sync::Arc<Resident>,
     listener: std::os::unix::net::UnixListener,
     lock: InstanceLock,
+    opens: &impl swoosh::serve::Opens,
 ) -> eyre::Result<Stopped>
 where
     <T::Session as Session>::Write: Send + 'static,
     <T::Session as Session>::Read: Send + 'static,
 {
     let source = resident.stop_source();
-    let control = resident.serve(listener);
+    let control = resident.serve(listener, opens);
     // A service manager stops `serve` with SIGTERM (`brew services stop`, `systemctl --user stop`): it is
     // the same graceful stop as a ctrl-c, so the socket goes with the process.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
