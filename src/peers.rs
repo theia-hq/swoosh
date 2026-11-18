@@ -26,7 +26,7 @@ use std::io;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
-use bifrost::{ConnInfo, Discovery, Node, NodeId, PathChanges, Session, Transport};
+use bifrost::{ConnInfo, Discovery, Node, NodeId, PathChanges, Session, Transport, WriteEnd};
 use futures::FutureExt as _;
 use futures::future::{LocalBoxFuture, Shared};
 use nauthy::{Link, Service};
@@ -310,7 +310,8 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         })
     }
 
-    /// [`open_attached`](Self::open_attached) on a place already taken.
+    /// [`open_attached`](Self::open_attached) on a place already taken. The write half can also abort
+    /// the stream, so a caller can tell the peer it was cut off.
     pub(crate) async fn open_placed(
         &self,
         place: LanePlace,
@@ -320,7 +321,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     ) -> Result<
         (
             ConnInfo,
-            impl AsyncWrite + Unpin + use<'_, 'n, T, D>,
+            impl AsyncWrite + WriteEnd + Unpin + use<'_, 'n, T, D>,
             impl AsyncRead + Unpin + use<'_, 'n, T, D>,
         ),
         OpenError,
@@ -714,6 +715,18 @@ impl<H: AsyncRead + Unpin, S: Session> AsyncRead for Half<H, S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+// Forwarded, so a lane's stream can be cut off as any transport's can. `delivered` takes the half, and
+// the lease goes with it: a caller waits on delivery only to close, so the slot is not wanted past it.
+impl<H: WriteEnd, S: Session> WriteEnd for Half<H, S> {
+    fn abort(&mut self) {
+        self.inner.abort();
+    }
+
+    fn delivered(self) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        self.inner.delivered()
     }
 }
 

@@ -7,7 +7,10 @@ use std::os::fd::AsRawFd as _;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use bifrost::{NoDiscovery, Node, NodeId, Refusal, RefusalDetail};
+use bifrost::{
+    NoDiscovery, Node, NodeId, Refusal, RefusalDetail, Session as _, Transport as _, WriteEnd,
+};
+use bifrost_mem::{MemRead, MemSession, MemTransport, MemWrite};
 use futures::poll;
 use nauthy::Link;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
@@ -16,7 +19,7 @@ use tokio::net::UnixStream;
 
 use super::{
     BROKEN, ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, UNREACHABLE,
-    UNREADABLE_HOME, failed, raise_open_files, splice,
+    UNREADABLE_HOME, attach, failed, raise_open_files, splice,
 };
 use crate::home::Home;
 use crate::peers::{DialFailure, Hints, OpenError, Peers};
@@ -232,7 +235,7 @@ async fn an_isolated_splice_is_dropped_at_the_drain_deadline_when_the_peer_takes
 }
 
 #[tokio::test]
-async fn an_isolated_close_waits_for_the_peer_to_take_what_was_sent() {
+async fn an_isolated_close_releases_its_slot_once_the_peer_holds_what_was_sent() {
     let fixture = Fixture::new("iso-taken", [Script::EndsThenReads(HANGUP_DRAIN / 4)]);
     fixture
         .run(async |socket| {
@@ -253,7 +256,27 @@ async fn an_isolated_close_waits_for_the_peer_to_take_what_was_sent() {
                 "the peer took {:?}",
                 fixture.scripted.received()
             );
-            released(&fixture.opener, HANGUP_DRAIN + HANG_GUARD).await;
+            // Delivery is confirmed now, three seconds before the drain would end.
+            released(&fixture.opener, HANG_GUARD).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_isolated_peer_that_never_takes_the_end_is_released_at_the_drain() {
+    let fixture = Fixture::new("iso-never", [Script::Ends]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            attached(&mut client).await;
+            client.write_all(b"never read").await.unwrap();
+            client.shutdown().await.unwrap();
+            let mut rest = Vec::new();
+            client.read_to_end(&mut rest).await.unwrap();
+            // A clean end on both sides, and a peer that holds the stream without reading it.
+            tokio::time::sleep(HANGUP_DRAIN - HANG_GUARD).await;
+            assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH - 1);
+            released(&fixture.opener, HANG_GUARD * 2).await;
         })
         .await;
 }
@@ -421,6 +444,65 @@ async fn bytes_a_client_wrote_before_closing_reach_a_live_peer() {
     .await;
     let ((), got, _) = joined.expect("the splice ended");
     assert_eq!(got, sent);
+}
+
+#[tokio::test]
+async fn an_open_dropped_mid_splice_resets_the_peers_stream() {
+    let mut stream = MemStream::new().await;
+    let mut client = stream.client.take().unwrap();
+    client.write_all(b"half an upload").await.unwrap();
+    // Dropped while it splices, as a gone client, `Stop` or a panic drops the Open.
+    let spliced = tokio::time::timeout(HANG_GUARD / 4, stream.attach()).await;
+    assert!(spliced.is_err(), "the splice ended on its own");
+    assert_eq!(stream.peer_reads().await, Ended::Reset);
+    drop(client);
+}
+
+#[tokio::test]
+async fn a_splice_cut_at_the_drain_deadline_resets_the_peers_stream() {
+    let mut stream = MemStream::new().await;
+    let mut client = stream.client.take().unwrap();
+    // More than the peer's stream holds, which the peer never reads, then gone.
+    let goes = async {
+        let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&[7; 1024 * 1024])).await;
+        drop(client);
+    };
+    let (close_by, ()) = tokio::join!(stream.attach(), goes);
+    assert!(close_by <= tokio::time::Instant::now());
+    assert_eq!(stream.peer_reads().await, Ended::Reset);
+}
+
+#[tokio::test]
+async fn an_attached_reply_that_cannot_be_written_resets_the_peers_stream() {
+    let mut stream = MemStream::new().await;
+    let (_client, from_client) = tokio::io::duplex(64);
+    attach(
+        BufReader::new(from_client),
+        Gone,
+        stream.from_peer.take().unwrap(),
+        &mut stream.to_peer,
+        stream.sessions[0].conn_info(),
+        &stream.gone,
+    )
+    .await;
+    assert_eq!(stream.peer_reads().await, Ended::Reset);
+}
+
+#[tokio::test]
+async fn a_clean_end_after_shutdown_stays_clean() {
+    let mut stream = MemStream::new().await;
+    let mut client = stream.client.take().unwrap();
+    client.write_all(b"a whole upload").await.unwrap();
+    client.shutdown().await.unwrap();
+    stream.peer.0.shutdown().await.unwrap();
+    let mut back = Vec::new();
+    let (_, read) = tokio::join!(stream.attach(), client.read_to_end(&mut back));
+    read.unwrap();
+    let mut got = Vec::new();
+    stream.peer.1.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, b"a whole upload");
+    // mem ignores an abort after a clean end, so only the count tells one was never sent.
+    assert_eq!(stream.to_peer.aborts, 0);
 }
 
 #[test]
@@ -1063,5 +1145,121 @@ async fn released(opener: &Opener<'_, '_, '_, ScriptedPeer, NoDiscovery, Asks>, 
 async fn until_true(ready: impl Fn() -> bool) {
     while !ready() {
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// An attached Open's two sides over a real socket and mem's transport, whose peer reads an abort as
+/// `ConnectionReset`: the client's socket, the server's end of it and its watch, and the stream to the
+/// peer, both ends.
+struct MemStream {
+    sessions: [MemSession; 2],
+    client: Option<UnixStream>,
+    server: Option<UnixStream>,
+    gone: ClientGone,
+    to_peer: Counted<MemWrite>,
+    from_peer: Option<MemRead>,
+    peer: (MemWrite, MemRead),
+}
+
+impl MemStream {
+    async fn new() -> Self {
+        let (near, far) = (MemTransport::bind(), MemTransport::bind());
+        let session = near.connect(far.local_addr()).await.unwrap();
+        let peer_session = far.accept().await.unwrap();
+        let (to_peer, from_peer) = session.open_bi().await.unwrap();
+        let peer = peer_session.accept_bi().await.unwrap();
+        let (server, client) = UnixStream::pair().unwrap();
+        let gone = ClientGone::watch(server.as_raw_fd()).unwrap();
+        Self {
+            sessions: [session, peer_session],
+            client: Some(client),
+            server: Some(server),
+            gone,
+            to_peer: Counted {
+                half: to_peer,
+                aborts: 0,
+            },
+            from_peer: Some(from_peer),
+            peer,
+        }
+    }
+
+    /// Attach the client to the peer, as an Open does once its stream opened.
+    async fn attach(&mut self) -> tokio::time::Instant {
+        let (from_client, to_client) = self.server.take().unwrap().into_split();
+        attach(
+            BufReader::new(from_client),
+            to_client,
+            self.from_peer.take().unwrap(),
+            &mut self.to_peer,
+            self.sessions[0].conn_info(),
+            &self.gone,
+        )
+        .await
+    }
+
+    /// How the peer's read of the stream ends.
+    // `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    async fn peer_reads(&mut self) -> Ended {
+        let mut got = Vec::new();
+        let read = tokio::time::timeout(HANG_GUARD, self.peer.1.read_to_end(&mut got)).await;
+        match read.expect("the peer's read hung") {
+            Ok(_) => Ended::Clean,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ended::Reset,
+            Err(error) => Ended::Failed(error.to_string()),
+        }
+    }
+}
+
+/// How a peer's read of a stream ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    /// A clean end of stream: to the peer, everything was sent.
+    Clean,
+    /// `ConnectionReset`: the stream was cut off.
+    Reset,
+    /// Any other failure.
+    Failed(String),
+}
+
+/// A write half that counts its aborts: mem ignores one after a clean end, so the peer cannot tell.
+struct Counted<W> {
+    half: W,
+    aborts: u32,
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Counted<W> {
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> core::task::Poll<std::io::Result<usize>> {
+        core::pin::Pin::new(&mut self.get_mut().half).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::pin::Pin::new(&mut self.get_mut().half).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::pin::Pin::new(&mut self.get_mut().half).poll_shutdown(cx)
+    }
+}
+
+impl<W: WriteEnd> WriteEnd for Counted<W> {
+    fn abort(&mut self) {
+        self.aborts += 1;
+        self.half.abort();
+    }
+
+    fn delivered(self) -> impl Future<Output = std::io::Result<()>> + Send + 'static {
+        self.half.delivered()
     }
 }
