@@ -891,11 +891,11 @@ async fn a_peer_reset_reaches_the_client_without_an_end() {
     assert!(!read.end, "a cut-off download never reads as finished");
 }
 
-/// A peer whose stream fails while its client is connected and idle, with no End sent: the resident
-/// writes no End, and the client learns of the cut only when the Open ends, which waits on the upload.
-/// An idle client is told nothing until it writes or goes.
+/// A peer whose stream fails while its client is connected and idle, with no End sent: the Open ends at
+/// once, the client reads a close with no End, and the upload toward the peer is aborted, all with the
+/// client still holding its socket and writing nothing.
 #[tokio::test]
-async fn a_peer_cut_under_an_idle_client_is_told_only_at_the_final_close() {
+async fn a_peer_cut_under_an_idle_client_ends_the_open_at_once() {
     let MemStream {
         sessions,
         client,
@@ -903,34 +903,40 @@ async fn a_peer_cut_under_an_idle_client_is_told_only_at_the_final_close() {
         gone,
         to_peer,
         from_peer,
-        peer: (mut peer_write, _peer_read),
+        peer: (mut peer_write, mut peer_read),
     } = MemStream::new().await;
     let mut client = client.unwrap();
     peer_write.abort();
-    let splicing = splice_mem(
-        server.unwrap(),
-        from_peer.unwrap(),
-        to_peer.unwrap(),
-        &sessions[0],
-        &gone,
+    let (spliced, read, ended) = tokio::time::timeout(HANG_GUARD, async {
+        tokio::join!(
+            splice_mem(
+                server.unwrap(),
+                from_peer.unwrap(),
+                to_peer.unwrap(),
+                &sessions[0],
+                &gone,
+            ),
+            async {
+                attached(&mut client).await;
+                read_all(&mut client).await
+            },
+            reads(&mut peer_read),
+        )
+    })
+    .await
+    .expect("an idle client was not told of the cut");
+    let () = spliced;
+    assert_eq!(
+        read,
+        Read::default(),
+        "a cut-off download never reads as finished"
     );
-    tokio::pin!(splicing);
-    let waited = tokio::select! {
-        () = &mut splicing => false,
-        () = async {
-            attached(&mut client).await;
-            tokio::time::sleep(HANG_GUARD).await;
-        } => true,
-    };
-    assert!(
-        waited,
-        "the open ended on the cut while its client was idle"
+    assert_eq!(
+        ended,
+        Ended::Reset,
+        "the upload toward the peer was not aborted"
     );
-    // The client goes: the upload is cut too, and the Open ends with no End written.
     drop(client);
-    tokio::time::timeout(HANG_GUARD, splicing)
-        .await
-        .expect("the open ends once its client goes");
 }
 
 #[tokio::test]
