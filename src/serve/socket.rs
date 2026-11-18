@@ -7,17 +7,19 @@
 use core::net::SocketAddr;
 use std::path::PathBuf;
 
-use bifrost::NodeId;
+use bifrost::{ConnInfo, NodeId};
 use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
 mod local_detail;
+mod open;
 #[cfg(test)]
 pub(crate) use local_detail::tests::{fail_sizes, measure_allocations};
 pub use local_detail::{
     LocalDetailCaptureError, LocalDetailError, LocalDetailLimit, LocalServiceName,
     LocalServicePair, LocalServicePairs, LocalServiceSnapshot, LocalServiceTarget,
 };
+pub use open::{MAX_OPEN_REQUEST, MalformedOpen, OpenLane, OpenRefusal, OpenRequest, PeerRefusal};
 
 /// The control wire's identity: the bytes every control frame opens with, at every version, forever.
 /// A frame that does not open with these is not a control frame, and that is the only thing an
@@ -194,7 +196,7 @@ impl Request {
             .await
             .map_err(ControlError::Io)?;
         let len = usize::from(u16::from_be_bytes(len));
-        if len > MAX_FRAME {
+        if len > kind.cap() {
             return Err(ControlError::TooLarge(len));
         }
         // Requests carry no payload today; drain exactly what was declared so a padded frame
@@ -248,6 +250,15 @@ impl RequestKind {
                         .map_err(|_| LocalDetailError::ResourceUnavailable)?,
                 ))
             }
+        }
+    }
+
+    /// The largest body this operation may declare, checked against the declared length before a
+    /// byte of the body is read. Per operation, so a larger body for one request never widens
+    /// another's.
+    const fn cap(self) -> usize {
+        match self {
+            Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail => MAX_FRAME,
         }
     }
 }
@@ -504,6 +515,10 @@ pub enum Response {
     Error(String),
     /// A local startup service snapshot or a typed capture failure.
     LocalServiceDetail(Result<LocalServiceSnapshot, LocalDetailCaptureError>),
+    /// The Open's stream is attached; the path report is the session's at attach time.
+    Attached(ConnInfo),
+    /// The Open was not attached, and why.
+    OpenRefusal(OpenRefusal),
 }
 
 impl Response {
@@ -537,6 +552,8 @@ impl Response {
             Self::Ack => 3,
             Self::Refused(_) => 4,
             Self::Error(_) => 5,
+            Self::Attached(_) => 6,
+            Self::OpenRefusal(_) => 7,
             Self::LocalServiceDetail(_) => 9,
         }
     }
@@ -547,6 +564,8 @@ impl Response {
             Self::LocalServiceDetail(reply) => return local_detail::write(reply, writer).await,
             Self::Catalog(menu) => menu.encode()?,
             Self::Status(status) => status.encode()?,
+            Self::Attached(info) => open::encode_attached(info)?,
+            Self::OpenRefusal(refusal) => refusal.encode(),
             Self::Ack => Vec::new(),
             Self::Refused(reason) | Self::Error(reason) => {
                 // Borrow the existing diagnostic instead of allocating a second payload.
@@ -587,6 +606,13 @@ impl Response {
         reader: &mut R,
     ) -> Result<Self, ControlError> {
         Self::read_frame(reader, ResponseRead::LocalDetail).await
+    }
+
+    /// Read the reply to an Open: [`Attached`](Self::Attached), [`OpenRefusal`](Self::OpenRefusal) or
+    /// [`Error`](Self::Error), and nothing else. Each is held to its own declared ceiling before a
+    /// byte of its body is read.
+    pub async fn read_open<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
+        Self::read_frame(reader, ResponseRead::Open).await
     }
 
     pub(crate) fn into_local_snapshot(self) -> Result<LocalServiceSnapshot, ControlError> {
@@ -653,6 +679,31 @@ impl Response {
                 }
             }
         }
+        if let ResponseRead::Open = operation {
+            let cap = match tag[0] {
+                6 => open::MAX_ATTACHED,
+                7 => open::MAX_OPEN_REFUSAL,
+                5 => open::MAX_OPEN_ERROR,
+                _ => return Err(local_detail::protocol("unexpected reply to open")),
+            };
+            // Each reply's own ceiling, before any body byte is read; every one fits this buffer.
+            if len > cap {
+                return Err(ControlError::TooLarge(len));
+            }
+            let mut payload = [0u8; open::MAX_ATTACHED];
+            let payload = &mut payload[..len];
+            reader.read_exact(payload).await.map_err(ControlError::Io)?;
+            return match tag[0] {
+                6 => Ok(Self::Attached(open::decode_attached(payload)?)),
+                7 => Ok(Self::OpenRefusal(OpenRefusal::decode(payload)?)),
+                _ => {
+                    // The 258-byte declaration already holds the reason to 256 bytes.
+                    let reason = read_str_slice(payload)
+                        .ok_or_else(|| local_detail::protocol("invalid open diagnostic"))?;
+                    Ok(Self::Error(local_detail::diagnostic(reason)?))
+                }
+            };
+        }
         if tag[0] == 9 {
             let mut payload = local_detail::storage(len)?;
             reader
@@ -694,6 +745,7 @@ impl Response {
 enum ResponseRead {
     Generic,
     LocalDetail,
+    Open,
 }
 
 /// Why a control frame could not be read or written, or a control operation could not be attempted.
