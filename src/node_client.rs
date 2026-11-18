@@ -52,6 +52,21 @@ pub enum Opened {
     Error(String),
 }
 
+/// A connection to the resident whose listener was checked, with nothing sent on it yet.
+#[derive(Debug)]
+pub struct Connected(UnixStream);
+
+impl Connected {
+    /// Send an Open on this connection and read its reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be written or no valid reply arrives within its bound.
+    pub async fn open(self, request: OpenRequest) -> Result<Opened, ControlError> {
+        UidSocket::open_on(self.0, request).await
+    }
+}
+
 /// The control surface every node backend serves: read the menu, read status, stop. One behavior home
 /// so the uid-socket client and the resident implement the same contract and a behavior change lands
 /// once.
@@ -246,8 +261,18 @@ impl UidSocket {
     /// Returns an error if attribution fails, the request cannot be written, or no valid reply to an
     /// Open arrives within its bound.
     pub async fn open(&self, request: OpenRequest) -> Result<Opened, ControlError> {
+        self.connected().await?.open(request).await
+    }
+
+    /// A connection to the resident, its listener checked as every exchange's is, with nothing sent:
+    /// for a caller that decides what to ask only once it knows `serve` answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connect or its attribution fails.
+    pub async fn connected(&self) -> Result<Connected, ControlError> {
         let (stream, _) = self.connect().await?;
-        Self::open_on(stream, request).await
+        Ok(Connected(stream))
     }
 
     /// [`open`](Self::open) on an established connection.
