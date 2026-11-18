@@ -966,13 +966,14 @@ async fn run() -> eyre::Result<()> {
     // throwaway key of its own.
     if let Outward::Forward(cmd) = &reach
         && cmd.to == commands::connect::To::Stdout
-        && let BindRole::Dialing(credential::Credential::Family { present }) = reach.bind_role()
+        && let BindRole::Dialing(credential) = reach.bind_role()
+        && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
     {
         let pipe = commands::through_serve::Pipe {
             machine,
             service: &cmd.service,
-            slip: present,
+            slip,
             reach: &cmd.reach,
             contacts: store.contacts(),
         };
