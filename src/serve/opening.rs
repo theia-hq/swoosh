@@ -278,7 +278,7 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                     attach(from_client, to_client, from_peer, &mut to_peer, info, &gone).await;
                 // Closing a connection discards what the peer has not acknowledged, so it stays open
                 // until the peer holds every byte and the end, and closes then, never after `close_by`.
-                // A cut-off stream was aborted on the way out of `attach`, so its delivery fails at once;
+                // A stream not shut down was aborted leaving `attach`, so its delivery fails at once;
                 // any failure means nothing more can reach the peer, and the close follows at once too.
                 let _ = tokio::time::timeout_at(close_by, to_peer.delivered()).await;
                 drop((connection, held));
@@ -334,7 +334,9 @@ async fn answer<W: AsyncWrite + Unpin>(to_client: &mut W, reply: Response) {
 /// isolated connection must be done by: at once when nothing was spliced.
 ///
 /// However this ends, short of a successful shutdown of `to_peer`, the peer's stream is aborted: a failed
-/// reply, a failed or cut-off splice, and this future dropped by a gone client, `Stop` or a panic.
+/// reply, a failed splice toward the peer, a drain cut at its deadline, and this future dropped by `Stop`
+/// or a panic. A client gone while it splices does not drop this future: what it wrote drains, a drain
+/// that finishes in time ends cleanly, and only one still running at the deadline is aborted.
 async fn attach<R, W, PR, PW>(
     from_client: R,
     mut to_client: W,
@@ -450,9 +452,14 @@ where
 }
 
 /// The send half toward the peer for the life of an attached Open. Dropped before a successful shutdown,
-/// it aborts the stream, so the peer reads a cut-off as `ConnectionReset` and never as a clean end: a
-/// transport's write half dropped as it is ends the stream cleanly, which would pass a cut-off upload as
-/// a finished one. A successful shutdown disarms it, so a finished stream is never reset.
+/// it aborts the stream, so the peer reads `ConnectionReset` where a transport's write half dropped as it
+/// is would end the stream cleanly: at the drain deadline, after a failed reply or copy toward the peer,
+/// and when `Stop` or a panic drops the Open. A successful shutdown disarms it, so a finished stream is never reset.
+///
+/// It does not tell a finished upload from a cut-off one. A client that dies mid-upload closes its socket
+/// as one that finished does, so its end reads as end of file, the shutdown succeeds and the peer sees a
+/// clean end. Telling those apart needs the client to say it finished, an explicit end on the Open wire,
+/// which this guard cannot stand in for.
 ///
 /// It borrows the half, so the Open keeps it afterwards to wait on its delivery.
 struct ToPeer<'h, W: WriteEnd> {
@@ -529,7 +536,7 @@ const BROKEN: &str = "the connection to the machine failed while opening the str
 
 /// The Error an Open gets when this machine's home or badge cannot be read. It names no path and no
 /// cause; those stay in the run's log.
-const UNREADABLE_HOME: &str = "this machine's standing could not be read";
+const UNREADABLE_HOME: &str = "this machine's home or badge could not be read";
 
 /// Watches a control connection for its client closing the socket in both directions.
 ///
