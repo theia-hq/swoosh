@@ -690,6 +690,11 @@ impl Response {
             if len > cap {
                 return Err(ControlError::TooLarge(len));
             }
+            // The buffer is sized by Attached, the largest Open reply.
+            const _: () = assert!(
+                open::MAX_OPEN_REFUSAL <= open::MAX_ATTACHED
+                    && open::MAX_OPEN_ERROR <= open::MAX_ATTACHED
+            );
             let mut payload = [0u8; open::MAX_ATTACHED];
             let payload = &mut payload[..len];
             reader.read_exact(payload).await.map_err(ControlError::Io)?;

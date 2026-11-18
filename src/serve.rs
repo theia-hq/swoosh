@@ -103,6 +103,10 @@ pub const RENEWAL_SERVICE: &str = "control.renewal";
 /// person types can be it.
 pub const LOOKUP_ROOT_SERVICE: &str = "lookup.root";
 
+/// The routes a peer reaches proven-only: the transport's proof of its key is all they read, so a stream to
+/// one presents nothing, and never renews this home's standing first.
+pub const PROVEN_ROUTES: [&str; 2] = [RENEWAL_SERVICE, LOOKUP_ROOT_SERVICE];
+
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
 /// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the
 /// node to stop and it did, so the process exits 0. A real teardown FAILURE never becomes a `Stopped`, it
