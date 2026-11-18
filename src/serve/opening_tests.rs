@@ -53,6 +53,38 @@ async fn an_open_through_the_running_resident_attaches_and_splices() {
 }
 
 #[tokio::test]
+async fn the_client_open_uploads_downloads_and_hears_landed_through_the_resident() {
+    let fixture = Fixture::new("client", [Script::Reads]);
+    fixture
+        .run(async |socket| {
+            let stream = UnixStream::connect(socket).await.unwrap();
+            let opened = crate::node_client::UidSocket::open_on(
+                stream,
+                request(fixture.peer, OpenLane::Main, None),
+            )
+            .await
+            .unwrap();
+            let crate::node_client::Opened::Attached {
+                mut read,
+                mut write,
+                ..
+            } = opened
+            else {
+                panic!("not attached: {opened:?}");
+            };
+            write.write_all(b"an upload").await.unwrap();
+            write.shutdown().await.unwrap();
+            // The peer reads the upload to its end, then ends its own side with nothing sent.
+            let mut got = Vec::new();
+            read.read_to_end(&mut got).await.unwrap();
+            assert!(got.is_empty());
+            read.landed().await.unwrap();
+            assert_eq!(fixture.scripted.received(), b"an upload");
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn an_open_to_this_machine_is_not_here_and_dials_nothing() {
     let fixture = Fixture::new("self", [Script::Lists(vec![])]);
     fixture

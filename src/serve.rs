@@ -41,8 +41,8 @@ pub mod control_codec {
         ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, LocalDetailLimit,
         LocalServiceName, LocalServicePair, LocalServicePairs, LocalServiceSnapshot,
         LocalServiceTarget, MAX_DISABLED_NAMES, MAX_FRAME, MAX_OPEN_REQUEST, MAX_STATUS_STRING,
-        MAX_WARM_ENTRIES, MalformedOpen, OpenLane, OpenRefusal, OpenRequest, PeerEntry,
-        PeerRefusal, Request, Response, ServiceMenu, StatusReply, WireVersion,
+        MAX_WARM_ENTRIES, MalformedOpen, OpenLane, OpenRead, OpenRefusal, OpenRequest, OpenWrite,
+        PeerEntry, PeerRefusal, Request, Response, ServiceMenu, StatusReply, WireVersion,
     };
 }
 pub use activity::{Activity, RecvLines};
