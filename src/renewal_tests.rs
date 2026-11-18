@@ -36,7 +36,7 @@ const OTHER_ROOT: u8 = 0x32;
 /// The device that serves the route.
 const NAS: u8 = 0x41;
 /// The device whose standing ended, and asks.
-const LAPTOP: u8 = 0x42;
+pub(crate) const LAPTOP: u8 = 0x42;
 /// Another of your devices.
 const PHONE: u8 = 0x43;
 /// A machine outside `me`: a contact's device, and the seed an invite named.
@@ -44,7 +44,7 @@ const STRANGER: u8 = 0x44;
 /// A third of your devices.
 const TV: u8 = 0x45;
 
-const DAY: u64 = 24 * 60 * 60;
+pub(crate) const DAY: u64 = 24 * 60 * 60;
 
 fn root() -> TestRoot {
     TestRoot::seeded(ROOT)
@@ -54,11 +54,11 @@ fn key(seed: u8) -> VerifyKey {
     TestNode::seeded(seed).verify_key()
 }
 
-fn node(seed: u8) -> NodeId {
+pub(crate) fn node(seed: u8) -> NodeId {
     TestNode::seeded(seed).node_id()
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
@@ -101,7 +101,7 @@ fn update(number: u64, members: Vec<Member>, keys: Vec<VerifyKey>) -> Vec<u8> {
 
 /// A fresh home for the device `seed`: its key, the pin, and a standing the root signed for it, ending
 /// at `until`.
-async fn device(tag: &str, seed: u8, until: u64) -> Home {
+pub(crate) async fn device(tag: &str, seed: u8, until: u64) -> Home {
     let dir = std::env::temp_dir().join(format!(
         "swoosh-renewal-{tag}-{seed}-{}-{:?}",
         std::process::id(),
@@ -168,7 +168,7 @@ async fn nas_renewing(tag: &str, renewed: u64) -> (Home, Link) {
 }
 
 /// A laptop whose standing ended a day ago, that holds the update it had then and knows `me/nas`.
-async fn lapsed_laptop(tag: &str) -> Home {
+pub(crate) async fn lapsed_laptop(tag: &str) -> Home {
     let ended = now() - DAY;
     let laptop = device(tag, LAPTOP, ended).await;
     holding(

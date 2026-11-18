@@ -21,8 +21,8 @@ use tokio::sync::Semaphore;
 
 use super::opening::{ClientGone, Opens};
 use super::socket::{
-    ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, OpenRequest, Request,
-    Response, ServiceMenu, StatusReply,
+    ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, OpenRefusal,
+    OpenRequest, Request, Response, ServiceMenu, StatusReply,
 };
 use crate::node_client::{NodeClient, euid, real_peer_uid};
 use crate::serve_toml::LiveServeToml;
@@ -178,7 +178,8 @@ impl Resident {
     /// connections stay queued at the listener (the `MAX_SESSIONS` backpressure pattern) rather than
     /// being accepted and dropped. Each accepted connection is uid-checked BEFORE a byte is read and
     /// served one-shot under the read timeout, then closed; an Open is handed to `opens` with its
-    /// control slot and its connection, which it keeps for the stream's life.
+    /// control slot and its connection, which it keeps for the stream's life. What `opens` drives beside
+    /// its Opens runs for as long as the socket is served.
     pub async fn serve(
         self: Arc<Self>,
         listener: std::os::unix::net::UnixListener,
@@ -186,11 +187,14 @@ impl Resident {
     ) -> eyre::Result<()> {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
-        self.serve_accepting(
+        let accepting = self.serve_accepting(
             || async { listener.accept().await.map(|(stream, _)| stream) },
             opens,
-        )
-        .await
+        );
+        tokio::select! {
+            served = accepting => served,
+            never = opens.drive() => match never {},
+        }
     }
 
     // Inject accept outcomes without exhausting process-wide descriptors in tests. Neither the
@@ -331,7 +335,12 @@ impl Resident {
                 let gone = match ClientGone::watch(fd) {
                     Ok(gone) => gone,
                     Err(error) => {
-                        tracing::warn!(%error, "could not watch an open's connection; closing it");
+                        // Out of descriptors, most likely: the run is full, which the client may retry.
+                        tracing::warn!(%error, "could not watch an open's connection; refusing it");
+                        let busy = Response::OpenRefusal(OpenRefusal::Busy);
+                        self.reply_then_fire(&mut writer, &busy, false, timeout)
+                            .await;
+                        let _ = writer.shutdown().await;
                         return None;
                     }
                 };

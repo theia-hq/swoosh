@@ -93,6 +93,9 @@ fn badge_refusal_reads_attenuation_and_propagates_unreadable_bounds() {
     let Err(error) = into_slot_at(unreadable, node, &mut warned, base) else {
         panic!("an unreadable bound must propagate");
     };
+    let super::ResolveError::Unreadable(error) = error else {
+        panic!("an unreadable bound is not an ended badge");
+    };
     assert!(matches!(
         error.downcast_ref::<nauthy::CapError>(),
         Some(nauthy::CapError::UnreadableExpiry)

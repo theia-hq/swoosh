@@ -827,6 +827,14 @@ pub enum Script {
     Silent,
     /// Read the request, admit it, then hold the stream open and say nothing more.
     Holds,
+    /// Read the request, admit it, end its own side of the stream at once, and never read what follows.
+    Ends,
+    /// Read the request, admit it, then read the stream to its end, keeping what it read, and end.
+    Reads,
+    /// Read the request, admit it and end its own side at once, then after the pause read the stream to
+    /// its end, keeping what it read only while no session was closed: a close discards what the
+    /// peer has not taken, as a transport's close does.
+    EndsThenReads(core::time::Duration),
 }
 
 /// A peer whose gate follows a script, one [`Script`] per stream, recording every request it reads: the
@@ -844,6 +852,8 @@ struct Scripted {
     script: VecDeque<Script>,
     requests: Vec<tightbeam::protocol::Request>,
     dials: u32,
+    received: Vec<u8>,
+    closes: u32,
 }
 
 impl ScriptedPeer {
@@ -863,6 +873,12 @@ impl ScriptedPeer {
         self.lock().requests.clone()
     }
 
+    /// What [`Script::Reads`] and [`Script::EndsThenReads`] streams have read after their requests, in
+    /// order.
+    pub fn received(&self) -> Vec<u8> {
+        self.lock().received.clone()
+    }
+
     /// How many times it was dialed.
     pub fn dials(&self) -> u32 {
         self.lock().dials
@@ -874,6 +890,29 @@ impl ScriptedPeer {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Read `from` to its end, keeping what it reads; with `closes`, only while no session has closed
+    /// since that count.
+    async fn keep_reading(
+        &self,
+        from: &mut tokio::io::DuplexStream,
+        closes: Option<u32>,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut chunk = [0; 4096];
+        loop {
+            let read = from.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok(());
+            }
+            let mut state = self.lock();
+            if closes.is_some_and(|closes| state.closes != closes) {
+                return Ok(());
+            }
+            state.received.extend_from_slice(&chunk[..read]);
+        }
     }
 
     /// A list of services naming `names`, in the catalog's wire form: a count, then each name
@@ -921,6 +960,26 @@ impl ScriptedPeer {
                 tightbeam::protocol::Response::Ok.write(&mut to).await?;
                 core::future::pending::<()>().await;
                 Ok(())
+            }
+            Script::Ends => {
+                tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                to.shutdown().await?;
+                // Holding the reading half unread fills the stream, so the writer stalls rather than fails.
+                let _unread = from;
+                core::future::pending::<()>().await;
+                Ok(())
+            }
+            Script::Reads => {
+                tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                self.keep_reading(&mut from, None).await?;
+                to.shutdown().await
+            }
+            Script::EndsThenReads(pause) => {
+                let closes = self.lock().closes;
+                tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                to.shutdown().await?;
+                tokio::time::sleep(pause).await;
+                self.keep_reading(&mut from, Some(closes)).await
             }
         }
     }
@@ -987,8 +1046,10 @@ impl bifrost::Session for ScriptedPeer {
         core::future::pending::<()>().await;
     }
 
-    /// A double that carries nothing has nothing to end.
-    fn close(&self) {}
+    /// Counted, so a [`Script::EndsThenReads`] stream keeps nothing it reads after a close.
+    fn close(&self) {
+        self.lock().closes += 1;
+    }
 
     /// No transport under it, so no path.
     fn path_changes(&self) -> bifrost::PathChanges {
@@ -1016,5 +1077,9 @@ impl crate::serve::Opens for NoOpens {
         R: tokio::io::AsyncBufRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
+    }
+
+    async fn drive(&self) -> core::convert::Infallible {
+        core::future::pending().await
     }
 }

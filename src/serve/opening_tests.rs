@@ -15,11 +15,12 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, DuplexStream};
 use tokio::net::UnixStream;
 
 use super::{
-    BROKEN, ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, Opener, UNREACHABLE, failed,
-    splice,
+    BROKEN, ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, UNREACHABLE,
+    UNREADABLE_HOME, failed, raise_open_files, splice,
 };
 use crate::home::Home;
 use crate::peers::{DialFailure, Hints, OpenError, Peers};
+use crate::renewal::renewal_tests::{DAY, LAPTOP, device, lapsed_laptop, node, now};
 use crate::renewal::{Fetch, FetchError, OpenRenewal};
 use crate::serve::control_codec::{
     OpenLane, OpenRefusal, OpenRequest, PeerRefusal, Request, Response,
@@ -231,6 +232,53 @@ async fn an_isolated_splice_is_dropped_at_the_drain_deadline_when_the_peer_takes
 }
 
 #[tokio::test]
+async fn an_isolated_close_waits_for_the_peer_to_take_what_was_sent() {
+    let fixture = Fixture::new("iso-taken", [Script::EndsThenReads(HANGUP_DRAIN / 4)]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            attached(&mut client).await;
+            client.write_all(b"the last of an upload").await.unwrap();
+            client.shutdown().await.unwrap();
+            let mut rest = Vec::new();
+            client.read_to_end(&mut rest).await.unwrap();
+            // The peer ended first and takes the bytes only after its pause, well inside the drain.
+            let taken = tokio::time::timeout(
+                HANGUP_DRAIN,
+                until_true(|| fixture.scripted.received() == b"the last of an upload"),
+            )
+            .await;
+            assert!(
+                taken.is_ok(),
+                "the peer took {:?}",
+                fixture.scripted.received()
+            );
+            released(&fixture.opener, HANGUP_DRAIN + HANG_GUARD).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_isolated_close_past_the_drain_loses_what_the_peer_did_not_take() {
+    let late = HANGUP_DRAIN + HANG_GUARD;
+    let fixture = Fixture::new("iso-late", [Script::EndsThenReads(late)]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            attached(&mut client).await;
+            client.write_all(b"never taken").await.unwrap();
+            client.shutdown().await.unwrap();
+            let mut rest = Vec::new();
+            client.read_to_end(&mut rest).await.unwrap();
+            // A peer that keeps the connection and takes nothing holds it no longer than the drain.
+            released(&fixture.opener, HANGUP_DRAIN + HANG_GUARD).await;
+            tokio::time::sleep(late).await;
+            assert!(fixture.scripted.received().is_empty());
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn the_hangup_watch_tells_close_from_half_close() {
     let (server, client) = UnixStream::pair().unwrap();
     let gone = ClientGone::watch(server.as_raw_fd()).unwrap();
@@ -240,12 +288,24 @@ async fn the_hangup_watch_tells_close_from_half_close() {
         tokio::time::timeout(HANG_GUARD, gone.wait()).await.is_err(),
         "a half-close is not a hang-up"
     );
-    // The watch takes no wakeup from a writer on the same socket.
+    // The watch takes no wakeup from a writer on the same socket: more than the socket holds must wait
+    // for the client to read, and that wait ends only if the writer's own wakeups reach it while the
+    // watch is waiting too.
     let (_server_read, mut server_write) = server.into_split();
-    server_write.write_all(b"ping").await.unwrap();
+    let sent = vec![7; 1024 * 1024];
     let mut client_read = client_read;
-    let mut ping = [0; 4];
-    client_read.read_exact(&mut ping).await.unwrap();
+    let mut got = vec![0; sent.len()];
+    let moved = tokio::time::timeout(HANG_GUARD * 5, async {
+        tokio::select! {
+            () = gone.wait() => panic!("a write on the same socket is not a hang-up"),
+            moved = async { tokio::join!(server_write.write_all(&sent), client_read.read_exact(&mut got)) } => moved,
+        }
+    })
+    .await
+    .expect("the writer lost its wakeup to the watch");
+    moved.0.unwrap();
+    moved.1.unwrap();
+    assert_eq!(got, sent);
     drop((client_read, client_write));
     assert!(
         tokio::time::timeout(HANG_GUARD, gone.wait()).await.is_ok(),
@@ -316,11 +376,26 @@ async fn a_peer_still_sending_does_not_hold_a_gone_client() {
         async {
             let _ = hung.await;
         },
+        core::future::pending(),
     ));
     assert!(poll!(&mut spliced).is_pending());
     hang_up.send(()).unwrap();
     assert!(poll!(&mut spliced).is_ready());
     drop((client_read, peer));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_clean_end_leaves_the_close_the_whole_drain() {
+    let pair = Pair::new();
+    let (client, mut peer) = (pair.client, pair.peer);
+    // Both directions end: the client stops writing, and the peer ends its own.
+    drop(client);
+    peer.shutdown().await.unwrap();
+    let ended = tokio::time::Instant::now();
+    let mut sent = Vec::new();
+    let (close_by, read) = tokio::join!(pair.splice, peer.read_to_end(&mut sent));
+    read.unwrap();
+    assert_eq!(close_by, ended + HANGUP_DRAIN);
 }
 
 #[tokio::test]
@@ -344,7 +419,7 @@ async fn bytes_a_client_wrote_before_closing_reach_a_live_peer() {
         tokio::join!(writer, reader, splice)
     })
     .await;
-    let ((), got, ()) = joined.expect("the splice ended");
+    let ((), got, _) = joined.expect("the splice ended");
     assert_eq!(got, sent);
 }
 
@@ -399,6 +474,374 @@ fn a_failed_open_carries_only_fixed_words() {
     );
 }
 
+#[tokio::test]
+async fn an_open_with_an_ended_badge_is_standing_ended() {
+    let home = lapsed_laptop("open-ended").await;
+    let fixture = Fixture::over(home, node(LAPTOP), Asks::default(), []);
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Main, None)).await;
+            assert_eq!(refusal(&mut client).await, OpenRefusal::StandingEnded);
+        })
+        .await;
+    assert_eq!(fixture.asks.asked(), 1, "the lapsed standing was due");
+    assert_eq!(fixture.scripted.dials(), 0);
+}
+
+#[tokio::test]
+async fn an_open_whose_home_cannot_be_read_is_an_error_not_standing_ended() {
+    let home = device("open-unreadable", LAPTOP, now() + 90 * DAY).await;
+    std::fs::create_dir(home.root_key()).unwrap();
+    std::fs::set_permissions(
+        home.root_key(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let fixture = Fixture::over(home, node(LAPTOP), Asks::default(), []);
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Main, None)).await;
+            assert_eq!(
+                Response::read_open(&mut client).await.unwrap(),
+                Response::Error(UNREADABLE_HOME.to_owned())
+            );
+        })
+        .await;
+    assert_eq!(fixture.scripted.dials(), 0);
+}
+
+#[tokio::test]
+async fn a_badge_planted_as_a_fifo_does_not_hold_an_open() {
+    let home = device("open-fifo", LAPTOP, now() + 90 * DAY).await;
+    let _released = Fifo::plant(&home.key_cert());
+    let fixture = Fixture::over(home, node(LAPTOP), Asks::default(), []);
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Main, None)).await;
+            let reply = tokio::time::timeout(HANG_GUARD * 5, Response::read_open(&mut client))
+                .await
+                .expect("a FIFO held the Open");
+            assert_eq!(reply.unwrap(), Response::Error(UNREADABLE_HOME.to_owned()));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn both_badge_reads_refuse_a_fifo_at_once() {
+    let home = device("reads-fifo", LAPTOP, now() + 90 * DAY).await;
+    let _released = Fifo::plant(&home.key_cert());
+    let standing = tokio::time::timeout(HANG_GUARD, crate::standing::Standing::read(&home)).await;
+    assert!(
+        standing
+            .expect("the standing read waited on a FIFO")
+            .is_err()
+    );
+    let badge = tokio::time::timeout(HANG_GUARD, crate::config::load_badge(&home)).await;
+    assert!(badge.expect("the badge read waited on a FIFO").is_err());
+}
+
+#[tokio::test]
+async fn a_busy_peer_lane_refuses_before_any_renewal() {
+    let home = lapsed_laptop("busy-first").await;
+    let fixture = Fixture::over(home, node(LAPTOP), Asks::default(), []);
+    let places: Vec<_> = (0..4)
+        .map(|_| fixture.peers.isolated_place(fixture.peer).unwrap())
+        .collect();
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            assert_eq!(refusal(&mut client).await, OpenRefusal::Busy);
+            assert_eq!(fixture.asks.asked(), 0, "a Busy Open started a renewal");
+            assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH);
+            // With room on the lane, the same Open renews first: the due standing is asked for.
+            drop(places);
+            let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            assert_eq!(refusal(&mut client).await, OpenRefusal::StandingEnded);
+            assert_eq!(fixture.asks.asked(), 1);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_isolated_open_times_out_at_bulks_ten_seconds() {
+    let fixture = Fixture::new("isolated-timeout", [Script::Silent]);
+    fixture
+        .run(async |socket| {
+            let start = tokio::time::Instant::now();
+            let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            assert_eq!(refusal(&mut client).await, OpenRefusal::Timeout);
+            let waited = start.elapsed();
+            let ten = Duration::from_secs(10);
+            assert!(
+                waited >= ten && waited < ten + HANG_GUARD,
+                "an isolated open waited {waited:?}"
+            );
+        })
+        .await;
+}
+
+/// Attach a Bulk splice to a peer that ends its stream and never reads, read the peer's end, then
+/// write until the path stalls, leaving the client's bytes unsent.
+async fn stalled_after_the_peer_ended(socket: &std::path::Path, peer: NodeId) -> UnixStream {
+    let mut client = open(socket, request(peer, OpenLane::Bulk, None)).await;
+    attached(&mut client).await;
+    let mut rest = Vec::new();
+    client.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
+    let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&[7; 1024 * 1024])).await;
+    client
+}
+
+#[tokio::test]
+async fn a_gone_client_after_the_peer_ended_releases_at_the_drain() {
+    let fixture = Fixture::new("ended-gone", [Script::Ends]);
+    fixture
+        .run(async |socket| {
+            let client = stalled_after_the_peer_ended(socket, fixture.peer).await;
+            drop(client);
+            released(&fixture.opener, HANGUP_DRAIN + HANG_GUARD).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_half_closed_client_after_the_peer_ended_releases_at_the_drain() {
+    let fixture = Fixture::new("ended-half", [Script::Ends]);
+    fixture
+        .run(async |socket| {
+            let mut client = stalled_after_the_peer_ended(socket, fixture.peer).await;
+            client.shutdown().await.unwrap();
+            released(&fixture.opener, HANGUP_DRAIN + HANG_GUARD).await;
+            drop(client);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_client_still_open_to_an_ended_peer_stays_live() {
+    let fixture = Fixture::new("ended-live", [Script::Ends]);
+    fixture
+        .run(async |socket| {
+            let client = stalled_after_the_peer_ended(socket, fixture.peer).await;
+            tokio::time::sleep(HANGUP_DRAIN + HANG_GUARD).await;
+            assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH - 1);
+            drop(client);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_failed_write_to_the_client_still_sends_its_bytes_to_the_peer() {
+    let (mut client, from_client) = tokio::io::duplex(1024);
+    let (mut peer, peer_end) = tokio::io::duplex(1024);
+    let (from_peer, to_peer) = tokio::io::split(peer_end);
+    // The peer has a byte for the client, and the client's socket refuses it.
+    peer.write_all(&[1]).await.unwrap();
+    let mut spliced = Box::pin(splice(
+        BufReader::new(from_client),
+        Gone,
+        from_peer,
+        to_peer,
+        core::future::pending(),
+        core::future::pending(),
+    ));
+    assert!(
+        poll!(&mut spliced).is_pending(),
+        "a failed write ended the splice"
+    );
+    client.write_all(b"last words").await.unwrap();
+    drop(client);
+    let mut got = Vec::new();
+    let (_, read) = tokio::join!(spliced, peer.read_to_end(&mut got));
+    read.unwrap();
+    assert_eq!(got, b"last words");
+}
+
+#[tokio::test]
+async fn a_payload_in_the_requests_write_reaches_the_peer() {
+    let fixture = Fixture::new("payload", [Script::Reads]);
+    fixture
+        .run(async |socket| {
+            let mut bytes = Vec::new();
+            Request::Open(request(fixture.peer, OpenLane::Main, None))
+                .write(&mut bytes)
+                .await
+                .unwrap();
+            bytes.extend_from_slice(b"sent with the request");
+            let mut client = UnixStream::connect(socket).await.unwrap();
+            client.write_all(&bytes).await.unwrap();
+            client.shutdown().await.unwrap();
+            attached(&mut client).await;
+            let arrived = tokio::time::timeout(
+                HANG_GUARD,
+                until_true(|| fixture.scripted.received() == b"sent with the request"),
+            )
+            .await;
+            assert!(
+                arrived.is_ok(),
+                "the peer read {:?}",
+                fixture.scripted.received()
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_renewal_an_open_left_runs_to_its_end_on_the_served_socket() {
+    let home = lapsed_laptop("left-flight").await;
+    let fixture = Fixture::over(home, node(LAPTOP), Asks::holding(), []);
+    fixture
+        .run(async |socket| {
+            let client = open(socket, request(fixture.peer, OpenLane::Main, None)).await;
+            until_true(|| fixture.asks.asked() == 1).await;
+            drop(client);
+            // Nothing waits on the flight now; only the served socket's drive can end its ask.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            assert_eq!(fixture.asks.ended(), 1, "the flight was left parked");
+        })
+        .await;
+}
+
+/// The child half of [`a_watch_that_cannot_be_made_is_busy`]: an Open arriving with one descriptor
+/// short of its watch.
+#[tokio::test]
+#[ignore = "run in its own process by a_watch_that_cannot_be_made_is_busy"]
+async fn no_descriptor_child() {
+    let fixture = Fixture::new("no-fd", [Script::Lists(vec![])]);
+    set_open_files(128);
+    fixture
+        .run(async |socket| {
+            let mut held = Vec::new();
+            while let Ok(file) = std::fs::File::open("/dev/null") {
+                held.push(file);
+            }
+            // Two left: the client's socket and the accepted one. The watch's duplicate finds none.
+            held.truncate(held.len() - 2);
+            let mut client = open(socket, request(fixture.peer, OpenLane::Main, None)).await;
+            assert_eq!(refusal(&mut client).await, OpenRefusal::Busy);
+            drop(held);
+        })
+        .await;
+    assert_eq!(fixture.scripted.dials(), 0);
+}
+
+#[test]
+fn a_watch_that_cannot_be_made_is_busy() {
+    in_own_process("serve::opening::tests::no_descriptor_child");
+}
+
+/// The child half of [`serve_raises_the_open_file_limit`].
+#[test]
+#[ignore = "run in its own process by serve_raises_the_open_file_limit"]
+fn open_files_child() {
+    set_open_files(64);
+    raise_open_files().unwrap();
+    let (soft, hard) = open_files();
+    assert_eq!(soft, OPEN_FILES.min(hard));
+    // Never lowered.
+    set_open_files(OPEN_FILES.min(hard));
+    raise_open_files().unwrap();
+    assert_eq!(open_files().0, OPEN_FILES.min(hard));
+}
+
+#[test]
+fn serve_raises_the_open_file_limit() {
+    in_own_process("serve::opening::tests::open_files_child");
+}
+
+/// Run the ignored test `name` alone in a child of this test binary, and require it to pass.
+fn in_own_process(name: &str) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--include-ignored"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed"), "{stdout}");
+}
+
+/// This process's soft and hard open-file limits.
+fn open_files() -> (libc::rlim_t, libc::rlim_t) {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live, writable `rlimit` for the call to fill.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+        0
+    );
+    (limit.rlim_cur, limit.rlim_max)
+}
+
+/// Set this process's soft open-file limit to `soft`.
+fn set_open_files(soft: libc::rlim_t) {
+    let limit = libc::rlimit {
+        rlim_cur: soft,
+        rlim_max: open_files().1,
+    };
+    // SAFETY: `limit` is a valid `rlimit` that outlives the call, which only reads it.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+}
+
+/// A FIFO planted in place of a file. Dropping it opens and closes the writing end, so a read the
+/// guard failed to stop gets its end of file and the test's runtime can shut down.
+struct Fifo(std::path::PathBuf);
+
+impl Fifo {
+    fn plant(path: &std::path::Path) -> Self {
+        let _ = std::fs::remove_file(path);
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path for the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        Self(path.to_owned())
+    }
+}
+
+impl Drop for Fifo {
+    fn drop(&mut self) {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&self.0);
+    }
+}
+
+/// A client socket that refuses every write, as one whose client went refuses with `EPIPE`.
+struct Gone;
+
+impl tokio::io::AsyncWrite for Gone {
+    // `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+        _buf: &[u8],
+    ) -> core::task::Poll<std::io::Result<usize>> {
+        core::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::task::Poll::Ready(Ok(()))
+    }
+}
+
 const THIS: u8 = 1;
 const PEER: u8 = 0x63;
 
@@ -408,27 +851,41 @@ struct Fixture {
     peer: NodeId,
     scripted: ScriptedPeer,
     resident: Arc<Resident>,
-    opener: Opener<'static, 'static, 'static, ScriptedPeer, NoDiscovery, Never>,
+    peers: &'static Peers<'static, ScriptedPeer, NoDiscovery>,
+    asks: &'static Asks,
+    opener: Opener<'static, 'static, 'static, ScriptedPeer, NoDiscovery, Asks>,
+    /// A short directory of its own for the socket, whose path has a length cap.
     dir: std::path::PathBuf,
 }
 
 impl Fixture {
+    /// Over a fresh home with no standing, so nothing is due.
     fn new(tag: &str, script: impl IntoIterator<Item = Script>) -> Self {
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "swo-{tag}-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        crate::config::create_store_dir(&dir).unwrap();
-        let home: &'static Home = Box::leak(Box::new(Home::resolve(Some(dir.clone())).unwrap()));
-        let this = TestNode::seeded(THIS).node_id();
+        let home = Home::resolve(Some(scratch(tag))).unwrap();
+        Self::over(
+            home,
+            TestNode::seeded(THIS).node_id(),
+            Asks::default(),
+            script,
+        )
+    }
+
+    /// Over `home`, this machine being `this`, asking devices through `asks`.
+    fn over(
+        home: Home,
+        this: NodeId,
+        asks: Asks,
+        script: impl IntoIterator<Item = Script>,
+    ) -> Self {
+        let dir = scratch("sock");
+        let home: &'static Home = Box::leak(Box::new(home));
         let peer = TestNode::seeded(PEER).node_id();
         let scripted = ScriptedPeer::new(peer, script);
         let node = Box::leak(Box::new(Node::new(scripted.clone(), NoDiscovery)));
-        let peers = Box::leak(Box::new(Peers::new(node)));
-        let renewal = Box::leak(Box::new(OpenRenewal::new(home, &Never)));
+        let peers: &'static Peers<'static, ScriptedPeer, NoDiscovery> =
+            Box::leak(Box::new(Peers::new(node)));
+        let asks: &'static Asks = Box::leak(Box::new(asks));
+        let renewal = Box::leak(Box::new(OpenRenewal::new(home, asks)));
         let resident = Arc::new(Resident::new(
             this,
             None,
@@ -442,6 +899,8 @@ impl Fixture {
             peer,
             scripted,
             resident,
+            peers,
+            asks,
             opener: Opener::new(peers, renewal, home, this),
             dir,
         }
@@ -460,13 +919,61 @@ impl Fixture {
     }
 }
 
-/// A [`Fetch`] that never reaches a device: these homes are never due.
-struct Never;
+/// A [`Fetch`] that counts its asks and answers no standing, at once or, when `holds`, never; it counts
+/// the asks that ended, answered or cut off.
+#[derive(Default)]
+struct Asks {
+    holds: bool,
+    asked: AtomicU32,
+    ended: Arc<AtomicU32>,
+}
 
-impl Fetch for Never {
+impl Asks {
+    fn holding() -> Self {
+        Self {
+            holds: true,
+            ..Self::default()
+        }
+    }
+
+    fn asked(&self) -> u32 {
+        self.asked.load(Ordering::Relaxed)
+    }
+
+    fn ended(&self) -> u32 {
+        self.ended.load(Ordering::Relaxed)
+    }
+}
+
+impl Fetch for Asks {
     async fn fetch(&self, _peer: NodeId) -> Result<Option<Link>, FetchError> {
+        /// Counts the ask as ended however its future goes.
+        struct Ending(Arc<AtomicU32>);
+        impl Drop for Ending {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.asked.fetch_add(1, Ordering::Relaxed);
+        let _ending = Ending(Arc::clone(&self.ended));
+        if self.holds {
+            core::future::pending::<()>().await;
+        }
         Ok(None)
     }
+}
+
+/// A fresh owner-only directory under the temporary directory, short enough to hold a socket.
+fn scratch(tag: &str) -> std::path::PathBuf {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "swo-{tag}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::config::create_store_dir(&dir).unwrap();
+    dir
 }
 
 fn until() -> SystemTime {
@@ -510,7 +1017,7 @@ struct Pair<F> {
 
 impl Pair<()> {
     #[allow(clippy::new_ret_no_self)]
-    fn new() -> Pair<impl Future<Output = ()>> {
+    fn new() -> Pair<impl Future<Output = tokio::time::Instant>> {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let (from_client, to_client) = tokio::io::split(server);
         let (peer, peer_end) = tokio::io::duplex(64);
@@ -528,6 +1035,7 @@ impl Pair<()> {
                 async {
                     let _ = hung.await;
                 },
+                core::future::pending(),
             ),
         }
     }
@@ -542,7 +1050,7 @@ async fn attached(client: &mut UnixStream) {
 }
 
 /// Wait at most `within` for every reach slot to be back.
-async fn released(opener: &Opener<'_, '_, '_, ScriptedPeer, NoDiscovery, Never>, within: Duration) {
+async fn released(opener: &Opener<'_, '_, '_, ScriptedPeer, NoDiscovery, Asks>, within: Duration) {
     let back = tokio::time::timeout(
         within,
         until_true(|| opener.reach.available_permits() == MAX_REACH),

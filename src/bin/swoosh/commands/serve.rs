@@ -577,6 +577,11 @@ impl ServeCmd {
             cut,
             home,
         } = expose;
+        // Each Open holds two descriptors for its life; a run that cannot raise the limit still serves,
+        // with fewer Opens before the next is refused Busy.
+        if let Err(error) = swoosh::serve::raise_open_files() {
+            tracing::warn!(%error, "could not raise the open-file limit");
+        }
         // The run's one watcher of `<home>/serve.toml`, the one its claim read: the live enable/disable
         // oracle the exposer's per-stream gate consults, so a service turned off is refused live, and
         // turned back on, both with no restart. The status the control socket reports reads the same one.
@@ -758,9 +763,6 @@ impl ServeCmd {
         let stopped = tokio::select! {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock, &opener) => stopped?,
             never = expiry => match never {},
-            // A renewal an Open started runs to its end and its end counts, even when every Open
-            // waiting on it has gone: otherwise a parked flight would hold `home.lock`.
-            never = renewal.drive() => match never {},
             () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             () = saved.watch() => unreachable!("the root route's keys are read until the node stops"),

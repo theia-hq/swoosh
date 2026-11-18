@@ -5,9 +5,10 @@
 //! session per peer, so a full fan-out never stalls an exchange. A slip rides held sessions of its own,
 //! shared only by streams presenting the identical slip, one per lane, so a slip's fan-out never stalls
 //! its exchanges either. [`Peers::isolated`] dials a connection per caller under the ten-second dial
-//! deadline and never holds it; its streams have no open deadline here. Every lane has a per-peer cap,
-//! enforced here for every run. An open that gets no answer in its lane's deadline evicts a session no
-//! other open got through on; dropping an open never removes a session.
+//! deadline and never holds it; its caller bounds the open on it with Bulk's ten seconds, since nothing
+//! is evicted and nothing races it. Every lane has a per-peer cap, enforced here for every run. An open
+//! that gets no answer in its lane's deadline evicts a session no other open got through on; dropping an
+//! open never removes a session.
 //!
 //! A caller's [`Hints`] go into the address feed of a dial it starts, ahead of the run's own addresses
 //! and mDNS, and into no other dial's feed; what the transport keeps of them is
@@ -34,8 +35,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Instant;
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
-// A Bulk open's deadline. A pipe's caller waits on its open with nothing racing it, so the open itself
-// bounds how long a silent session is kept.
+// A Bulk or Isolated open's deadline. Neither caller waits on its open with anything racing it, so the
+// open itself bounds how long a silent session, or a fresh isolated connection, is kept.
 pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// A Main open's deadline, shorter than any Main caller's own bound, so the open's timer rather than the
 /// caller's fires on a silent session and evicts it.
@@ -286,7 +287,45 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         ),
         OpenError,
     > {
-        let budget = self.reserve(peer, Class::from(lane))?;
+        let place = self.place(peer, lane)?;
+        self.open_placed(place, hints, service, presents).await
+    }
+
+    /// A place on `peer`'s `lane`, counted against its cap from now until the stream it opens drops, or
+    /// `Busy`. Synchronous and dependent on nothing but the peer and lane, so a caller takes it before
+    /// anything slow and a full lane refuses first.
+    pub(crate) fn place(&self, peer: NodeId, lane: Lane) -> Result<LanePlace, OpenError> {
+        Ok(LanePlace {
+            peer,
+            lane,
+            budget: self.reserve(peer, Class::from(lane))?,
+        })
+    }
+
+    /// A place for one isolated connection to `peer`, or `Busy`; as [`place`](Self::place).
+    pub(crate) fn isolated_place(&self, peer: NodeId) -> Result<IsolatedPlace, OpenError> {
+        Ok(IsolatedPlace {
+            peer,
+            budget: self.reserve(peer, Class::Isolated)?,
+        })
+    }
+
+    /// [`open_attached`](Self::open_attached) on a place already taken.
+    pub(crate) async fn open_placed(
+        &self,
+        place: LanePlace,
+        hints: Hints,
+        service: Service,
+        presents: Presents,
+    ) -> Result<
+        (
+            ConnInfo,
+            impl AsyncWrite + Unpin + use<'_, 'n, T, D>,
+            impl AsyncRead + Unpin + use<'_, 'n, T, D>,
+        ),
+        OpenError,
+    > {
+        let LanePlace { peer, lane, budget } = place;
         let key = Key {
             peer,
             carry: presents.carry(lane),
@@ -354,7 +393,17 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         peer: NodeId,
         hints: Hints,
     ) -> Result<Isolated<T::Session>, OpenError> {
-        let budget = self.reserve(peer, Class::Isolated)?;
+        let place = self.isolated_place(peer)?;
+        self.isolated_placed(place, hints).await
+    }
+
+    /// [`isolated`](Self::isolated) on a place already taken.
+    pub(crate) async fn isolated_placed(
+        &self,
+        place: IsolatedPlace,
+        hints: Hints,
+    ) -> Result<Isolated<T::Session>, OpenError> {
+        let IsolatedPlace { peer, budget } = place;
         let session = dial(self.node, peer, &hints)
             .await
             .map_err(OpenError::Unreachable)?;
@@ -599,6 +648,21 @@ impl<S: Session> Drop for Entry<S> {
 
 struct Budget {
     count: Rc<Cell<u16>>,
+}
+
+/// A stream's place on one peer's held lane, taken by [`Peers::place`] and spent by
+/// [`Peers::open_placed`]; dropping it unspent gives the place back.
+pub(crate) struct LanePlace {
+    peer: NodeId,
+    lane: Lane,
+    budget: Budget,
+}
+
+/// An isolated connection's place among one peer's, taken by [`Peers::isolated_place`] and spent by
+/// [`Peers::isolated_placed`]; dropping it unspent gives the place back.
+pub(crate) struct IsolatedPlace {
+    peer: NodeId,
+    budget: Budget,
 }
 
 impl Drop for Budget {
