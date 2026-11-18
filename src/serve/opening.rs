@@ -12,7 +12,7 @@ use core::time::Duration;
 use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
 use std::time::SystemTime;
 
-use bifrost::{Discovery, NodeId, RefusalDetail, Session as _, Transport};
+use bifrost::{Discovery, NodeId, RefusalDetail, Session as _, Transport, WriteEnd};
 use nauthy::Service;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt as _, Interest};
@@ -40,7 +40,8 @@ const _: () = assert!(MAX_BEYOND_MAIN < MAX_REACH);
 /// writing after the peer ended, may go on sending what the client wrote, on every lane. Counted from
 /// that moment and never extended by progress, so a peer taking a byte at a time cannot hold the
 /// splice; at the deadline the splice is dropped, and with it the reach slots, the lane count and the
-/// session, or the isolated connection. An isolated connection's close waits within the same bound.
+/// session, or the isolated connection. An isolated connection's close waits for the peer to hold what was
+/// sent within the same bound.
 pub const HANGUP_DRAIN: Duration = Duration::from_secs(4);
 
 /// The soft open-file limit a run asks for: each Open holds two descriptors, its connection and the
@@ -268,19 +269,18 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                 })
                 .await;
                 let Some(opened) = opened else { return };
-                let (connection, to_peer, from_peer) = match opened {
+                let (connection, mut to_peer, from_peer) = match opened {
                     Ok(opened) => opened,
                     Err(refusal) => return refuse(&mut to_client, refusal).await,
                 };
                 let info = connection.conn_info();
                 let close_by =
-                    attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
-                // Closing a connection discards what the peer has not acknowledged, so the close is
-                // graceful: the stream toward the peer is finished, and the connection stays open for the
-                // transport to deliver it until the peer closes it or `close_by` passes. The transport
-                // offers no wait on one stream's acknowledgement, so a peer that keeps the connection
-                // holds it, and the Open's slots, to the deadline.
-                let _ = tokio::time::timeout_at(close_by, connection.wait_closed()).await;
+                    attach(from_client, to_client, from_peer, &mut to_peer, info, &gone).await;
+                // Closing a connection discards what the peer has not acknowledged, so it stays open
+                // until the peer holds every byte and the end, and closes then, never after `close_by`.
+                // A stream not shut down was aborted leaving `attach`, so its delivery fails at once;
+                // any failure means nothing more can reach the peer, and the close follows at once too.
+                let _ = tokio::time::timeout_at(close_by, to_peer.delivered()).await;
                 drop((connection, held));
                 return;
             }
@@ -294,8 +294,8 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
         match opened {
             // The held session outlives this stream, so what the peer has not taken is still delivered
             // after the splice drops it: no close to wait for.
-            Ok((info, to_peer, from_peer)) => {
-                let _ = attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
+            Ok((info, mut to_peer, from_peer)) => {
+                let _ = attach(from_client, to_client, from_peer, &mut to_peer, info, &gone).await;
             }
             Err(error) => refuse(&mut to_client, failed(&error)).await,
         }
@@ -332,11 +332,16 @@ async fn answer<W: AsyncWrite + Unpin>(to_client: &mut W, reply: Response) {
 
 /// Reply Attached with the path the stream rides, then splice. Returns when a graceful close of an
 /// isolated connection must be done by: at once when nothing was spliced.
+///
+/// However this ends, short of a successful shutdown of `to_peer`, the peer's stream is aborted: a failed
+/// reply, a failed splice toward the peer, a drain cut at its deadline, and this future dropped by `Stop`
+/// or a panic. A client gone while it splices does not drop this future: what it wrote drains, a drain
+/// that finishes in time ends cleanly, and only one still running at the deadline is aborted.
 async fn attach<R, W, PR, PW>(
     from_client: R,
     mut to_client: W,
     from_peer: PR,
-    to_peer: PW,
+    to_peer: &mut PW,
     info: bifrost::ConnInfo,
     gone: &ClientGone,
 ) -> Instant
@@ -344,8 +349,10 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     PR: AsyncRead + Unpin,
-    PW: AsyncWrite + Unpin,
+    PW: AsyncWrite + WriteEnd + Unpin,
 {
+    // Armed before anything can return, so no early exit leaves the peer a clean end.
+    let to_peer = ToPeer::arm(to_peer);
     let reply = Response::Attached(info);
     if !matches!(
         tokio::time::timeout(REPLY_TIMEOUT, reply.write(&mut to_client)).await,
@@ -399,11 +406,6 @@ where
     PR: AsyncRead + Unpin,
     PW: AsyncWrite + Unpin,
 {
-    // ABORT GUARD, not yet built: every early end below (the drain's deadline, the failed direction,
-    // the Open dropped by `Stop` or a panic) drops the send half toward the peer, which ends the peer's
-    // stream cleanly, so a cut-off reads to the peer as a finished stream. `to_peer` is to be wrapped
-    // here so that a drop without its shutdown resets the stream, once the transport's write half can
-    // abort; the wrapper disarms after a successful `shutdown`, so a finished stream is never reset.
     // Done when the client stops writing.
     let mut up = pin!(async {
         io::copy_buf(&mut from_client, &mut to_peer).await?;
@@ -449,6 +451,68 @@ where
     drained_by
 }
 
+/// The send half toward the peer for the life of an attached Open. Dropped before a successful shutdown,
+/// it aborts the stream, so the peer reads `ConnectionReset` where a transport's write half dropped as it
+/// is would end the stream cleanly: at the drain deadline, after a failed reply or copy toward the peer,
+/// and when `Stop` or a panic drops the Open. A successful shutdown disarms it, so a finished stream is never reset.
+///
+/// It does not tell a finished upload from a cut-off one. A client that dies mid-upload closes its socket
+/// as one that finished does, so its end reads as end of file, the shutdown succeeds and the peer sees a
+/// clean end. Telling those apart needs the client to say it finished, an explicit end on the Open wire,
+/// which this guard cannot stand in for.
+///
+/// It borrows the half, so the Open keeps it afterwards to wait on its delivery.
+struct ToPeer<'h, W: WriteEnd> {
+    half: &'h mut W,
+    finished: bool,
+}
+
+impl<'h, W: WriteEnd> ToPeer<'h, W> {
+    fn arm(half: &'h mut W) -> Self {
+        Self {
+            half,
+            finished: false,
+        }
+    }
+}
+
+impl<W: AsyncWrite + WriteEnd + Unpin> AsyncWrite for ToPeer<'_, W> {
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> core::task::Poll<io::Result<usize>> {
+        core::pin::Pin::new(&mut *self.get_mut().half).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<io::Result<()>> {
+        core::pin::Pin::new(&mut *self.get_mut().half).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let shut = core::pin::Pin::new(&mut *this.half).poll_shutdown(cx);
+        if matches!(shut, core::task::Poll::Ready(Ok(()))) {
+            this.finished = true;
+        }
+        shut
+    }
+}
+
+impl<W: WriteEnd> Drop for ToPeer<'_, W> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.half.abort();
+        }
+    }
+}
+
 /// The refusal a failed open carries on the wire. The text is fixed here: a transport's own words can
 /// name addresses, so they stay in the run's log.
 fn failed(error: &OpenError) -> OpenRefusal {
@@ -472,7 +536,7 @@ const BROKEN: &str = "the connection to the machine failed while opening the str
 
 /// The Error an Open gets when this machine's home or badge cannot be read. It names no path and no
 /// cause; those stay in the run's log.
-const UNREADABLE_HOME: &str = "this machine's standing could not be read";
+const UNREADABLE_HOME: &str = "this machine's home or badge could not be read";
 
 /// Watches a control connection for its client closing the socket in both directions.
 ///

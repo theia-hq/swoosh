@@ -643,20 +643,36 @@ impl Dial for Answering {
 /// reads the `ConnectionReset` a real transport gives: a whole in-memory pipe reads a clean end, and a
 /// split `WriteHalf` ends nothing, since its read half still holds the pipe. A test that pins how an abort
 /// reads at the peer needs a real transport, not this.
-pub struct TestWrite<W>(Option<W>);
+pub struct TestWrite<W> {
+    writer: Option<W>,
+    /// Fired by the far end once it has read the stream to its end, when the double has one to ask.
+    read_to_end: Option<tokio::sync::oneshot::Receiver<()>>,
+}
 
 impl<W> From<W> for TestWrite<W> {
     fn from(writer: W) -> Self {
-        Self(Some(writer))
+        Self {
+            writer: Some(writer),
+            read_to_end: None,
+        }
     }
 }
 
 impl<W> TestWrite<W> {
+    /// `writer`, whose delivery is confirmed when the far end fires `read_to_end`, as a transport's is
+    /// once the peer holds every byte and the end.
+    pub fn read_by(writer: W, read_to_end: tokio::sync::oneshot::Receiver<()>) -> Self {
+        Self {
+            writer: Some(writer),
+            read_to_end: Some(read_to_end),
+        }
+    }
+
     /// The live writer, or the `BrokenPipe` an aborted half answers every call with.
     // `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
     #[allow(clippy::std_instead_of_core)]
     fn live(&mut self) -> std::io::Result<&mut W> {
-        self.0
+        self.writer
             .as_mut()
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
     }
@@ -697,15 +713,32 @@ impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TestWrite<W> {
 
 impl<W> bifrost::WriteEnd for TestWrite<W> {
     fn abort(&mut self) {
-        self.0 = None;
+        self.writer = None;
     }
 
-    /// Always `Unsupported`: a plain writer has no peer to ask whether it holds the bytes, and no test
-    /// here waits on delivery. A test that does needs a real transport.
+    /// `ConnectionReset` after an abort. Otherwise the writer is dropped, which ends the stream, and the
+    /// answer is the far end's: `Ok` once it has read to the end, `BrokenPipe` if it went first, pending
+    /// while it reads on or holds the stream. A plain writer, with no far end to ask, is `Unsupported`.
     // `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
     #[allow(clippy::std_instead_of_core)]
     fn delivered(self) -> impl Future<Output = std::io::Result<()>> + Send + 'static {
-        core::future::ready(Err(std::io::Error::from(std::io::ErrorKind::Unsupported)))
+        let Self {
+            writer,
+            read_to_end,
+        } = self;
+        let aborted = writer.is_none();
+        drop(writer);
+        async move {
+            if aborted {
+                return Err(std::io::ErrorKind::ConnectionReset.into());
+            }
+            match read_to_end {
+                Some(read_to_end) => read_to_end
+                    .await
+                    .map_err(|_| std::io::ErrorKind::BrokenPipe.into()),
+                None => Err(std::io::ErrorKind::Unsupported.into()),
+            }
+        }
     }
 }
 
@@ -892,12 +925,13 @@ impl ScriptedPeer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Read `from` to its end, keeping what it reads; with `closes`, only while no session has closed
-    /// since that count.
+    /// Read `from` to its end, keeping what it reads, and fire `read_to_end` there; with `closes`, only
+    /// while no session has closed since that count, since a closed session's stream reaches no end.
     async fn keep_reading(
         &self,
         from: &mut tokio::io::DuplexStream,
         closes: Option<u32>,
+        read_to_end: tokio::sync::oneshot::Sender<()>,
     ) -> std::io::Result<()> {
         use tokio::io::AsyncReadExt as _;
 
@@ -905,6 +939,9 @@ impl ScriptedPeer {
         loop {
             let read = from.read(&mut chunk).await?;
             if read == 0 {
+                if closes.is_none_or(|closes| self.lock().closes == closes) {
+                    let _ = read_to_end.send(());
+                }
                 return Ok(());
             }
             let mut state = self.lock();
@@ -928,12 +965,15 @@ impl ScriptedPeer {
         bytes
     }
 
-    /// The gate's side of one stream: read the request, record it, then answer as `script` says.
+    /// The gate's side of one stream: read the request, record it, then answer as `script` says. It
+    /// holds `read_to_end` for as long as it holds the stream, and fires it only once it has read the
+    /// stream to its end, so the opener's delivery waits on that and fails once the gate lets go.
     async fn gate(
         self,
         script: Script,
         mut from: tokio::io::DuplexStream,
         mut to: tokio::io::DuplexStream,
+        read_to_end: tokio::sync::oneshot::Sender<()>,
     ) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt as _;
 
@@ -971,7 +1011,7 @@ impl ScriptedPeer {
             }
             Script::Reads => {
                 tightbeam::protocol::Response::Ok.write(&mut to).await?;
-                self.keep_reading(&mut from, None).await?;
+                self.keep_reading(&mut from, None, read_to_end).await?;
                 to.shutdown().await
             }
             Script::EndsThenReads(pause) => {
@@ -979,7 +1019,8 @@ impl ScriptedPeer {
                 tightbeam::protocol::Response::Ok.write(&mut to).await?;
                 to.shutdown().await?;
                 tokio::time::sleep(pause).await;
-                self.keep_reading(&mut from, Some(closes)).await
+                self.keep_reading(&mut from, Some(closes), read_to_end)
+                    .await
             }
         }
     }
@@ -1028,13 +1069,14 @@ impl bifrost::Session for ScriptedPeer {
             .unwrap_or(Script::Refuse(bifrost::Refusal::NotAdmitted));
         let (write, from) = tokio::io::duplex(64 * 1024);
         let (to, read) = tokio::io::duplex(64 * 1024);
+        let (read_to_end, delivered) = tokio::sync::oneshot::channel();
         let gate = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = gate.gate(script, from, to).await {
+            if let Err(error) = gate.gate(script, from, to, read_to_end).await {
                 tracing::debug!(%error, "the scripted gate's stream ended");
             }
         });
-        Ok((write.into(), read))
+        Ok((TestWrite::read_by(write, delivered), read))
     }
 
     async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
