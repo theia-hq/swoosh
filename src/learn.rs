@@ -325,7 +325,6 @@ pub struct Watched<S> {
 }
 
 impl<S: Session + 'static> Session for Watched<S> {
-    type Security = S::Security;
     type Write = S::Write;
     type Read = S::Read;
 

@@ -328,7 +328,7 @@ done
 LAYERS='
 lib nauthy    | nauthy       |
 lib quirk     | quirk        |
-lib bifrost   | bifrost      | quirk
+lib bifrost   | bifrost      |
 lib tightbeam | tightbeam    | bifrost nauthy
 lib services  | sshh         | bifrost nauthy tightbeam
 app swoosh    | swoosh sheer | bifrost nauthy services tightbeam

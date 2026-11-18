@@ -69,7 +69,7 @@ async fn proof() {
             .unwrap()
             .expose()
             .expect("`--public speed` builds: speed is openable, control.stop stays gated");
-        exposer.run(&host, CancellationToken::new()).await.unwrap();
+        exposer.run(&host, CancellationToken::new()).await;
     });
 
     // A STRANGER: a fresh node presenting NO capability. Over the opened `speed` service the gate admits it,

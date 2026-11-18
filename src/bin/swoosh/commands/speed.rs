@@ -44,7 +44,7 @@ pub struct SpeedCmd {
     /// Measure the download direction (this node receives).
     #[arg(long)]
     pub down: bool,
-    /// Measure upload and download at once, full-duplex on one stream. Works over quirk too.
+    /// Measure upload and download at once, full-duplex on one stream.
     #[arg(long)]
     pub bidir: bool,
     /// How long to run, in seconds (5 unless -n is given)
@@ -159,7 +159,7 @@ impl SpeedCmd {
         let label = machine.label();
         println!(
             "speed test to {label} via {} ({})",
-            bound.transport.name(),
+            transport::FAST_PATH,
             mode.label()
         );
 

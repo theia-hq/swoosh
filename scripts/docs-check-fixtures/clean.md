@@ -19,7 +19,7 @@ A live-run annotation:
 
 <!-- live-run: iroh rtt varies by path -->
 ```console
-$ swoosh ping ed01hcq6… --transport iroh
+$ swoosh ping ed01hcq6…
 rtt 24 ms
 ```
 
@@ -27,7 +27,7 @@ A pending annotation:
 
 <!-- pending live-run: needs n0 discovery reachable -->
 ```console
-$ swoosh ping ed01hcq6… --transport iroh
+$ swoosh ping ed01hcq6…
 rtt 24 ms
 ```
 

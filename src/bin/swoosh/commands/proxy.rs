@@ -238,9 +238,6 @@ impl ProxyCmd {
             method, headers, ..
         } = parsed;
 
-        // The open's `Connector` writes the request through the checked writer: a credential-bearing
-        // request refuses, before any byte, when the transport's declared profile does not prove the
-        // peer, and that refusal surfaces here as the local 502 cause.
         let (mut writer, mut reader) = match exit.open(&self.service).await {
             Ok(halves) => halves,
             Err(OpenError::Open(bifrost::Error::Refused(refusal))) => {

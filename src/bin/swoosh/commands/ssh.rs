@@ -33,8 +33,8 @@
 //! in advance: there is nothing to pre-seed. The host-key check here is therefore not the primary auth:
 //! the OVERLAY already authenticated the peer end to end (raw-public-key TLS to the exact node id, an
 //! in-process pipe with no seam a MITM could enter), so ssh's own check is self-consistency bookkeeping
-//! on top of that. This launcher binds only the authenticated default transport (it exposes no
-//! `--transport`), so "first use" always rides the authenticated tunnel.
+//! on top of that. This launcher binds only the authenticated transport, so "first use" always rides the
+//! authenticated tunnel.
 //!
 //! So rather than pollute the user's global `~/.ssh/known_hosts` and prompt an interactive TOFU keyed on a
 //! mutable petname, `swoosh ssh` keeps its OWN known_hosts (`<home>/known_hosts`, read off the resolved

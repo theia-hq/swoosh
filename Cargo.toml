@@ -30,23 +30,21 @@ test-support = []
 # locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
 # live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
 # gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "ba2ce7e94767ee4820dc09d7d1447846cf0247a8" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "ba2ce7e94767ee4820dc09d7d1447846cf0247a8" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "ba2ce7e94767ee4820dc09d7d1447846cf0247a8" }
-bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "ba2ce7e94767ee4820dc09d7d1447846cf0247a8" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "ba2ce7e94767ee4820dc09d7d1447846cf0247a8" }
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "92b9f717bb9b103e6971afe0b703e9d7fe2227c1" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "92b9f717bb9b103e6971afe0b703e9d7fe2227c1" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "92b9f717bb9b103e6971afe0b703e9d7fe2227c1" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "3fe2550a7dc4df3ad8c36d9c5f11cd81c901e2af" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "c4e5fe2bba68a2a3c445f8e766b58f7ca3af4422" }
 # The key file store, in its own repo, pinned to the commit that names its key kinds standard and strict
 # and lets a dependent build each touch-id error in its own tests.
 keystore = { git = "https://github.com/theia-hq/keystore", rev = "301c6535c344c21b4ef6694a55c6b9c628663cbb" }
-measure = { git = "https://github.com/theia-hq/services", rev = "3fe2550a7dc4df3ad8c36d9c5f11cd81c901e2af" }
+measure = { git = "https://github.com/theia-hq/services", rev = "c4e5fe2bba68a2a3c445f8e766b58f7ca3af4422" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "cb9e83728ac36ca43c73584f044c7347b5d01895" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "3fe2550a7dc4df3ad8c36d9c5f11cd81c901e2af", optional = true }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "0e7df318725c44502fa0184bcddbb0691628dfeb" }
-transfer = { git = "https://github.com/theia-hq/services", rev = "3fe2550a7dc4df3ad8c36d9c5f11cd81c901e2af" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "c4e5fe2bba68a2a3c445f8e766b58f7ca3af4422", optional = true }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "951dcb4405928e21550d31df79fab4725f94b3a4" }
+transfer = { git = "https://github.com/theia-hq/services", rev = "c4e5fe2bba68a2a3c445f8e766b58f7ca3af4422" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
@@ -78,7 +76,7 @@ swoosh = { path = ".", features = ["test-support"] }
 
 # The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "ba2ce7e94767ee4820dc09d7d1447846cf0247a8" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "92b9f717bb9b103e6971afe0b703e9d7fe2227c1" }
 
 noq = { version = "1.3", default-features = false, features = ["rustls"] }
 rustls = { version = "0.23", default-features = false }

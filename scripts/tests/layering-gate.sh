@@ -24,7 +24,7 @@ fail=0
 expected_above() {
   case "$1" in
     1) echo "4 5 6 7" ;;
-    2) echo "3 4 5 6 7" ;;
+    2) echo "" ;;
     3) echo "4 5 6 7" ;;
     4) echo "5 6 7" ;;
     5) echo "6 7" ;;

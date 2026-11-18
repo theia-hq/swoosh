@@ -95,7 +95,6 @@ async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
         .machine(&contacts)
         .unwrap();
     let bound = swoosh::transport::Bound {
-        transport: swoosh::transport::Transport::Iroh,
         local: false,
         reach: swoosh::transport::Reach::default(),
     };

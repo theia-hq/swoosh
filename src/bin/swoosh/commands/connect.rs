@@ -124,16 +124,14 @@ pub async fn connect<T: Transport, D: Discovery>(
 /// Open one stream on `session` and ask the host for the service: the admitted halves, or the host's
 /// refusal.
 ///
-/// Every failure comes back as its own error, unwrapped, so a printed line names what failed (`early eof`,
-/// the transport that does not prove the peer) and reads the same on both sinks.
+/// Every failure comes back as its own error, unwrapped, so a printed line names what failed (`early eof`)
+/// and reads the same on both sinks.
 async fn admitted<S: Session>(
     session: &S,
     request: &Request,
 ) -> eyre::Result<Result<(S::Write, S::Read), Refusal>> {
     let (mut writer, mut reader) = session.open_bi().await?;
-    // The checked writer: a request presenting a credential refuses here, before any byte, when the
-    // session's declared profile does not prove the peer.
-    request.write_checked::<S, _>(&mut writer).await?;
+    request.write(&mut writer).await?;
     Ok(match Response::read(&mut reader).await? {
         Response::Ok => Ok((writer, reader)),
         Response::Refused(refusal) => Err(refusal),

@@ -54,7 +54,6 @@ fn swoosh_with(scratch: &Scratch, args: &[&str], env: &[(&str, &str)]) -> Output
     command.arg("--home").arg(&scratch.home).args(args);
     for variable in [
         "SWOOSH_HOME",
-        "SWOOSH_TRANSPORT",
         "SWOOSH_LOCAL",
         "SWOOSH_PEER",
         "SWOOSH_RELAY",
@@ -393,7 +392,7 @@ fn an_unanswered_dial_teaches_no_service() {
 }
 
 /// The hidden reach flags are read from their variables, and a refusal about one names both spellings:
-/// `SWOOSH_TRANSPORT` and `SWOOSH_RELAY` together, `SWOOSH_LOCAL` and `SWOOSH_RESOLVER` together, exit 2.
+/// `SWOOSH_LOCAL` with `SWOOSH_RELAY`, then with `SWOOSH_RESOLVER`, exit 2.
 #[test]
 fn hidden_reach_flags_are_read_from_their_variables() {
     let scratch = Scratch::new("variables");
@@ -402,14 +401,15 @@ fn hidden_reach_flags_are_read_from_their_variables() {
         &scratch,
         &["ping", &target],
         &[
-            ("SWOOSH_TRANSPORT", "quirk"),
+            ("SWOOSH_LOCAL", "1"),
             ("SWOOSH_RELAY", "https://relay.example"),
         ],
     );
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr).starts_with(
-            "error: --relay or SWOOSH_RELAY has no effect over quirk\n  quirk uses no relay.\n"
+            "error: --relay or SWOOSH_RELAY has no effect with --local or SWOOSH_LOCAL\n  swoosh uses \
+             no relay when it runs on this network only.\n"
         ),
         "{}",
         text(&out.stderr)

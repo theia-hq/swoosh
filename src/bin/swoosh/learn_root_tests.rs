@@ -7,17 +7,16 @@
 //!
 //! Over `mem` a machine's key is the transport's own, so each home here saves the machine under the key the
 //! transport gave it, and its standing is bound to that key. The question rides the verb's own session, so
-//! the machine accepts one session per dial: over `quirk`, which holds one connection per address pair, a
-//! second one would cut the verb's.
+//! the machine accepts one session per dial: over an endpoint that holds one connection per peer, a second
+//! one would cut the verb's.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use bifrost::{Addr, Discovery, InProcess, NoDiscovery, Node, NodeId, StaticDiscovery, Transport};
+use bifrost::{Addr, Discovery, NoDiscovery, Node, NodeId, Transport};
 use bifrost_mem::{MemSession, MemTransport};
-use bifrost_noise::Noise;
 use clap::Parser as _;
 use keystore::{KeyFile, Protection};
 use nauthy::{Denylist, Link};
@@ -92,7 +91,6 @@ struct Counted {
 }
 
 impl Transport for Counted {
-    type Security = InProcess;
     type Session = MemSession;
 
     fn node_id(&self) -> NodeId {
@@ -138,15 +136,6 @@ fn counted() -> (Node<Counted, NoDiscovery>, Arc<AtomicU32>) {
         accepted: Arc::clone(&accepted),
     };
     (Node::new(transport, NoDiscovery), accepted)
-}
-
-/// A `quirk+noise` endpoint on loopback under `seed`'s key.
-async fn quirk_noise(seed: u8) -> Noise<bifrost_quirk::Endpoint> {
-    let seed = TestNode::seeded(seed).seed();
-    let endpoint = bifrost_quirk::Endpoint::bind_with_secret(&seed)
-        .await
-        .unwrap();
-    Noise::new(endpoint, &seed).unwrap()
 }
 
 /// A machine serving `ping` to anyone and the stand-in root route over `mem`, under alice's root, until
@@ -197,8 +186,7 @@ fn machine_on<T: Transport + 'static, D: Discovery + 'static>(
             .expose()
             .unwrap()
             .run(&host, cancel)
-            .await
-            .unwrap();
+            .await;
     });
     (key, asked)
 }
@@ -299,7 +287,6 @@ where
         .machine(&contacts)
         .unwrap();
     let bound = swoosh::transport::Bound {
-        transport: swoosh::transport::Transport::Iroh,
         local: false,
         reach: swoosh::transport::Reach::default(),
     };
@@ -389,29 +376,6 @@ fn a_dial_of_a_saved_machine_asks_its_root_once() {
         assert_eq!(asked.load(Ordering::SeqCst), 2, "asked on every dial");
         assert_eq!(accepted.load(Ordering::SeqCst), 2, "one session per dial");
         assert_eq!(again.told, "", "said once per new root");
-        cancel.cancel();
-    });
-}
-
-/// Over `quirk+noise`, whose endpoint holds one connection per address pair, the question rides the ping's
-/// own session: the ping is answered and the machine is asked once. A question on a connection of its own
-/// would replace the ping's, and the ping would fail.
-#[test]
-fn a_dial_over_quirk_asks_its_root_on_the_verb_s_own_session() {
-    on_a_big_stack(|| async {
-        let cancel = CancellationToken::new();
-        let host = Node::new(quirk_noise(0x84).await, NoDiscovery);
-        let hints = host.local_addr().hints;
-        let (key, asked) = machine_on(host, Answers::Standing, cancel.clone());
-        let home = desk("quirk");
-        alice_laptop(&home, key).await;
-        let mut discovery = StaticDiscovery::new();
-        discovery.insert(key, hints);
-        let node = Node::new(quirk_noise(DESK).await, discovery);
-        let pinged = ping_on(&node, &home, "alice/laptop").await;
-        node.close().await;
-        assert_eq!(asked.load(Ordering::SeqCst), 1, "one question");
-        assert!(pinged.told.contains("root:"), "{}", pinged.told);
         cancel.cancel();
     });
 }

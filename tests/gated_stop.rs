@@ -72,11 +72,10 @@ async fn a_for_deadline_stops_the_exposer_by_itself() {
             });
 
             let run = tokio::task::spawn_local(async move { exposer.run(&node, cancel).await });
-            let ended = tokio::time::timeout(Duration::from_secs(5), run)
+            tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("a --for deadline must stop the exposer promptly, not run forever")
                 .expect("the run task joins");
-            assert!(ended.is_ok(), "a --for stop returns Ok(()): {ended:?}");
         })
         .await;
 }
@@ -122,16 +121,14 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
             // The member closes its side, as the client does: the node stops once it sees that end.
             writer.shutdown().await.expect("the member closes its side");
 
-            // The stop cancelled the exposer's token, so its run returns gracefully. This `Ok` is EXACTLY
-            // what `serve` classifies as a graceful, exit-0 stop: its run maps an exposer `Ok` (the token
-            // fired) to `Stopped::Requested` and exits 0, so a deliberate `swoosh stop` (a CI teardown)
-            // reads as SUCCESS, not a crash. An `Err` here would instead propagate and exit non-zero; a
-            // `control.stop` never produces one.
-            let ended = tokio::time::timeout(Duration::from_secs(5), run)
+            // The stop cancelled the exposer's token, so its run returns. That return is EXACTLY what
+            // `serve` classifies as a graceful, exit-0 stop: its run maps an exposer that returned (the
+            // token fired) to `Stopped::Requested` and exits 0, so a deliberate `swoosh stop` (a CI
+            // teardown) reads as SUCCESS, not a crash.
+            tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("an admitted control.stop must stop the node, not leave it running")
                 .expect("the run task joins");
-            ended.expect("a stopped node returns Ok(()), the exit-0 graceful stop");
             let stopped = Stopped::Requested;
             assert!(
                 stopped.message().contains("gracefully"),
@@ -284,8 +281,7 @@ async fn a_stranger_is_refused_at_control_stop_and_the_node_keeps_running() {
             tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("the node stops on our own cancel")
-                .expect("the run task joins")
-                .expect("graceful stop");
+                .expect("the run task joins");
         })
         .await;
 }
@@ -357,8 +353,7 @@ async fn a_remote_stop_waits_for_the_first_round() {
             tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("the stop ends the run")
-                .expect("the run task joins")
-                .expect("a graceful stop");
+                .expect("the run task joins");
             assert_eq!(
                 source.first(),
                 Some(StopKind::Wire(member.node_id().verify_key().unwrap()))
@@ -423,8 +418,7 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
             tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("the node stops on our own cancel")
-                .expect("the run task joins")
-                .expect("graceful stop");
+                .expect("the run task joins");
         })
         .await;
 }
@@ -558,15 +552,14 @@ async fn stopped_over_the_wire(request: &[u8]) -> (NodeId, Option<StopKind>) {
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("the stop ends the run")
-        .expect("the run task joins")
-        .expect("a graceful stop");
+        .expect("the run task joins");
     (member_id, source.first())
 }
 
 /// A node a member has asked to stop, past the ack: its run, how it notes the stop, the member's key, and
 /// the member's side of the stream, still open.
 struct Stopping {
-    run: tokio::task::JoinHandle<eyre::Result<()>>,
+    run: tokio::task::JoinHandle<()>,
     source: Arc<StopSource>,
     /// The node's teardown token, the one the handler cancels.
     cancel: CancellationToken,
@@ -590,8 +583,7 @@ impl Stopping {
         tokio::time::timeout(ACK_GRACE * 2, self.run)
             .await
             .expect("the stop ends the run within the bound")
-            .expect("the run task joins")
-            .expect("a graceful stop");
+            .expect("the run task joins");
     }
 }
 

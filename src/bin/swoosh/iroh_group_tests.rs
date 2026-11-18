@@ -187,9 +187,8 @@ async fn exchange(
     let (served, pinged) = tokio::join!(server, client);
     let served = served.expect("serving must finish within its deadline");
     let pinged = pinged.expect("the ping must finish within its deadline");
-    let served = served.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    served.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let pinged = pinged.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-    served?;
     pinged?;
     assert!(connected.get() > 0, "the service's dial must be observed");
     assert!(accepted.get() > 0, "the service's accept must be observed");
@@ -241,7 +240,6 @@ impl ObservedIroh<'_> {
 }
 
 impl bifrost::Transport for ObservedIroh<'_> {
-    type Security = <Endpoint as bifrost::Transport>::Security;
     type Session = IrohSession;
 
     fn node_id(&self) -> NodeId {

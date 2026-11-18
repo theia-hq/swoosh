@@ -180,8 +180,8 @@ pub struct ServeCmd {
     /// The relay and the resolver this bind actually leaned on, attached by the composition root after
     /// it composed them from the flags and the home files. Not a flag: clap skips it, and the root fills
     /// it in via [`with_bound_reach`](Self::with_bound_reach) alongside [`mdns`](Self::mdns). The
-    /// default is n0's on both halves, which is what every bind that has no relay or resolver of its own
-    /// (quirk, `--local`) leans on, so an un-attached value still tells the banner the truth.
+    /// default is n0's on both halves, which is what a bind that has no relay or resolver of its own
+    /// (`--local`) leans on, so an un-attached value still tells the banner the truth.
     // Boxed for the same reason [`expose`](Self::expose) is: each named half holds a parsed URL, which is
     // large by value, and `Serve(ServeCmd)` is a variant of the clap command enums, so inline this one
     // pair would make that variant tower over the rest (`clippy::large_enum_variant`). A root-attached,
@@ -490,7 +490,6 @@ impl ServeCmd {
             || !reach.peer.is_empty()
             || reach.relay.is_some()
             || reach.resolver.is_some()
-            || reach.transport != swoosh::transport::Transport::default()
     }
 
     /// The first file read supplies saved/default services for a bare start, plus relay and resolver
@@ -673,12 +672,6 @@ impl ServeCmd {
         // this machine was down cannot stop it again before it learns of the revocation.
         let (exposer, first_round) = FirstRound::hold(router.expose()?, enabled.clone());
         let exposer = exposer.with_live_cuts(cut);
-        // Prove the transport can carry this gate BEFORE recording or announcing anything.
-        exposer
-            .prove_security::<T>()
-            .wrap_err(
-                "bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`",
-            )?;
 
         let home_lock = HomeWrite::take(&home).await?;
         ServeToml::update(&home_lock, &home, |file| {
@@ -712,7 +705,7 @@ impl ServeCmd {
             let transport = match (self.verbose, self.mdns.as_ref()) {
                 (false, _) => None,
                 (true, Some(mdns)) => Some(reach_section(
-                    ReachKind::of(self.reach.transport, self.reach.local),
+                    ReachKind::of(self.reach.local),
                     mdns,
                     &self.bound_reach,
                     &dialable,
@@ -845,8 +838,7 @@ where
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .wrap_err("could not watch for SIGTERM")?;
     let stopped = tokio::select! {
-        result = exposer.run(node, cancel.clone()) => {
-            result?;
+        () = exposer.run(node, cancel.clone()) => {
             lock.release();
             classify_stop(source.first())
         }
@@ -1188,33 +1180,29 @@ async fn sync_round(
     replies.len() + again.len()
 }
 
-/// How peers reach this node, for the banner's `how peers reach you` section: whether the bound transport
-/// routes across the internet (an `internet` channel) or is local/direct-only. Read off the SELECTED
-/// transport and bind mode at the composition seam, never inferred from whether hints are present (that
-/// would conflate the channel with the hint state). An enum, not a bool, so a
+/// How peers reach this node, for the banner's `how peers reach you` section: whether the bind routes
+/// across the internet (an `internet` channel) or is local/direct-only. Read off the SELECTED bind mode
+/// at the composition seam, never inferred from whether hints are present (that would conflate the
+/// channel with the hint state). An enum, not a bool, so a
 /// third reach kind forces a decision here rather than defaulting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReachKind {
-    /// The transport routes across the internet and NATs (iroh, not `--local`): a peer reaches this node
-    /// by the key alone.
+    /// The bind routes across the internet and NATs (not `--local`): a peer reaches this node by the key
+    /// alone.
     Internet,
-    /// The bind is local/direct-only (quirk, bare or sealed, or an iroh `--local` bind): a peer reaches
-    /// this node over local mDNS, or by a handed-over address.
+    /// The bind is local/direct-only (`--local`): a peer reaches this node over local mDNS, or by a
+    /// handed-over address.
     DirectOnly,
 }
 
 impl ReachKind {
-    /// Map the selected transport and bind mode to its reach kind. The one place the transport identity
-    /// becomes a reach tell for the banner; every other surface stays transport-blind. `--local` drops the
-    /// internet channel: the minimal bind has no n0 lookup and no relays, so its story is the same as
-    /// quirk's.
-    fn of(transport: swoosh::transport::Transport, local: bool) -> Self {
-        match transport {
-            swoosh::transport::Transport::Iroh if local => Self::DirectOnly,
-            swoosh::transport::Transport::Iroh => Self::Internet,
-            swoosh::transport::Transport::Quirk | swoosh::transport::Transport::QuirkNoise => {
-                Self::DirectOnly
-            }
+    /// Map the selected bind mode to its reach kind. The one place the bind becomes a reach tell for the
+    /// banner. `--local` drops the internet channel: the minimal bind has no n0 lookup and no relays.
+    fn of(local: bool) -> Self {
+        if local {
+            Self::DirectOnly
+        } else {
+            Self::Internet
         }
     }
 }
@@ -1400,7 +1388,7 @@ fn direct_lane(dialable: &Dialable, width: usize, gutter: usize) -> String {
     }
     // The two ephemeral binds an unnamed dual-stack bind gets are two ports, and the operator has to
     // take the one that came with the address they picked. Measured over the RENDERED rows, so a
-    // v4-only host, quirk, and any same-port bind render byte-identically to a lane with no clause.
+    // v4-only host and any same-port bind render byte-identically to a lane with no clause.
     let mixed_ports = chosen
         .windows(2)
         .any(|pair| pair[0].socket.port() != pair[1].socket.port());

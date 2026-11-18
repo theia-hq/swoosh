@@ -65,8 +65,7 @@ fn metavars_are_the_concept_words() {
 }
 
 /// Each hidden flag, the verbs that carry it, and the variable that sets it (`None`: it has none).
-const HIDDEN: [(&str, Option<&str>); 7] = [
-    ("transport", Some("SWOOSH_TRANSPORT")),
+const HIDDEN: [(&str, Option<&str>); 6] = [
     ("local", Some("SWOOSH_LOCAL")),
     ("peer", Some("SWOOSH_PEER")),
     ("relay", Some("SWOOSH_RELAY")),

@@ -15,6 +15,6 @@ Usage: swoosh ssh [OPTIONS] <machine> [-- <ssh args>...]
 flags through.
 
 **Things to know.** The built-in shell (`swoosh serve ssh`) needs no key setup; swoosh pins the peer on first
-connection. Point at an existing sshd (`serve ssh=tcp:127.0.0.1:22`) to use your normal ssh keys. `swoosh ssh` uses iroh only.
+connection. Point at an existing sshd (`serve ssh=tcp:127.0.0.1:22`) to use your normal ssh keys.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

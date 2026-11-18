@@ -20,4 +20,4 @@ start now.
 
 - [Keys](../keys.md) the model every page here leans on.
 - [Commands](../reference/commands.md) every verb and flag.
-- [Transports](../transports.md) iroh (default) and quirk+noise (proves the peer's key, direct-only).
+- [Transports](../transports.md) how swoosh reaches a machine over iroh.

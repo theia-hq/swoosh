@@ -886,8 +886,8 @@ fn the_lane_says_the_port_rides_the_address_only_when_the_ports_differ() {
         "the clause stays inside the 80-column bound: {skewed}"
     );
 
-    // The same three classes on one shared port: the clause must not fire, or quirk and every
-    // v4-only host pay for a skew they do not have.
+    // The same three classes on one shared port: the clause must not fire, or every v4-only host
+    // pays for a skew it does not have.
     let shared: Dialable = [
         at(LOOPBACK_AT, Scope::ThisMachine),
         at(
@@ -1201,7 +1201,7 @@ fn a_drop_every_class_survived_says_nothing() {
 /// Both lanes here expand IPv6, because that is the only kind of bind this caveat can reach. The
 /// flags are IPv6's own (only IPv6 has the temporary-address mechanism they report), so bifrost
 /// narrows the gap away on a bind that expands no v6 wildcard: a v4-only fixture would pin a render
-/// no bind can produce, and would have kept the false caveat quirk was carrying on every banner.
+/// no bind can produce.
 #[test]
 fn unreadable_flags_caveat_the_instruction_without_shortening_the_list() {
     let one = Dialable::short([at(LOOPBACK_V6_AT, Scope::ThisMachine)], Missing::Flags);
@@ -1615,29 +1615,15 @@ fn a_browse_only_node_says_it_is_not_announcing_and_names_the_cause() {
 
 /// A local/direct-only node never promises the internet, and no surface says LAN until the same-host
 /// mDNS advertisement defect lands: the mDNS lane is labelled `local` and glossed `local mDNS`. The
-/// mapping takes the bind mode too, so an iroh `--local` node renders as direct-only.
+/// mapping takes the bind mode, so a `--local` node renders as direct-only.
 #[test]
 fn a_local_bind_is_direct_only_and_never_says_lan() {
-    use swoosh::transport::Transport;
-
     assert_eq!(
-        ReachKind::of(Transport::Iroh, true),
+        ReachKind::of(true),
         ReachKind::DirectOnly,
-        "an iroh --local node has no internet channel"
+        "a --local node has no internet channel"
     );
-    assert_eq!(ReachKind::of(Transport::Iroh, false), ReachKind::Internet);
-    assert_eq!(
-        ReachKind::of(Transport::Quirk, false),
-        ReachKind::DirectOnly
-    );
-    assert_eq!(
-        ReachKind::of(Transport::QuirkNoise, false),
-        ReachKind::DirectOnly
-    );
-    assert_eq!(
-        ReachKind::of(Transport::QuirkNoise, true),
-        ReachKind::DirectOnly
-    );
+    assert_eq!(ReachKind::of(false), ReachKind::Internet);
 
     let section = reach_section(
         ReachKind::DirectOnly,
@@ -5080,8 +5066,7 @@ async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_after_the_first_
             tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("the stop ends the run")
-                .expect("the run task joins")
-                .expect("a graceful stop");
+                .expect("the run task joins");
             let _ = std::fs::remove_dir_all(home.dir());
         })
         .await;

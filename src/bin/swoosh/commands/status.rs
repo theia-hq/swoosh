@@ -14,8 +14,8 @@
 //! list; any other machine (a contact, a key, a link) is asked a measure ping, and `control.services` is
 //! never asked of it. The path is read AFTER the probe
 //! so iroh's hole-punch has the round trip to land: a session that connects relayed and upgrades reports
-//! the upgraded path, not the instant-of-connect one. Over quirk it says direct; over iroh it reports the
-//! current path, which can still be relayed if the upgrade has not completed by then.
+//! the upgraded path, not the instant-of-connect one. It reports the current path, which can still be
+//! relayed if the upgrade has not completed by then.
 //!
 //! A bare person (`alice`) reports their one saved machine, and several refuse before anything binds;
 //! `alice/macbook` reports that one. Listing the whole tailnet of active sessions (Tailscale's full
@@ -151,11 +151,11 @@ impl StatusCmd {
                 Ok((session, connector)) => {
                     let session = admitted.watch(session, connector);
                     match asked {
-                        Probe::Ping => probe(&session, &label, bound.transport).await,
-                        Probe::Services => probe_services(&session, &label, bound.transport).await,
+                        Probe::Ping => probe(&session, &label).await,
+                        Probe::Services => probe_services(&session, &label).await,
                     }
                 }
-                Err(_error) => Line::unreachable(&label, bound.transport.name()),
+                Err(_error) => Line::unreachable(&label, transport::FAST_PATH),
             };
         println!("{line}");
 
@@ -208,11 +208,7 @@ impl Probe {
 /// Ask one of your reached devices what it serves: the one `control.services` read gives the round trip
 /// (the request out, the list back, timed here) and the list, and the path is read after it, as
 /// [`probe`]'s is. The node's own dotted routes are left out of the list.
-async fn probe_services<S: Session>(
-    session: &S,
-    label: &str,
-    transport: transport::Transport,
-) -> Line {
+async fn probe_services<S: Session>(session: &S, label: &str) -> Line {
     let asked = tokio::time::Instant::now();
     let (writer, reader) = match session.open_bi().await {
         Ok(halves) => halves,
@@ -221,16 +217,16 @@ async fn probe_services<S: Session>(
                 bifrost::Refusal::NotAdmitted => Refused::NotAdmitted(Probe::Services),
                 other => Refused::Other(other.to_string()),
             };
-            return Line::refused(label.to_owned(), transport.name(), refused);
+            return Line::refused(label.to_owned(), transport::FAST_PATH, refused);
         }
-        Err(error) => return Line::failed(label.to_owned(), transport.name(), causes(&error)),
+        Err(error) => return Line::failed(label.to_owned(), transport::FAST_PATH, causes(&error)),
     };
     // The read sends nothing; dropping the write half lets the node's reply complete.
     drop(writer);
     let catalog = match reach::read_catalog(reader).await {
         Ok(catalog) => catalog,
         Err(error) => {
-            return Line::failed(label.to_owned(), transport.name(), format!("{error:#}"));
+            return Line::failed(label.to_owned(), transport::FAST_PATH, format!("{error:#}"));
         }
     };
     let rtt = asked.elapsed();
@@ -241,7 +237,7 @@ async fn probe_services<S: Session>(
         .collect();
     Line::reached(
         label.to_owned(),
-        transport.name(),
+        transport::FAST_PATH,
         session.conn_info(),
         Some(rtt),
     )
@@ -250,9 +246,9 @@ async fn probe_services<S: Session>(
 
 /// Probe one reached session for a live RTT and its path, and render its status line under `label` (the
 /// machine as the user named it, matching `ping`).
-async fn probe<S: Session>(session: &S, label: &str, transport: transport::Transport) -> Line {
-    // A single measure ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
-    // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
+async fn probe<S: Session>(session: &S, label: &str) -> Line {
+    // A single measure ping for a fresh, honest RTT. A session may carry no rtt estimator, so
+    // conn_info().rtt can be None; one probe measures the round trip the same way either way.
     let probed = Ping {
         count: 1,
         interval: Duration::ZERO,
@@ -274,9 +270,9 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
                 }
                 other => Refused::Other(other.to_string()),
             };
-            return Line::refused(label.to_owned(), transport.name(), refused);
+            return Line::refused(label.to_owned(), transport::FAST_PATH, refused);
         }
-        Err(error) => return Line::failed(label.to_owned(), transport.name(), causes(&error)),
+        Err(error) => return Line::failed(label.to_owned(), transport::FAST_PATH, causes(&error)),
     };
 
     // Read the path AFTER the probe, not before: the round trip gives iroh's hole-punch a moment to
@@ -288,12 +284,12 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
     // measurements, and the transport's own estimate is not a measurement of this probe. Falling back to
     // it here is the exact swallow the arm above refuses, one layer down, and it is the common case.
     if report.received() == 0 {
-        return Line::unanswered(label.to_owned(), transport.name(), report.sent());
+        return Line::unanswered(label.to_owned(), transport::FAST_PATH, report.sent());
     }
     // The probe answered, so its own round trip is the honest number; the transport's estimate stands in
     // only when a received sample carried no timing.
     let rtt = report.avg().or(info.rtt);
-    Line::reached(label.to_owned(), transport.name(), info, rtt)
+    Line::reached(label.to_owned(), transport::FAST_PATH, info, rtt)
 }
 
 /// A rendered status line for one device: reachable (path + RTT), unreachable, reached-but-refused, or
@@ -485,6 +481,7 @@ mod tests {
     use bifrost::{ConnInfo, NodeId, Path, PathChanges, Session};
     use clap::Parser as _;
     use swoosh::peer::Kind;
+    use swoosh::testkit::TestWrite;
     use swoosh::{reach, transport};
 
     use super::{Line, Probe, Refused, probe, probe_services};
@@ -513,8 +510,7 @@ mod tests {
     }
 
     impl Session for BrokenSession {
-        type Security = bifrost::InProcess;
-        type Write = tokio::io::DuplexStream;
+        type Write = TestWrite<tokio::io::DuplexStream>;
         type Read = tokio::io::DuplexStream;
 
         fn peer(&self) -> NodeId {
@@ -561,10 +557,9 @@ mod tests {
     }
 
     impl Session for SilentSession {
-        type Security = bifrost::InProcess;
         /// Swallows the request and the closing shutdown, so neither surfaces as a typed error and the
         /// run reaches the empty-report path this fixture exists to exercise.
-        type Write = tokio::io::Sink;
+        type Write = TestWrite<tokio::io::Sink>;
         /// End-of-stream on the first read: the reply never comes.
         type Read = tokio::io::Empty;
 
@@ -573,7 +568,7 @@ mod tests {
         }
 
         async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-            Ok((tokio::io::sink(), tokio::io::empty()))
+            Ok((tokio::io::sink().into(), tokio::io::empty()))
         }
 
         async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
@@ -605,7 +600,7 @@ mod tests {
     /// healthy line, with an address, for a peer that answered nothing.
     #[tokio::test]
     async fn a_probe_with_nothing_back_is_never_a_healthy_line() {
-        let line = probe(&SilentSession, "alice/nas", transport::Transport::Iroh).await;
+        let line = probe(&SilentSession, "alice/nas").await;
         let text = line.to_string();
 
         assert!(
@@ -637,7 +632,7 @@ mod tests {
     /// perfect status line for a peer that had just died.
     #[tokio::test]
     async fn a_probe_that_failed_after_the_dial_is_never_a_healthy_line() {
-        let line = probe(&BrokenSession, "alice/macbook", transport::Transport::Iroh).await;
+        let line = probe(&BrokenSession, "alice/macbook").await;
         let text = line.to_string();
 
         assert!(
@@ -671,7 +666,6 @@ mod tests {
     /// transport remedy line joins the message.
     fn bound() -> transport::Bound {
         transport::Bound {
-            transport: transport::Transport::Iroh,
             local: false,
             reach: transport::Reach::default(),
         }
@@ -720,8 +714,7 @@ mod tests {
     }
 
     impl Session for ServicesSession {
-        type Security = bifrost::InProcess;
-        type Write = tokio::io::Sink;
+        type Write = TestWrite<tokio::io::Sink>;
         /// The reply, written whole and its write end closed, so the read ends where the reply does.
         type Read = tokio::io::DuplexStream;
 
@@ -738,7 +731,7 @@ mod tests {
                     node.write_all(bytes)
                         .await
                         .map_err(|error| bifrost::Error::Stream(Box::new(error)))?;
-                    Ok((tokio::io::sink(), read))
+                    Ok((tokio::io::sink().into(), read))
                 }
                 Err(refusal) => Err(bifrost::Error::Refused(refusal.clone())),
             }
@@ -799,7 +792,6 @@ mod tests {
                 reply: Ok(catalog_of(&["web=echo:"])),
             },
             "me/nas",
-            transport::Transport::Iroh,
         )
         .await;
         assert_eq!(line.outcome(), reach::Outcome::Healthy);
@@ -819,7 +811,6 @@ mod tests {
                 reply: Ok(catalog_of(&["web=echo:"])),
             },
             "me/nas",
-            transport::Transport::Iroh,
         )
         .await
         .to_string();
@@ -831,7 +822,6 @@ mod tests {
                 reply: Ok(catalog_of(&[])),
             },
             "me/nas",
-            transport::Transport::Iroh,
         )
         .await
         .to_string();
@@ -877,7 +867,6 @@ mod tests {
         let peer = ScriptedPeer::new(key, [Script::Lists(vec!["web"])]);
         let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
         let bound = transport::Bound {
-            transport: transport::Transport::Iroh,
             local: false,
             reach: transport::Reach::default(),
         };
@@ -906,23 +895,13 @@ mod tests {
         let refused = |refusal: bifrost::Refusal| ServicesSession {
             reply: Err(refusal),
         };
-        let mine = probe_services(
-            &refused(bifrost::Refusal::NotAdmitted),
-            "me/nas",
-            transport::Transport::Iroh,
-        )
-        .await;
+        let mine = probe_services(&refused(bifrost::Refusal::NotAdmitted), "me/nas").await;
         assert_eq!(mine.outcome(), reach::Outcome::Refused);
         assert_eq!(
             mine.to_string(),
             "me/nas via iroh: reached, but nas does not count this machine as one of your devices"
         );
-        let theirs = probe(
-            &refused(bifrost::Refusal::NotAdmitted),
-            "bob/nas",
-            transport::Transport::Iroh,
-        )
-        .await;
+        let theirs = probe(&refused(bifrost::Refusal::NotAdmitted), "bob/nas").await;
         assert_eq!(
             theirs.to_string(),
             "bob/nas via iroh: reached, but it does not answer ping for you"
@@ -932,8 +911,8 @@ mod tests {
             detail: bifrost::RefusalDetail::bounded("busy"),
         };
         for line in [
-            probe_services(&refused(busy()), "me/nas", transport::Transport::Iroh).await,
-            probe(&refused(busy()), "bob/nas", transport::Transport::Iroh).await,
+            probe_services(&refused(busy()), "me/nas").await,
+            probe(&refused(busy()), "bob/nas").await,
         ] {
             let line = line.to_string();
             assert!(
@@ -969,7 +948,6 @@ mod tests {
                 }),
             },
             "alice/macbook",
-            transport::Transport::Iroh,
         )
         .await
         .to_string();

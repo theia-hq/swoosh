@@ -128,8 +128,7 @@ fn serve(home: Home, host: Node<MemTransport, NoDiscovery>) {
             .unwrap()
             .with_live_cuts(cut)
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
 }
 
@@ -347,26 +346,17 @@ async fn router(home: &Home) -> Router {
         .0
 }
 
-/// The route requires a key the transport proved: a node serving it refuses to arm over bare quirk, whose
-/// key is only announced, and the route cannot be opened to everyone.
+/// The route requires a key the transport proved, so it cannot be opened to everyone.
 #[tokio::test]
-async fn the_door_refuses_an_announced_peer() {
-    let nas = device_home("announced", NAS).await;
+async fn the_door_cannot_be_opened_to_everyone() {
+    let nas = device_home("public", NAS).await;
 
-    let exposer = router(&nas).await.expose().unwrap();
-    exposer
-        .prove_security::<bifrost_noise::Noise<bifrost_quirk::Endpoint>>()
-        .expect("a transport that proves the peer carries the route");
-    assert!(
-        exposer.prove_security::<bifrost_quirk::Endpoint>().is_err(),
-        "an announced key never reaches the route"
-    );
     assert!(
         router(&nas)
             .await
             .public([RENEWAL_SERVICE.parse().unwrap()])
             .expose()
             .is_err(),
-        "the route cannot be opened to peers the transport did not prove"
+        "a proven-only route cannot be opened to everyone"
     );
 }

@@ -92,8 +92,7 @@ fn bare_status_ignores_the_reach_variables_and_refuses_the_typed_flags() {
     let scratch = Scratch::new("reach");
     keyed(&scratch.home());
     let hint = format!("{}=127.0.0.1:9000", TestNode::seeded(0x22).node_id());
-    let set: [(&str, &str, &[&str]); 5] = [
-        ("SWOOSH_TRANSPORT", "quirk", &["--transport", "quirk"]),
+    let set: [(&str, &str, &[&str]); 4] = [
         ("SWOOSH_LOCAL", "1", &["--local"]),
         ("SWOOSH_PEER", &hint, &["--peer", &hint]),
         (

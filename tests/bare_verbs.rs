@@ -209,11 +209,9 @@ fn bare_stop_stops_the_resident() {
         "{}=127.0.0.1:9000",
         swoosh::identity::Secret::ephemeral().node_id()
     );
-    let reach_cases: [(&[&str], &str); 6] = [
-        (&["stop", "--transport", "quirk"], "--transport"),
+    let reach_cases: [(&[&str], &str); 4] = [
         (&["stop", "--local"], "--local"),
         (&["stop", "--peer", &hint], "--peer"),
-        (&["status", "--transport", "quirk"], "--transport"),
         (&["status", "--local"], "--local"),
         (&["status", "--peer", &hint], "--peer"),
     ];
@@ -239,7 +237,6 @@ fn bare_stop_stops_the_resident() {
         .arg("stop")
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
-        .env("SWOOSH_TRANSPORT", "quirk")
         .env("SWOOSH_LOCAL", "1")
         .env("SWOOSH_PEER", &hint)
         .env("SWOOSH_RELAY", "https://relay.example")

@@ -31,6 +31,8 @@ All notable changes to swoosh, newest first.
   A service the serve is refusing, such as one just removed, reads `refusing new connections`; `status` shows
   it as `(refusing new connections)` and names bound services that are not saved. `service on`, `off` and `rm`
   say `not saved here` where they said `not listed here`.
+- **The quirk and Noise transports and the `--transport` flag are gone.** swoosh reaches every machine over
+  iroh, with no selector. `SWOOSH_TRANSPORT` is gone too.
 - **Every command that dials takes one machine.** It can be `me/<name>`, `<person>/<name>`, a key, a `swoosh:`
   link, or a file holding a link. A bare name of one of your devices (`desk`) is refused, with the command to
   type instead (`swoosh ping me/desk`). A person alone (`alice`) works when one of their machines is saved,
@@ -38,8 +40,8 @@ All notable changes to swoosh, newest first.
   `ping`, `speed`, `status` and `proxy` no longer dial every machine of a person. A refused dial names the
   machine and the service (`error: me/nas refused ssh`); for one of your own devices it also says why, when
   it can tell, and what to run there.
-- **`--transport`, `--local`, `--peer`, `--relay` and `--resolver` are no longer listed in `--help`.** They
-  work as before, and each can now be set in the environment: `SWOOSH_TRANSPORT`, `SWOOSH_LOCAL`,
+- **`--local`, `--peer`, `--relay` and `--resolver` are no longer listed in `--help`.** They
+  work as before, and each can now be set in the environment: `SWOOSH_LOCAL`,
   `SWOOSH_PEER`, `SWOOSH_RELAY`, `SWOOSH_RESOLVER`. A flag beats its variable. `serve --quiet` (or
   `SWOOSH_QUIET`), and `--service` on `ssh`, `send` and `proxy`, are hidden too.
 - **`swoosh serve recv:<dir>` serves `recv`.** That is the name `send` dials, so `send` needs no

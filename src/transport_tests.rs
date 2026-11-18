@@ -10,11 +10,11 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use bifrost::{Addr, Error, InProcess, NodeId};
+use bifrost::{Addr, Error, NodeId};
 use bifrost_mdns::MdnsError;
 use bifrost_mem::{MemSession, MemTransport};
 
-use super::{MdnsState, PeerHint, Reach, ReachArgs, RelayHome, Resolver, Transport};
+use super::{MdnsState, PeerHint, Reach, ReachArgs, RelayHome, Resolver};
 use crate::credential::Credential;
 use crate::home::Home;
 use crate::reaching::BindRole;
@@ -44,7 +44,6 @@ struct Recording {
 }
 
 impl bifrost::Transport for Recording {
-    type Security = InProcess;
     type Session = MemSession;
 
     fn node_id(&self) -> NodeId {
@@ -201,7 +200,6 @@ fn home(tag: &str) -> Home {
 /// The reach-family defaults: what clap hands a verb that named neither flag.
 fn no_flags() -> ReachArgs {
     ReachArgs {
-        transport: Transport::default(),
         local: false,
         peer: Vec::new(),
         relay: None,
@@ -377,70 +375,50 @@ async fn an_unusable_kept_relay_or_resolver_refuses_with_the_file_named() {
 }
 
 /// A bind that reads neither reach flag refuses both BY NAME rather than parsing and ignoring them:
-/// `--local` (no n0 at all) and each quirk spelling (direct-only, no record of its own). Every flag here is
-/// hidden and read from the environment too, so the refusal names both spellings of the flag and of
-/// `--local`: the person may only ever have set the variable.
+/// `--local` (no n0 at all). Every flag here is hidden and read from the environment too, so the refusal
+/// names both spellings of the flag and of `--local`: the person may only ever have set the variable.
 #[test]
 fn a_bind_that_uses_neither_reach_flag_refuses_both_by_name() {
-    for (local, transport, spelling, relay_line, resolver_line) in [
-        (
-            true,
-            Transport::default(),
-            "--local",
-            "--relay or SWOOSH_RELAY has no effect with --local or SWOOSH_LOCAL\n  swoosh uses no relay \
-             when it runs on this network only.",
-            "--resolver or SWOOSH_RESOLVER has no effect with --local or SWOOSH_LOCAL\n  swoosh publishes \
-             no record when it runs on this network only.",
-        ),
-        (
-            false,
-            Transport::Quirk,
-            "--transport quirk",
-            "--relay or SWOOSH_RELAY has no effect over quirk\n  quirk uses no relay.",
-            "--resolver or SWOOSH_RESOLVER has no effect over quirk\n  quirk publishes no record.",
-        ),
-        (
-            false,
-            Transport::QuirkNoise,
-            "--transport quirk+noise",
-            "--relay or SWOOSH_RELAY has no effect over quirk\n  quirk uses no relay.",
-            "--resolver or SWOOSH_RESOLVER has no effect over quirk\n  quirk publishes no record.",
-        ),
-    ] {
-        let bind = |relay, resolver| ReachArgs {
-            transport,
-            local,
-            relay,
-            resolver,
-            ..no_flags()
-        };
-        assert!(
-            bind(None, None).reject_unused_reach().is_ok(),
-            "{spelling} that named neither flag has nothing to refuse"
-        );
+    let bind = |relay, resolver| ReachArgs {
+        local: true,
+        relay,
+        resolver,
+        ..no_flags()
+    };
+    assert!(
+        bind(None, None).reject_unused_reach().is_ok(),
+        "--local that named neither flag has nothing to refuse"
+    );
 
-        let relay = bind(
-            Some("https://relay.example".parse().expect("a valid relay url")),
-            None,
-        )
-        .reject_unused_reach()
-        .expect_err("--relay on a bind that never reads it is refused");
-        assert_eq!(relay.to_string(), relay_line, "{spelling}");
+    let relay = bind(
+        Some("https://relay.example".parse().expect("a valid relay url")),
+        None,
+    )
+    .reject_unused_reach()
+    .expect_err("--relay on a bind that never reads it is refused");
+    assert_eq!(
+        relay.to_string(),
+        "--relay or SWOOSH_RELAY has no effect with --local or SWOOSH_LOCAL\n  swoosh uses no relay when \
+         it runs on this network only."
+    );
 
-        let resolver = bind(
-            None,
-            Some(
-                "https://dns.example/pkarr"
-                    .parse()
-                    .expect("a valid resolver url"),
-            ),
-        )
-        .reject_unused_reach()
-        .expect_err("--resolver on a bind that never reads it is refused");
-        assert_eq!(resolver.to_string(), resolver_line, "{spelling}");
-    }
+    let resolver = bind(
+        None,
+        Some(
+            "https://dns.example/pkarr"
+                .parse()
+                .expect("a valid resolver url"),
+        ),
+    )
+    .reject_unused_reach()
+    .expect_err("--resolver on a bind that never reads it is refused");
+    assert_eq!(
+        resolver.to_string(),
+        "--resolver or SWOOSH_RESOLVER has no effect with --local or SWOOSH_LOCAL\n  swoosh publishes no \
+         record when it runs on this network only."
+    );
 
-    // An iroh bind is the one that reads both, so it refuses neither.
+    // A bind without `--local` is the one that reads both, so it refuses neither.
     assert!(
         ReachArgs {
             relay: Some("https://relay.example".parse().expect("a valid relay url")),
@@ -453,7 +431,7 @@ fn a_bind_that_uses_neither_reach_flag_refuses_both_by_name() {
         }
         .reject_unused_reach()
         .is_ok(),
-        "the iroh bind is the one that uses both flags"
+        "the bind without --local is the one that uses both flags"
     );
 }
 
@@ -489,7 +467,6 @@ fn a_typed_reach_flag_is_found_by_its_typed_name() {
     assert_eq!(typed(&["x"]), None, "the defaults are nothing typed");
     let hint = format!("{}=127.0.0.1:9000", NodeId::from_ed25519_secret(&[5u8; 32]));
     for (argv, flag) in [
-        (vec!["x", "--transport", "quirk"], "--transport"),
         (vec!["x", "--local"], "--local"),
         (vec!["x", "--peer", hint.as_str()], "--peer"),
         (vec!["x", "--relay", "https://relay.example"], "--relay"),
