@@ -22,6 +22,7 @@ use clap::Args;
 use eyre::WrapErr as _;
 
 use crate::home::Home;
+use crate::peers::Hints;
 use crate::reaching::BindRole;
 use crate::serve_toml::ServeToml;
 
@@ -143,6 +144,34 @@ impl ReachArgs {
         Ok(())
     }
 
+    /// Refuse `--peer` hints that give one key more addresses than one dial takes, [`Hints::MAX`]. The
+    /// addresses are counted, not the hints: one host name can resolve to several. The bound is an
+    /// open's own, and it holds whether or not the dial goes through a resident, so the same argument
+    /// is never fine on one path and refused on the other.
+    ///
+    /// # Errors
+    ///
+    /// [`CrowdedHints`] for the first key, in the order given, past the bound: a usage error, which the
+    /// caller exits 2 with.
+    pub fn reject_crowded_hints(&self) -> Result<(), CrowdedHints> {
+        let given = |key: NodeId| -> usize {
+            self.peer
+                .iter()
+                .filter(|hint| hint.node() == key)
+                .map(|hint| hint.addrs().len())
+                .sum()
+        };
+        match self
+            .peer
+            .iter()
+            .map(PeerHint::node)
+            .find(|key| given(*key) > Hints::MAX)
+        {
+            Some(key) => Err(CrowdedHints { key }),
+            None => Ok(()),
+        }
+    }
+
     /// The bind this run selected IF that bind reads neither reach flag, and `None` when it reads both.
     ///
     /// The ONE predicate behind [`reject_unused_reach`](Self::reject_unused_reach) and the composition
@@ -190,6 +219,18 @@ pub struct UnusedReachFlag {
     pub flag: ReachFlag,
     /// The bind that does not read it.
     pub bind: UnusedReach,
+}
+
+/// `--peer` gives one key more addresses than one dial takes. The key prints whole, so it can be compared
+/// with what was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "--peer or SWOOSH_PEER gives more than {} addresses for {key}",
+    Hints::MAX
+)]
+pub struct CrowdedHints {
+    /// The key given too many.
+    pub key: NodeId,
 }
 
 /// The two reach flags only a non-local bind reads.
