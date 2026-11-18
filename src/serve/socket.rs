@@ -13,6 +13,7 @@ use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
 mod local_detail;
 mod open;
+pub(crate) mod splice;
 #[cfg(test)]
 pub(crate) use local_detail::tests::{fail_sizes, measure_allocations};
 pub use local_detail::{

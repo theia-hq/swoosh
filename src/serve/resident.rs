@@ -326,7 +326,10 @@ impl Resident {
         }
         self.served.fetch_add(1, Ordering::Relaxed);
         let (reader, mut writer) = tokio::io::split(stream);
-        let mut reader = tokio::io::BufReader::new(reader);
+        // Sized for one whole splice frame, header and body, so an attached Open's upload moves through
+        // this one buffer in place.
+        let mut reader =
+            tokio::io::BufReader::with_capacity(super::socket::splice::FRAME_BUFFER, reader);
         let mut observed = None;
         let request =
             tokio::time::timeout(timeout, Request::read_observed(&mut reader, &mut observed)).await;

@@ -864,6 +864,9 @@ pub enum Script {
     Ends,
     /// Read the request, admit it, then read the stream to its end, keeping what it read, and end.
     Reads,
+    /// Read the request, admit it, then read the stream to its end, keeping what it read, and hold its
+    /// own side open, saying nothing more.
+    ReadsThenHolds,
     /// Read the request, admit it and end its own side at once, then after the pause read the stream to
     /// its end, keeping what it read only while no session was closed: a close discards what the
     /// peer has not taken, as a transport's close does.
@@ -1013,6 +1016,13 @@ impl ScriptedPeer {
                 tightbeam::protocol::Response::Ok.write(&mut to).await?;
                 self.keep_reading(&mut from, None, read_to_end).await?;
                 to.shutdown().await
+            }
+            Script::ReadsThenHolds => {
+                tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                self.keep_reading(&mut from, None, read_to_end).await?;
+                let _held = to;
+                core::future::pending::<()>().await;
+                Ok(())
             }
             Script::EndsThenReads(pause) => {
                 let closes = self.lock().closes;
