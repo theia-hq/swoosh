@@ -33,8 +33,8 @@
 //! bound badge for the proven dialer and REFUSES a non-signet-rooted one (the load-bearing stranger case).
 //! What it does NOT prove is that `invite`/`join` produce and store that badge for a device -- that is the
 //! job of `device_badge_wiring.rs` (the real invite -> join -> stored-badge -> verify-at-signet-root proof),
-//! and the true second-device-reaches-a-gated-service demo is the Operator's live quirk run (bifrost-quirk
-//! carries real ed25519 ids, so the device's derived key IS its proven id there).
+//! and the true second-device-reaches-a-gated-service demo is a live iroh run (iroh carries real ed25519
+//! ids, so the device's derived key IS its proven id there).
 
 use core::time::Duration;
 
@@ -86,8 +86,7 @@ async fn proof() {
                 .expose()
                 .unwrap()
                 .run(&host, CancellationToken::new())
-                .await
-                .unwrap();
+                .await;
         });
 
         // A MEMBER: a client presenting a badge the SIGNET signed, rooted at the signet (the key the gate

@@ -636,6 +636,71 @@ impl Dial for Answering {
     }
 }
 
+/// A test double's stream write half: the writer it wraps, plus the [`bifrost::Abort`] every
+/// [`Session::Write`](bifrost::Session::Write) must carry.
+///
+/// An abort drops the writer, so a later write or shutdown fails with `BrokenPipe`. The far end never
+/// reads the `ConnectionReset` a real transport gives: a whole in-memory pipe reads a clean end, and a
+/// split `WriteHalf` ends nothing, since its read half still holds the pipe. A test that pins how an abort
+/// reads at the peer needs a real transport, not this.
+pub struct TestWrite<W>(Option<W>);
+
+impl<W> From<W> for TestWrite<W> {
+    fn from(writer: W) -> Self {
+        Self(Some(writer))
+    }
+}
+
+impl<W> TestWrite<W> {
+    /// The live writer, or the `BrokenPipe` an aborted half answers every call with.
+    // `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    fn live(&mut self) -> std::io::Result<&mut W> {
+        self.0
+            .as_mut()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    }
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TestWrite<W> {
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> core::task::Poll<std::io::Result<usize>> {
+        match self.get_mut().live() {
+            Ok(writer) => core::pin::Pin::new(writer).poll_write(cx, buf),
+            Err(error) => core::task::Poll::Ready(Err(error)),
+        }
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        match self.get_mut().live() {
+            Ok(writer) => core::pin::Pin::new(writer).poll_flush(cx),
+            Err(error) => core::task::Poll::Ready(Err(error)),
+        }
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        match self.get_mut().live() {
+            Ok(writer) => core::pin::Pin::new(writer).poll_shutdown(cx),
+            Err(error) => core::task::Poll::Ready(Err(error)),
+        }
+    }
+}
+
+impl<W> bifrost::Abort for TestWrite<W> {
+    fn abort(&mut self) {
+        self.0 = None;
+    }
+}
+
 /// A peer that answers with text it chose, as both the transport that dials it and the session to it: the
 /// double the tests drive a verb's real reach path with, to show that text reaches the line escaped.
 ///
@@ -670,7 +735,6 @@ impl HostilePeer {
 }
 
 impl bifrost::Transport for HostilePeer {
-    type Security = bifrost::InProcess;
     type Session = Self;
 
     fn node_id(&self) -> NodeId {
@@ -700,9 +764,8 @@ impl bifrost::Transport for HostilePeer {
 }
 
 impl bifrost::Session for HostilePeer {
-    type Security = bifrost::InProcess;
     /// Swallows the request, so the gate's answer is what the dialer reads next.
-    type Write = tokio::io::Sink;
+    type Write = TestWrite<tokio::io::Sink>;
     /// The gate's answer, written whole before the stream opens, then the end of the stream.
     type Read = tokio::io::DuplexStream;
 
@@ -721,9 +784,9 @@ impl bifrost::Session for HostilePeer {
                     .write(&mut gate)
                     .await
                     .map_err(|error| bifrost::Error::Stream(error.into()))?;
-                Ok((tokio::io::sink(), read))
+                Ok((tokio::io::sink().into(), read))
             }
-            Self::HangsUp => Ok((tokio::io::sink(), tokio::io::duplex(1).1)),
+            Self::HangsUp => Ok((tokio::io::sink().into(), tokio::io::duplex(1).1)),
         }
     }
 
@@ -849,7 +912,6 @@ impl ScriptedPeer {
 }
 
 impl bifrost::Transport for ScriptedPeer {
-    type Security = bifrost::InProcess;
     type Session = Self;
 
     fn node_id(&self) -> NodeId {
@@ -877,8 +939,7 @@ impl bifrost::Transport for ScriptedPeer {
 }
 
 impl bifrost::Session for ScriptedPeer {
-    type Security = bifrost::InProcess;
-    type Write = tokio::io::DuplexStream;
+    type Write = TestWrite<tokio::io::DuplexStream>;
     type Read = tokio::io::DuplexStream;
 
     fn peer(&self) -> NodeId {
@@ -899,7 +960,7 @@ impl bifrost::Session for ScriptedPeer {
                 tracing::debug!(%error, "the scripted gate's stream ended");
             }
         });
-        Ok((write, read))
+        Ok((write.into(), read))
     }
 
     async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {

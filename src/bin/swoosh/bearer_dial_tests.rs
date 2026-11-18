@@ -199,12 +199,11 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
         cancel.cancel();
         admitted
     };
-    let (served, admitted) = tokio::join!(serving, async {
+    let ((), admitted) = tokio::join!(serving, async {
         tokio::time::timeout(Duration::from_secs(20), dialing)
             .await
             .expect("the dial ends within the deadline")
     });
-    served.unwrap();
     node.close().await;
     host.close().await;
     let recorded = recorded

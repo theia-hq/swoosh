@@ -3,23 +3,23 @@ use crate::contacts::Contacts;
 use crate::peer::Peer;
 use crate::testkit::{HostilePeer, Script, ScriptedPeer};
 
-/// A bind over the named backend with n0's two reach services: what every outcome test about the
-/// TRANSPORT remedy is bound as, so no reach line joins its message.
-fn bound(transport: transport::Transport, local: bool) -> transport::Bound {
+/// A bind in the given mode with n0's two reach services: what every outcome test about the bind's
+/// remedy is bound as, so no reach line joins its message.
+fn bound(local: bool) -> transport::Bound {
     transport::Bound {
-        transport,
         local,
         reach: transport::Reach::default(),
     }
 }
 
 // A refused probe is a REFUSAL, never dressed as an addressing problem: the node was reached, so the
-// error says so and carries NO quirk `--peer`/discovery hint (the bug: a refused stranger over quirk
-// used to print `reached, but refused` and THEN `could not reach`, with the `--peer` remedy).
+// error says so and carries NO `--peer` hint (the bug: a refused stranger used to print `reached, but
+// refused` and THEN `could not reach`, with the `--peer` remedy). Bound `--local`, the one bind whose
+// reach hint names `--peer`, so the assertion can see the hint leak.
 #[test]
 fn a_reached_but_refused_probe_is_a_refusal_without_the_reach_hint() {
     let err = Outcome::Refused
-        .into_result(&"alice", &bound(transport::Transport::Quirk, false))
+        .into_result(&"alice", &bound(true))
         .expect_err("a refusal is non-zero");
     let msg = format!("{err:#}");
     assert!(msg.contains("reached, but refused"), "{msg}");
@@ -27,39 +27,18 @@ fn a_reached_but_refused_probe_is_a_refusal_without_the_reach_hint() {
     assert!(!msg.contains("--peer"), "{msg}");
 }
 
-// An unreachable probe DOES carry the transport's reach hint: over quirk, the `--peer` remedy, under the
-// fact it explains. Each spelling of quirk carries the same lines.
-#[test]
-fn an_all_unreachable_probe_carries_the_quirk_reach_hint() {
-    for transport in [
-        transport::Transport::Quirk,
-        transport::Transport::QuirkNoise,
-    ] {
-        let err = Outcome::Unreachable
-            .into_result(&"alice", &bound(transport, false))
-            .expect_err("all-unreachable is non-zero");
-        assert_eq!(
-            format!("{err:#}"),
-            "could not reach alice\n  quirk finds no machine by itself.\n  Give its address with --peer \
-             <key>=<address>, or add --transport iroh."
-        );
-    }
-}
-
 // Under `--local` the remedy names the setting as the cause, both its spellings, since only the variable
-// may be set: the internet fallback is what it removed, so "add --transport iroh" would be false advice.
+// may be set: the internet fallback is what it removed.
 #[test]
 fn an_all_unreachable_local_probe_names_the_flag_as_the_cause() {
-    for transport in [transport::Transport::Iroh, transport::Transport::QuirkNoise] {
-        let err = Outcome::Unreachable
-            .into_result(&"alice", &bound(transport, true))
-            .expect_err("all-unreachable is non-zero");
-        assert_eq!(
-            format!("{err:#}"),
-            "could not reach alice\n  With --local or SWOOSH_LOCAL, swoosh looks on this network only.\n  \
-             Give its address with --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL."
-        );
-    }
+    let err = Outcome::Unreachable
+        .into_result(&"alice", &bound(true))
+        .expect_err("all-unreachable is non-zero");
+    assert_eq!(
+        format!("{err:#}"),
+        "could not reach alice\n  With --local or SWOOSH_LOCAL, swoosh looks on this network only.\n  \
+         Give its address with --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL."
+    );
 }
 
 // An iroh dial that reached nobody names the RESOLVER it asked, because iroh's own error does not:
@@ -69,7 +48,6 @@ fn an_all_unreachable_local_probe_names_the_flag_as_the_cause() {
 #[test]
 fn an_all_unreachable_iroh_probe_names_the_resolver_it_asked() {
     let over_own = transport::Bound {
-        transport: transport::Transport::Iroh,
         local: false,
         reach: transport::Reach {
             relay: transport::RelayHome::Custom(
@@ -97,18 +75,19 @@ fn an_all_unreachable_iroh_probe_names_the_resolver_it_asked() {
 #[test]
 fn an_all_unreachable_n0_probe_names_no_reach_service() {
     let err = Outcome::Unreachable
-        .into_result(&"alice", &bound(transport::Transport::Iroh, false))
+        .into_result(&"alice", &bound(false))
         .expect_err("all-unreachable is non-zero");
     assert_eq!(format!("{err:#}"), "could not reach alice");
 }
 
 // A probe that failed mid-protocol is its OWN non-zero outcome: the node was reached, so the error
 // says the probe failed rather than claiming the peer could not be reached, and it carries no reach
-// hint (reach was not the problem). Without this a mid-protocol failure exited green.
+// hint (reach was not the problem). Without this a mid-protocol failure exited green. Bound `--local`, so
+// a leaked hint would carry `--peer`.
 #[test]
 fn a_failed_probe_probe_is_non_zero_and_says_the_probe_failed() {
     let err = Outcome::Failed
-        .into_result(&"alice", &bound(transport::Transport::Quirk, false))
+        .into_result(&"alice", &bound(true))
         .expect_err("a failed probe is non-zero");
     let msg = format!("{err:#}");
     assert!(msg.contains("reached, but the probe failed"), "{msg}");
@@ -119,11 +98,11 @@ fn a_failed_probe_probe_is_non_zero_and_says_the_probe_failed() {
 // Only a probe that answered exits green: every other outcome is an error.
 #[test]
 fn only_a_healthy_probe_exits_green() {
-    let quirk = bound(transport::Transport::Quirk, false);
-    assert!(Outcome::Healthy.into_result(&"alice", &quirk).is_ok());
+    let local = bound(true);
+    assert!(Outcome::Healthy.into_result(&"alice", &local).is_ok());
     for outcome in [Outcome::Unreachable, Outcome::Refused, Outcome::Failed] {
         assert!(
-            outcome.into_result(&"alice", &quirk).is_err(),
+            outcome.into_result(&"alice", &local).is_err(),
             "{outcome:?} must not exit green"
         );
     }
@@ -160,7 +139,7 @@ fn escaped_unreached(target: &Peer) -> String {
 #[tokio::test]
 async fn a_hostile_connect_failure_prints_escaped() {
     let (node, target, machine) = unreachable();
-    let bound = bound(transport::Transport::Iroh, false);
+    let bound = bound(false);
     let Err(error) = dial(&node, &machine, &target, &bound).await else {
         panic!("a dial the peer closed is an error");
     };
@@ -171,7 +150,7 @@ async fn a_hostile_connect_failure_prints_escaped() {
 #[tokio::test]
 async fn a_hostile_service_connect_failure_prints_escaped() {
     let (node, target, machine) = unreachable();
-    let bound = bound(transport::Transport::Iroh, false);
+    let bound = bound(false);
     let service = PING_SERVICE
         .parse::<Service>()
         .expect("ping is a service name");

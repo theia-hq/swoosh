@@ -538,7 +538,6 @@ pub struct Isolated<S: Session> {
 }
 
 impl<S: Session> Session for Isolated<S> {
-    type Security = S::Security;
     type Write = S::Write;
     type Read = S::Read;
 

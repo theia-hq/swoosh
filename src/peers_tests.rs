@@ -8,7 +8,7 @@ use core::time::Duration;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use bifrost::{Addr, InProcess, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport};
+use bifrost::{Addr, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport};
 use futures::poll;
 use nauthy::{Link, Service};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
@@ -24,7 +24,7 @@ use crate::home::Home;
 use crate::renewal::{Fetch as _, NodeFetch};
 use crate::serve::{RENEWAL_SERVICE, SYNC_SERVICE};
 use crate::sync::{Dial as _, NodeDial};
-use crate::testkit::{Script, ScriptedPeer, TestNode, TestRoot};
+use crate::testkit::{Script, ScriptedPeer, TestNode, TestRoot, TestWrite};
 
 #[tokio::test]
 async fn credentialed_exchange_and_none_pickup_use_separate_sessions() {
@@ -1340,8 +1340,7 @@ async fn live_none_survives(end: StandingEnd) {
         );
         cancel.cancel();
     };
-    let (served, ()) = tokio::join!(exposer.run(&host, cancel.clone()), exercise);
-    served.unwrap();
+    let ((), ()) = tokio::join!(exposer.run(&host, cancel.clone()), exercise);
     node.close().await;
     host.close().await;
     std::fs::remove_dir_all(home.dir()).unwrap();
@@ -1398,12 +1397,11 @@ async fn home_bulk_128_ride_one_session() {
         cancel.cancel();
     };
     // A transport that stalls an open fails this test rather than hanging the suite.
-    let (served, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+    let ((), ()) = tokio::time::timeout(Duration::from_secs(30), async {
         tokio::join!(exposer.run(&host, cancel.clone()), exercise)
     })
     .await
     .expect("128 pipes attach well inside 30 s");
-    served.unwrap();
     node.close().await;
     host.close().await;
     std::fs::remove_dir_all(home.dir()).unwrap();
@@ -1473,8 +1471,7 @@ async fn window_stall_recovers_new_opens() {
         flood.stop.cancel();
         cancel.cancel();
     };
-    let (served, ()) = tokio::join!(exposer.run(&host, cancel.clone()), exercise);
-    served.unwrap();
+    let ((), ()) = tokio::join!(exposer.run(&host, cancel.clone()), exercise);
     node.close().await;
     host.close().await;
     std::fs::remove_dir_all(home.dir()).unwrap();
@@ -1697,7 +1694,6 @@ impl Drop for Pending {
     }
 }
 impl Transport for Probe {
-    type Security = InProcess;
     type Session = ProbeSession;
     fn node_id(&self) -> NodeId {
         self.gate.node_id()
@@ -1736,8 +1732,7 @@ impl Transport for Probe {
     }
 }
 impl Session for ProbeSession {
-    type Security = InProcess;
-    type Write = DuplexStream;
+    type Write = TestWrite<DuplexStream>;
     type Read = DuplexStream;
     fn peer(&self) -> NodeId {
         if self.state.wrong_peer.get() {

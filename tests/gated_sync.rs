@@ -103,8 +103,7 @@ async fn proof() {
             .unwrap()
             .with_live_cuts(cut)
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
 
     // A device of the root dials through the connector every exchange uses, and gives its newer update.
@@ -201,8 +200,7 @@ async fn lapsed_pull() {
             .unwrap()
             .with_live_cuts(cut)
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
 
     // The same root, the same device, a standing that ended a day ago.

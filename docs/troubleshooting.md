@@ -3,16 +3,6 @@
 What the common failures mean and how to fix them. Every command that cannot do its job exits non-zero
 and says why, rather than reporting a healthy-looking result.
 
-## "the transport does not prove the peer"
-
-```
-Error: the transport does not prove the peer (declared: announced); presenting a credential would send it to whoever answers
-```
-
-Bare `quirk` never proves the peer holds the key it presents, so swoosh refuses to write a credential over
-it: the dial never reaches the gate. Use `--transport quirk+noise`, which proves the key before any byte
-flows. See [transports](transports.md#quirk).
-
 ## "reached, but the probe failed" / "reached, but the probe went unanswered"
 
 ```
@@ -32,8 +22,6 @@ Fix one of:
 
 - On your own device, check it still serves the name: `swoosh status me/<name>`.
 - Restart the node if it lists the service and the probe still fails.
-- Try `--transport quirk+noise` if only one transport shows it, which points at the path rather than the
-  node.
 
 ## "me/nas refused ssh"
 
@@ -65,27 +53,26 @@ bob/nas via iroh: reached, but it does not answer ping for you
 `swoosh status` reached the machine, and it refused the probe: it does not serve `ping`, or it does not admit you
 to it. The reply does not say which. Ask its owner to share `ping` with you.
 
-## "could not reach" over quirk or with `--local`
+## "could not reach" with `--local`
 
-<!-- manual: needs a quirk dial with no address -->
+<!-- manual: needs a --local dial to a machine on another network -->
 ```
 error: could not reach me/nas
-  quirk finds no machine by itself.
-  Give its address with --peer <key>=<address>, or add --transport iroh.
+  With --local or SWOOSH_LOCAL, swoosh looks on this network only.
+  Give its address with --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL.
 ```
 
-With `--local`, the lines under the error start `With --local or SWOOSH_LOCAL, swoosh looks on this network
-only.` and end with how to turn it off. Either way, the address `--peer` takes is the `direct` line the
-machine's `serve` printed ([transports](transports.md#peer)).
+The address `--peer` takes is an address the machine's `serve` printed under `local`
+([transports](transports.md#peer)).
 
-## "could not reach" over iroh
+## "could not reach"
 
 <!-- manual: needs an offline machine -->
 ```
 error: could not reach me/nas
 ```
 
-Over iroh you give no address, so this usually means the machine is offline or discovery is down. Check
+You give no address, so this usually means the machine is offline or discovery is down. Check
 that its `swoosh serve` is running and that both sides can reach the internet. If you run your own
 resolver, a line under the error names it (`resolver asked: <url>`); check that it is up
 and that the machine publishes to the same one.
@@ -122,5 +109,5 @@ taking it off the public menu, restart `serve` without the flag.
 ## Next
 
 - [Keys](keys.md#the-gate) how the gate decides who gets in.
-- [Transports](transports.md) iroh versus quirk, and `--peer`.
+- [Transports](transports.md) how swoosh reaches a machine, and `--peer`.
 - [Commands](reference/commands.md) every verb and flag.

@@ -207,8 +207,7 @@ async fn expose(entries: &[String]) -> NodeId {
             .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
     host_id
 }

@@ -84,8 +84,8 @@ pub struct ReachCtx<'a> {
 /// `Credential` has no "present nothing" arm, so "forgot to say" is unrepresentable. The identity mode
 /// derives from the same declaration ([`BindRole::identity`]), so identity and badge cannot disagree.
 pub trait Reaching {
-    /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). One accessor,
-    /// not a match arm.
+    /// The reach-family flags this verb carries (`--local`, `--peer`, `--relay`, `--resolver`). One
+    /// accessor, not a match arm.
     fn reach_args(&self) -> &transport::ReachArgs;
 
     /// The peer this verb dials, when it dials one. While the verb runs, the composition root makes one

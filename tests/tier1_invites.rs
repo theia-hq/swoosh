@@ -205,12 +205,11 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         );
         cancel.cancel();
     };
-    let (served, ()) = tokio::join!(serving, async {
+    let ((), ()) = tokio::join!(serving, async {
         tokio::time::timeout(Duration::from_secs(15), dialing)
             .await
             .expect("the owner completes its gated dial within the deadline");
     });
-    served.expect("the device's exposer ends Ok once the dials finish");
 
     // 5. The OWNER's node serves. It pins no root, so the device's standing admits nothing here.
     let owner_home = Home::resolve(Some(signet_dir.clone())).unwrap();
@@ -246,12 +245,11 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         );
         cancel.cancel();
     };
-    let (served, ()) = tokio::join!(serving, async {
+    let ((), ()) = tokio::join!(serving, async {
         tokio::time::timeout(Duration::from_secs(15), dialing)
             .await
             .expect("the refused dial completes within the deadline");
     });
-    served.expect("the owner's exposer ends Ok once the dial finishes");
 
     let _ = std::fs::remove_dir_all(&base);
 }

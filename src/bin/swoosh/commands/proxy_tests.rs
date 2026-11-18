@@ -6,12 +6,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use std::sync::Arc;
 
-use bifrost::{Announced, Session};
+use bifrost::Session;
 use clap::Parser as _;
 use swoosh::credential::Credential;
 use swoosh::peers::{Lane, Peers, Presents};
 use swoosh::reaching::{BindRole, Reaching as _};
-use swoosh::testkit::TestNode;
+use swoosh::testkit::{TestNode, TestWrite};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -325,8 +325,7 @@ enum Script {
 }
 
 /// A machine whose sessions' streams are in-memory pipes, with the far half driven by a [`Script`].
-/// Declares the announced profile, so a request that carries a credential refuses before any byte. A
-/// dial hands back a clone sharing its counts.
+/// A dial hands back a clone sharing its counts.
 #[derive(Clone)]
 struct Scripted {
     script: Script,
@@ -345,7 +344,6 @@ impl Scripted {
 }
 
 impl bifrost::Transport for Scripted {
-    type Security = Announced;
     type Session = Self;
 
     fn node_id(&self) -> bifrost::NodeId {
@@ -373,8 +371,7 @@ impl bifrost::Transport for Scripted {
 }
 
 impl Session for Scripted {
-    type Security = Announced;
-    type Write = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+    type Write = TestWrite<tokio::io::WriteHalf<tokio::io::DuplexStream>>;
     type Read = tokio::io::ReadHalf<tokio::io::DuplexStream>;
 
     fn peer(&self) -> bifrost::NodeId {
@@ -408,7 +405,7 @@ impl Session for Scripted {
             });
         }
         let (read, write) = tokio::io::split(near);
-        Ok((write, read))
+        Ok((write.into(), read))
     }
 
     async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
@@ -429,7 +426,7 @@ impl Session for Scripted {
     }
 }
 
-/// A member badge to present, so the announced session's checked writer refuses it.
+/// A member badge to present.
 fn badge() -> nauthy::Link {
     let node = TestNode::seeded(7);
     node.member_badge(
@@ -509,23 +506,10 @@ async fn a_failed_request_teaches_no_service() {
     let session = Scripted::new(Script::Silent);
     for args in [&[][..], &["--service", "news"][..]] {
         let (served, body) = exchange(printed, &proxy(args), &session, Some(&link)).await;
-        assert!(served.is_err(), "the relay refuses the credential write");
+        assert!(served.is_err(), "the silent session fails the request");
         assert!(!body.contains("swoosh serve"), "{args:?}: {body}");
         assert!(!body.contains("service add"), "{args:?}: {body}");
     }
-}
-
-/// The proxy path bypasses `Connector`, so it carries the checked writer itself: presenting a
-/// credential over an announced session refuses before any byte, and the local URL serves its 502
-/// with the teaching cause instead of quietly shipping the credential to whoever answered.
-#[tokio::test]
-async fn proxy_refuses_to_present_a_credential_over_an_announced_session() {
-    let link = badge();
-    let session = Scripted::new(Script::Silent);
-    let (served, text) = exchange(printed, &proxy(&[]), &session, Some(&link)).await;
-    assert!(served.is_err(), "the relay refuses the credential write");
-    assert!(text.starts_with("HTTP/1.1 502 Bad Gateway"), "{text}");
-    assert!(text.contains("does not prove the peer"), "{text}");
 }
 
 /// A request the listener refuses is answered locally: no stream opens, so the credential never leaves,
@@ -670,7 +654,6 @@ async fn a_refused_proxy_refuses_before_its_url() {
     let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
     let peers = Peers::new(&node);
     let bound = swoosh::transport::Bound {
-        transport: swoosh::transport::Transport::Iroh,
         local: false,
         reach: swoosh::transport::Reach::default(),
     };

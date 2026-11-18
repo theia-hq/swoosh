@@ -14,8 +14,7 @@
 //! a saved petname, interchangeably.
 //!
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
-//! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk|quirk+noise`
-//! swaps the backend without changing the key). The outward verbs only dial out, so they mint a throwaway
+//! key and keeps a stable address across runs. The outward verbs only dial out, so they mint a throwaway
 //! key each run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/machine/key`).
 //! The full verb arc (send, tunnel, share, fetch, run, cluster, MagicDNS names) is tracked in the README's
 //! Roadmap; it ticks as it ships.
@@ -162,10 +161,10 @@ macro_rules! reaching_verbs {
         }
 
         impl Reaching for Outward {
-            /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). Shared by every
-            /// reaching verb and no local one, so they are flattened into each reach command rather than made
-            /// a root global; the composition root reads them here to pick the backend, the bind mode, and
-            /// the discovery seed.
+            /// The reach-family flags this verb carries (`--local`, `--peer`, `--relay`, `--resolver`).
+            /// Shared by every reaching verb and no local one, so they are flattened into each reach command
+            /// rather than made a root global; the composition root reads them here to pick the bind mode,
+            /// the reach services, and the discovery seed.
             fn reach_args(&self) -> &transport::ReachArgs {
                 match self {
                     $(Self::$verb(cmd) => cmd.reach_args(),)+
@@ -958,10 +957,8 @@ async fn run() -> eyre::Result<()> {
     let contacts = Contacts::clone(store.contacts());
 
     // The one and only place a concrete transport is named. Everything downstream speaks `bifrost`. The
-    // same secret yields the same NodeId whether bound under iroh or quirk, which is what makes the
-    // transport swap a swap and not a new node. The reach-family flags travel on the verb itself now, so
-    // the backend and the dial hints are read off the chosen reaching verb, not a root global.
-    let transport = reach.reach_args().transport;
+    // reach-family flags travel on the verb itself, so the bind mode and the dial hints are read off the
+    // chosen reaching verb, not a root global.
     let local = reach.reach_args().local;
     // The verb's bind role, read BEFORE the bind selects a constructor: only a `Serving` verb publishes
     // the home key's address record, so a dial-only command never overwrites the live `serve` record
@@ -969,13 +966,12 @@ async fn run() -> eyre::Result<()> {
     // this bind publishes and what it presents. Read here, before `reach` is consumed by dispatch.
     let bind_role = reach.bind_role();
     let peers = reach.reach_args().peer.clone();
-    // What this run bound, as ONE value: every consumer (a verb reporting its backend, a failed dial's
-    // teaching line, `serve`'s banner) reads all three facts, so they travel together from here. The
-    // relay and the resolver come from the flags and the home files, over the ONE bind that reads them
-    // (the guard at the arm above refused the flags on every other), so a stale file can never refuse a
-    // quirk or `--local` bind that would not have opened it.
+    // What this run bound, as ONE value: every consumer (a failed dial's teaching line, `serve`'s banner)
+    // reads both facts, so they travel together from here. The relay and the resolver come from the
+    // flags and the home files, over the ONE bind that reads them (the guard at the arm above refused the
+    // flags on every other), so a stale file can never refuse a `--local` bind that would not have
+    // opened it.
     let bound = transport::Bound {
-        transport,
         local,
         reach: match reach.reach_args().unused_reach_bind() {
             Some(_unused) => transport::Reach::default(),
@@ -1043,49 +1039,20 @@ async fn run() -> eyre::Result<()> {
         home: &home,
         admitted: swoosh::learn::Admitted::unheard(),
     };
-    // Each transport bind borrows the seed through `with_bytes` and returns a future that holds only
-    // what it derived, so the seed never leaves its wiping owner.
-    match transport {
-        // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
-        // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
-        // addresses, so a same-network dial goes straight there instead of relaying. With nothing
-        // known locally the resolve is empty and iroh self-discovers exactly as before. The verb's bind
-        // role picks the n0 constructor (serving publishes the address record, dialing does not);
-        // `--local` keeps the same arm and swaps in the persisted key with no n0, no relays.
-        transport::Transport::Iroh => {
-            let endpoint = IrohBind::of(local, &bind_role)
-                .bind(&secret, transport::Reach::clone(&bound.reach))
-                .await?;
-            let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
-            let node = Node::new(endpoint, composed.discovery);
-            let reach = reach.attach_bound_reach(&bound.reach);
-            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
-        }
-        // quirk is direct-only with no internal discovery, so the composed discovery is its only way
-        // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
-        transport::Transport::Quirk => {
-            let endpoint = secret
-                .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
-                .await?;
-            let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
-            let node = Node::new(endpoint, composed.discovery);
-            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
-        }
-        // The sealed spelling: quirk under the wrapper, still one node under one key. The wrapper runs
-        // its own Noise handshake over quirk's one stream and proves the peer's `NodeId`, so a
-        // signet-rooted gate arms (where bare quirk refuses); both ends must spell `quirk+noise`, and a
-        // bare quirk peer fails the wrapper tag with no fallback. One seed binds both layers, and
-        // `Noise::new` refuses an inner bound under any other identity, so the two can never disagree.
-        transport::Transport::QuirkNoise => {
-            let endpoint = secret
-                .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
-                .await?;
-            let endpoint = secret.with_bytes(|seed| bifrost_noise::Noise::new(endpoint, seed))?;
-            let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
-            let node = Node::new(endpoint, composed.discovery);
-            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
-        }
-    }
+    // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed discovery
+    // feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct addresses, so a
+    // same-network dial goes straight there instead of relaying. With nothing known locally the resolve
+    // is empty and iroh self-discovers exactly as before. The verb's bind role picks the n0 constructor
+    // (serving publishes the address record, dialing does not); `--local` swaps in the persisted key
+    // with no n0, no relays. The bind borrows the seed and returns a future that holds only what it
+    // derived, so the seed never leaves its wiping owner.
+    let endpoint = IrohBind::of(local, &bind_role)
+        .bind(&secret, transport::Reach::clone(&bound.reach))
+        .await?;
+    let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
+    let node = Node::new(endpoint, composed.discovery);
+    let reach = reach.attach_bound_reach(&bound.reach);
+    run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
 }
 
 /// Which iroh constructor the bind selects, the flags' one mechanism. A named choice instead of an
@@ -1798,63 +1765,8 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Ping(_))));
     }
 
-    /// The sealed quirk spelling resolves: `--transport quirk+noise` selects the wrapped composition
-    /// under the same identity, while bare `quirk` stays its own choice (the profile enforcement, not
-    /// the parser, refuses it a rooted gate). The label is what `ping`/`status` print and a failed dial
-    /// names.
-    #[test]
-    fn the_sealed_quirk_transport_spelling_resolves() {
-        let sealed = Cli::try_parse_from(["swoosh", "ping", "alice", "--transport", "quirk+noise"])
-            .expect("the sealed quirk spelling parses");
-        assert!(matches!(
-            sealed.command,
-            Some(Command::Ping(ping::PingCmd {
-                reach: transport::ReachArgs {
-                    transport: transport::Transport::QuirkNoise,
-                    ..
-                },
-                ..
-            }))
-        ));
-        assert_eq!(transport::Transport::QuirkNoise.name(), "quirk+noise");
-
-        // The bare spelling is unchanged and a DIFFERENT choice: the enforcement refuses it a rooted
-        // gate, it never silently resolves to the wrapper.
-        let bare = Cli::try_parse_from(["swoosh", "ping", "alice", "--transport", "quirk"])
-            .expect("the bare quirk spelling parses");
-        assert!(matches!(
-            bare.command,
-            Some(Command::Ping(ping::PingCmd {
-                reach: transport::ReachArgs {
-                    transport: transport::Transport::Quirk,
-                    ..
-                },
-                ..
-            }))
-        ));
-        assert_ne!(
-            transport::Transport::Quirk,
-            transport::Transport::QuirkNoise
-        );
-
-        // The default remains iroh.
-        let defaulted = Cli::try_parse_from(["swoosh", "ping", "alice"])
-            .expect("a bare ping parses on the default transport");
-        assert!(matches!(
-            defaulted.command,
-            Some(Command::Ping(ping::PingCmd {
-                reach: transport::ReachArgs {
-                    transport: transport::Transport::Iroh,
-                    ..
-                },
-                ..
-            }))
-        ));
-    }
-
     /// The `--local` flag is a reach-family bind knob: it parses on the reaching verbs (the dial half
-    /// rides the same bind), nowhere else, and is accepted idempotently on the already-direct-only quirk
-    /// spellings. Placement is the reach group's, not a root global's.
+    /// rides the same bind), nowhere else. Placement is the reach group's, not a root global's.
     #[test]
     fn the_local_flag_lives_on_the_reach_family_only() {
         let parsed = Cli::try_parse_from(["swoosh", "ping", "alice", "--local"])
@@ -1866,20 +1778,6 @@ mod tests {
                 ..
             }))
         ));
-
-        // Accepted idempotently on the direct-only quirk spellings: the flag states a bind property
-        // quirk already has, so it is a no-op, never a conflict refusal.
-        for quirk in ["quirk", "quirk+noise"] {
-            let cli = Cli::try_parse_from(["swoosh", "serve", "--local", "--transport", quirk])
-                .unwrap_or_else(|err| panic!("serve --local --transport {quirk} parses: {err}"));
-            assert!(matches!(
-                cli.command,
-                Some(Command::Serve(serve::ServeCmd {
-                    reach: transport::ReachArgs { local: true, .. },
-                    ..
-                }))
-            ));
-        }
 
         // Placement: the flag rides `ReachArgs`, so a root or a transport-free verb never takes it.
         assert!(

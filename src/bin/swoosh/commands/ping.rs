@@ -127,7 +127,7 @@ impl PingCmd {
             interval: Duration::from_secs_f64(self.interval),
         };
         let label = machine.label();
-        let name = bound.transport.name();
+        let name = transport::FAST_PATH;
         let service: Service = reach::PING_SERVICE.parse()?;
         let session = match reach::dial_service(
             node,
@@ -325,7 +325,6 @@ mod tests {
         );
         let node = Node::new(peer.clone(), bifrost::NoDiscovery);
         let bound = transport::Bound {
-            transport: transport::Transport::Iroh,
             local: false,
             reach: transport::Reach::default(),
         };
@@ -440,7 +439,7 @@ mod tests {
         );
     }
 
-    /// A transport whose path never moves (quirk, mem, noise) hands `-v` a stream that says its one path
+    /// A transport whose path never moves (mem) hands `-v` a stream that says its one path
     /// and ends. That prints the one path line, then every probe still prints and the run completes: the
     /// ended stream neither stops the probes nor stalls them.
     #[tokio::test]
@@ -448,7 +447,7 @@ mod tests {
         let lines = core::cell::RefCell::new(Vec::new());
         let probes = async {
             for seq in 0..3 {
-                let line = probe_line("alice/macbook", "quirk", Probe { seq, rtt: RTT });
+                let line = probe_line("alice/macbook", "iroh", Probe { seq, rtt: RTT });
                 lines.borrow_mut().push(line);
                 tokio::task::yield_now().await;
             }
@@ -456,7 +455,7 @@ mod tests {
         let run = watching(PathChanges::fixed(Path::Direct), probes, |path| {
             lines
                 .borrow_mut()
-                .push(path_line("alice/macbook", "quirk", path));
+                .push(path_line("alice/macbook", "iroh", path));
         });
         tokio::time::timeout(HUNG, run)
             .await
@@ -464,10 +463,10 @@ mod tests {
         assert_eq!(
             lines.into_inner(),
             [
-                "alice/macbook via quirk, path: direct",
-                "alice/macbook via quirk, seq 0 rtt 24.000 ms",
-                "alice/macbook via quirk, seq 1 rtt 24.000 ms",
-                "alice/macbook via quirk, seq 2 rtt 24.000 ms",
+                "alice/macbook via iroh, path: direct",
+                "alice/macbook via iroh, seq 0 rtt 24.000 ms",
+                "alice/macbook via iroh, seq 1 rtt 24.000 ms",
+                "alice/macbook via iroh, seq 2 rtt 24.000 ms",
             ]
         );
     }

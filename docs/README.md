@@ -21,9 +21,9 @@ These pages describe the default branch; the released docs are at the newest tag
   laptop to admitting a whole household.
 - [Commands](reference/commands.md) every verb, with an example and the one thing to know.
 - [Services](reference/services.md) what a node can serve today, each with its gate and limits.
-- [Transports](transports.md) iroh (the default, automatic) and quirk+noise (proves the peer's key, direct-only).
+- [Transports](transports.md) how swoosh reaches a machine over iroh, and the relay and resolver you can run.
 - [Troubleshooting](troubleshooting.md) what a refusal or a failed dial means, and the fix.
-- [Demo](demo.md) the same command over two transports, same key, with a stranger refused.
+- [Demo](demo.md) admit a second machine by its key, with a stranger refused.
 - [Roadmap](roadmap.md) what ships today and what is planned.
 
 ## Next

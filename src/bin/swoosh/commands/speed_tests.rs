@@ -115,7 +115,6 @@ async fn a_refused_speed_to_your_device_names_the_cause() {
     );
     let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
     let bound = transport::Bound {
-        transport: transport::Transport::Iroh,
         local: false,
         reach: transport::Reach::default(),
     };
@@ -176,7 +175,6 @@ async fn speed_opens_isolated() {
         held.push(peers.isolated(key).await.expect("below the cap"));
     }
     let bound = transport::Bound {
-        transport: transport::Transport::Iroh,
         local: false,
         reach: transport::Reach::default(),
     };

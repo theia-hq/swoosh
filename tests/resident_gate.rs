@@ -184,9 +184,7 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
                 .await
                 .expect("the control task joins")
                 .expect("the control arm ends Ok");
-            run.await
-                .expect("the exposer task joins")
-                .expect("the exposer ends Ok");
+            run.await.expect("the exposer task joins");
         })
         .await;
 }
@@ -257,9 +255,7 @@ async fn revoke_while_resident_refuses_next_stream() {
                 .await
                 .expect("the control task joins")
                 .expect("the control arm ends Ok");
-            run.await
-                .expect("the exposer task joins")
-                .expect("the exposer ends Ok");
+            run.await.expect("the exposer task joins");
         })
         .await;
 }
@@ -317,9 +313,7 @@ async fn a_deleted_serve_toml_refuses_in_the_gate_and_reports_unknown() {
             );
 
             cancel.cancel();
-            run.await
-                .expect("the exposer task joins")
-                .expect("the exposer ends Ok");
+            run.await.expect("the exposer task joins");
         })
         .await;
 }
@@ -399,9 +393,7 @@ async fn a_read_error_keeps_the_held_settings() {
             }
 
             cancel.cancel();
-            run.await
-                .expect("the exposer task joins")
-                .expect("the exposer ends Ok");
+            run.await.expect("the exposer task joins");
         })
         .await;
 }
@@ -489,9 +481,7 @@ async fn a_shorter_revoked_never_unrevokes_live() {
             }
 
             cancel.cancel();
-            run.await
-                .expect("the exposer task joins")
-                .expect("the exposer ends Ok");
+            run.await.expect("the exposer task joins");
         })
         .await;
 }

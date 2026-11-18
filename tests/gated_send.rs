@@ -77,8 +77,7 @@ async fn proof() {
             .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
 
     // A MEMBER: a badge the signet signed, rooted at the signet and bound to the member's proven mem id, so
@@ -201,8 +200,7 @@ async fn two_dirs_proof() {
             .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
 
     let member = Node::new(MemTransport::bind(), NoDiscovery);
@@ -294,8 +292,7 @@ async fn sink_proof() {
             .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
 
     let member = Node::new(MemTransport::bind(), NoDiscovery);
@@ -382,8 +379,7 @@ async fn binding_proof() {
             .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
-            .await
-            .unwrap();
+            .await;
     });
 
     let member = Node::new(MemTransport::bind(), NoDiscovery);

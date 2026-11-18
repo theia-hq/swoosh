@@ -1,15 +1,9 @@
 # Transports
 
-swoosh has three transports. iroh is the default; set another with `--transport` or `SWOOSH_TRANSPORT`. A
-machine's key is the same on each, so switching transports reaches the same machine. `swoosh ssh` uses iroh only.
+swoosh reaches every machine over iroh. It finds peers across the internet, punching through NATs. You
+give it a key; it does the rest. There is no transport to choose, and no addresses to pass.
 
-## <a id="iroh"></a>iroh (the default)
-
-`iroh` is what you get with no flag. It finds and reaches peers across the internet, punching through
-NATs. You give it a key; it does the rest. Nothing to configure, no addresses to pass.
-
-This is the transport for everyday use. Every [use case](use-cases/README.md) and the
-[getting-started](getting-started.md) walkthrough use it.
+## <a id="iroh"></a>iroh
 
 Finding a peer and the relay fallback are iroh's: a serving node publishes where it can be reached to
 n0's public discovery service, and when a direct path fails, n0's public relays forward encrypted bytes
@@ -61,72 +55,19 @@ how peers reach you
 An `iroh-relay` relays for anyone by default. Its `access` setting names the node ids allowed to relay;
 its `limits` settings cap connections and bandwidth per client.
 
-## <a id="quirk"></a>quirk (our own transport)
-
-`quirk` is a transport we wrote from scratch over UDP. It is shaped like QUIC and is not QUIC: one stream
-per connection, no congestion control, not interoperable with anything else. It is direct-only: it does
-no internet discovery and no NAT traversal, so it reaches a peer only at an address you hand it with
-`--peer` (below).
-
-Two spellings share that backend:
-
-- `quirk` never proves the far side holds the key it presents; the key travels in plaintext. A
-  [gate](keys.md#the-gate) admits a peer by its key, so without that proof anyone could claim it;
-  `swoosh serve` therefore refuses over it, and swoosh never writes a credential over it. It is the base
-  `quirk+noise` builds on; run `swoosh serve --transport quirk` to see the refusal.
-- `quirk+noise` runs a Noise handshake before any byte flows: the far side proves the key it presents,
-  and the session is encrypted. Gated services work over it. It is still direct-only, so hand the peer's
-  address over with `--peer` (below).
-
-Both ends must use the same spelling: a `quirk+noise` peer cannot talk to a bare `quirk` peer, and
-there is no fallback.
-
-Because it is direct-only, a `quirk+noise` `serve` lists every address it is dialable at:
-
-<!-- live-run: the port is this bind's; 192.168.x.x and 100.x.x.x stand in for this host's network and tunnel addresses, and the mark column is measured over the stand-ins -->
-```console
-$ swoosh serve --transport quirk+noise
-swoosh ready
-
-    ed014v3ob63glpu3xyi55uf4yadh2bjaq3pgycoucxsahwcc5ixodt5q
-
-how peers reach you
-  local    automatic; local mDNS, or direct, no NAT traversal
-  direct   hand a peer one of these:
-           192.168.x.x:61444  (this network)
-           100.x.x.x:61444    (this tunnel)
-           127.0.0.1:61444    (this machine)
-
-serving
-  family-gated   your devices + peers you've granted
-    ping        round-trip probe
-    speed       throughput test
-    control.*   node control (never public)
-
-ctrl-c to stop
-```
-
-Hand the peer whichever one reaches them, with `--peer` (below).
-
-**Bare `quirk` cannot serve.** It never carries a credential: it does not prove the peer's key.
-`quirk+noise` proves the key and encrypts the session, but it is direct-only: use
-iroh when you need NAT traversal.
-
 ## <a id="peer"></a>Advanced: `--peer`, when discovery cannot reach them
 
 `--peer <key>=<address>` (or `SWOOSH_PEER`) gives a peer's address by hand. You need it only when
-discovery cannot reach the peer: mainly a quirk dial across networks, or a locked-down network where
-automatic discovery is blocked. Take the `direct` line a peer's `serve` printed and pass it back:
+discovery cannot reach the peer: a locked-down network where automatic discovery is blocked, or under
+`--local`. Take an address from the `local` lane of the banner a peer's `serve` printed and pass it back:
 
 <!-- manual: needs a direct peer and its address -->
 ```console
-$ swoosh ping ed01hcq6… --transport quirk+noise --peer ed01hcq6…=127.0.0.1:50902 -c 4
+$ swoosh ping ed01hcq6… --peer ed01hcq6…=127.0.0.1:50902 -c 4
 ```
 
-`quirk+noise` is the quirk dial; use it when the peer gates its services.
-
-Over iroh you almost never need this: iroh discovers the peer from its key. If an iroh dial cannot
-reach a peer, the peer is likely offline or discovery is down, not missing an address.
+You almost never need this: iroh discovers the peer from its key. If a dial cannot reach a peer, the peer
+is likely offline or discovery is down, not missing an address.
 
 ## <a id="local"></a>`--local`: this network only
 
@@ -136,11 +77,11 @@ the address `--peer` gives.
 ## <a id="variables"></a>Every flag here has a variable
 
 The flags on this page are left out of `--help`. Each can be set once in the environment instead:
-`SWOOSH_TRANSPORT`, `SWOOSH_LOCAL`, `SWOOSH_PEER`, `SWOOSH_RELAY`, `SWOOSH_RESOLVER`. A flag beats its
+`SWOOSH_LOCAL`, `SWOOSH_PEER`, `SWOOSH_RELAY`, `SWOOSH_RESOLVER`. A flag beats its
 variable. `SWOOSH_PEER` takes several `<key>=<address>`, comma-separated.
 
 ## Next
 
-- [Getting started](getting-started.md) the iroh happy path.
-- [Demo](demo.md) the same key over iroh and quirk+noise.
+- [Getting started](getting-started.md) the first run.
+- [Demo](demo.md) admit a second machine and refuse a stranger.
 - [Troubleshooting](troubleshooting.md) when a dial cannot reach.

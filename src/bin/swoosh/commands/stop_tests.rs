@@ -538,8 +538,7 @@ async fn bare_stop_refuses_a_typed_reach_flag() {
     let base = scratch("reach");
     let home = home_in(&base);
     let hint = format!("{}=127.0.0.1:9000", NodeId::from_ed25519_secret(&[5u8; 32]));
-    let cases: [(&[&str], &str); 3] = [
-        (&["x", "--transport", "quirk"], "--transport"),
+    let cases: [(&[&str], &str); 2] = [
         (&["x", "--local"], "--local"),
         (&["x", "--peer", &hint], "--peer"),
     ];
@@ -726,8 +725,7 @@ async fn stop_me_name_reaches_control_stop_with_no_ssh_or_socket_on_the_peer() {
             tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("pi stopped, its run ended")
-                .expect("the run task joins")
-                .expect("a graceful stop");
+                .expect("the run task joins");
             assert!(line.starts_with("Stopped me/pi ("), "{line}");
         })
         .await;
@@ -798,7 +796,7 @@ async fn a_refused_stop_says_to_try_again_if_the_machine_has_just_started() {
 /// no ssh and no control socket, on its own task: its key, and its run. A second route is there because a
 /// node exposing exactly one service answers every name with it, which would let a dial to any service land
 /// on `control.stop`.
-fn pi_serving_only_control_stop() -> (NodeId, tokio::task::JoinHandle<eyre::Result<()>>) {
+fn pi_serving_only_control_stop() -> (NodeId, tokio::task::JoinHandle<()>) {
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let pi = host.node_id();
     let cancel = CancellationToken::new();

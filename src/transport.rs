@@ -1,14 +1,10 @@
 //! The transport-select seam: the one place a concrete transport is named.
 //!
 //! swoosh is transport-blind everywhere above this module; every verb is generic over `Node<T, D>`.
-//! Here, at the composition root, a `--transport` choice binds one concrete backend under the shared
-//! persisted identity and pairs it with a single composed discovery, the same for every backend:
-//! the explicit `--peer` hints layered over LAN mDNS. So a peer is reached whether it was named on the
-//! command line or simply heard on the network, and iroh honors an explicit hint just as quirk does.
-//! `quirk+noise` composes the sealed wrapper over quirk, still under that same persisted key. Because
-//! every choice derives the [`NodeId`] from the same ed25519 secret, the node keeps ONE address
-//! whichever transport is bound: swap the transport, keep the key, reach the same peer. That is the
-//! whole point of the seam.
+//! Here, at the composition root, iroh is bound under the shared persisted identity and paired with
+//! one composed discovery: the explicit `--peer` hints layered over LAN mDNS. So a peer is reached
+//! whether it was named on the command line or simply heard on the network. The [`NodeId`] derives
+//! from the persisted ed25519 secret, so the node keeps ONE address across runs.
 //!
 //! The iroh bind leans on two services to be reachable at all: a relay for the peers it cannot meet
 //! directly, and a resolver its address record is published to and peers are looked up through. Both
@@ -22,34 +18,24 @@ use std::net::ToSocketAddrs;
 use bifrost::{Layered, NodeId, StaticDiscovery};
 pub use bifrost_iroh::{Reach, RelayHome, RelayUrl, Resolver, ResolverUrl};
 use bifrost_mdns::{Advertising, MdnsDiscovery, MdnsError, Started};
-use clap::{Args, ValueEnum};
+use clap::Args;
 use eyre::WrapErr as _;
 
 use crate::home::Home;
 use crate::reaching::BindRole;
 use crate::serve_toml::ServeToml;
 
-/// The flags every reaching verb shares and no local verb has: which backend to bind, whether the
-/// bind stays off n0, any direct address hints, and the relay and resolver the bind leans on.
+/// The flags every reaching verb shares and no local verb has: whether the bind stays off n0, any
+/// direct address hints, and the relay and resolver the bind leans on.
 /// Flattened into each reach command (`serve`/`ping`/`speed`/`status`) rather than made a root global,
 /// so `contact add/ls/rm` (which bind no transport and dial nobody) are never offered a flag that would
 /// do nothing there. `--home` stays a root global, since it names the node home the address book AND
 /// the bound key both live in, meaningful to both families.
 ///
-/// No flow needs any of them, so all five are left out of `--help`; each is read from its `SWOOSH_<FLAG>`
+/// No flow needs any of them, so all four are left out of `--help`; each is read from its `SWOOSH_<FLAG>`
 /// too, so it can be set once for a shell, and a flag beats its variable.
 #[derive(Debug, Args)]
 pub struct ReachArgs {
-    /// which backend to bind
-    #[arg(
-        long,
-        value_enum,
-        default_value_t,
-        value_name = "iroh|quirk|quirk+noise",
-        env = "SWOOSH_TRANSPORT",
-        hide = true
-    )]
-    pub transport: Transport,
     /// no internet discovery or relays: local mDNS or a direct --peer hint
     // A flag set from its variable reads as clap reads a flag: `0`, `false`, `no`, `off` or empty is off,
     // anything else on.
@@ -129,11 +115,10 @@ impl ReachArgs {
 
     /// Refuse `--relay`/`--resolver` on a bind that would never read them, by name.
     ///
-    /// Only a non-local iroh bind has a relay to offer and a record to publish. Under `--local` there is
-    /// no n0 and no relay at all, and quirk (bare or sealed) is direct-only with no record of its own, so
-    /// either flag on those binds names a server the run would never touch. Refusing says which flag and
-    /// which bind disagree; accepting would leave an operator believing their own relay was in play when
-    /// the run went somewhere else entirely.
+    /// Only a non-local bind has a relay to offer and a record to publish. Under `--local` there is no
+    /// n0 and no relay at all, so either flag there names a server the run would never touch. Refusing
+    /// says which flag and which bind disagree; accepting would leave an operator believing their own
+    /// relay was in play when the run went somewhere else entirely.
     ///
     /// # Errors
     ///
@@ -164,16 +149,7 @@ impl ReachArgs {
     /// root's decision to compose a [`Reach`] at all, so the flags can never be refused on a bind that
     /// uses them, nor the home files read on a bind that does not.
     pub fn unused_reach_bind(&self) -> Option<UnusedReach> {
-        // `--local` leads: it removes n0 whatever the backend, so it is the cause to name even when a
-        // quirk spelling was selected alongside it.
-        if self.local {
-            return Some(UnusedReach::Local);
-        }
-        match self.transport {
-            Transport::Iroh => None,
-            Transport::Quirk => Some(UnusedReach::Quirk),
-            Transport::QuirkNoise => Some(UnusedReach::QuirkNoise),
-        }
+        self.local.then_some(UnusedReach::Local)
     }
 
     /// The first reach flag TYPED on the command line `matches` holds, for a form that reaches no machine
@@ -182,7 +158,7 @@ impl ReachArgs {
     /// `matches` is the verb's own, the one this struct is flattened into: an id it does not define panics
     /// in clap's debug builds.
     pub fn typed_bare(matches: &clap::ArgMatches) -> Option<BareReachFlag> {
-        // The ids and long names are read from this struct's own clap model, so a sixth flag joins the
+        // The ids and long names are read from this struct's own clap model, so a fifth flag joins the
         // check without a list to keep beside it.
         let model = <Self as Args>::augment_args(clap::Command::new("reach"));
         model
@@ -216,7 +192,7 @@ pub struct UnusedReachFlag {
     pub bind: UnusedReach,
 }
 
-/// The two reach flags only a non-local iroh bind reads.
+/// The two reach flags only a non-local bind reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReachFlag {
     /// `--relay`, the relay this node offers.
@@ -243,49 +219,35 @@ impl ReachFlag {
             (Self::Resolver, UnusedReach::Local) => {
                 "swoosh publishes no record when it runs on this network only."
             }
-            (Self::Relay, UnusedReach::Quirk | UnusedReach::QuirkNoise) => "quirk uses no relay.",
-            (Self::Resolver, UnusedReach::Quirk | UnusedReach::QuirkNoise) => {
-                "quirk publishes no record."
-            }
         }
     }
 }
 
 /// A bind that reads neither reach flag, named as the user spelled it so a refusal points at a flag they
-/// can find on their own command line. An enum rather than a message string: a fourth bind shape has to
+/// can find on their own command line. An enum rather than a message string: a second bind shape has to
 /// be decided here rather than defaulting into one of these sentences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnusedReach {
-    /// `--local`: no n0 discovery, no relays, no record, whatever the backend under it.
+    /// `--local`: no n0 discovery, no relays, no record.
     Local,
-    /// `--transport quirk`: direct-only, with no discovery and no relay of its own.
-    Quirk,
-    /// `--transport quirk+noise`: the same direct-only backend under the sealed wrapper.
-    QuirkNoise,
 }
 
 impl UnusedReach {
-    /// The clause naming the bind, both spellings for `--local`; `quirk` covers bare and sealed quirk,
-    /// however it was set.
+    /// The clause naming the bind, both spellings, since either may have set it.
     fn clause(self) -> &'static str {
         match self {
             Self::Local => "with --local or SWOOSH_LOCAL",
-            Self::Quirk | Self::QuirkNoise => "over quirk",
         }
     }
 }
 
-/// What this run actually bound: the backend, the bind mode, and the two reach services.
+/// What this run actually bound: the bind mode and the two reach services.
 ///
-/// The three travel together because every consumer wants all three: a failed dial's teaching line reads
-/// each of them, and a verb that reports its bind reads the backend off the same value. Composed ONCE in
-/// the composition root, then carried as one field rather than three parallel parameters that a new verb
-/// could thread out of step.
+/// The two travel together because a failed dial's teaching line reads both. Composed ONCE in the
+/// composition root, then carried as one field rather than parallel parameters that a new verb could
+/// thread out of step.
 #[derive(Debug, Clone)]
 pub struct Bound {
-    /// The backend that was bound, for the fix a failed dial needs (quirk's `--peer` remedy) and for a
-    /// verb that names which transport carried the session.
-    pub transport: Transport,
     /// Whether the bind is the `--local` shape (no n0 discovery, no relays): a failed reach names the
     /// flag as the cause, since the internet fallback is what it removed.
     pub local: bool,
@@ -294,41 +256,14 @@ pub struct Bound {
     pub reach: Reach,
 }
 
-/// Which concrete transport to bind under the shared identity. Default [`iroh`](Self::Iroh).
-///
-/// [`QuirkNoise`](Self::QuirkNoise) is quirk behind the sealed wrapper: the same direct-only backend
-/// with a Noise handshake over it, so the reached key is proven rather than announced. Bare
-/// [`Quirk`](Self::Quirk) is the announced base of the composition; a signet-rooted gate refuses to
-/// arm over it and a credential is never written to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
-pub enum Transport {
-    /// across the internet, NAT-traversing; serves gated
-    #[default]
-    Iroh,
-    /// our own UDP transport; direct-only; reaches open services; cannot serve gated
-    Quirk,
-    /// our own UDP transport; direct-only; serves gated; a Noise handshake proves the key
-    #[value(name = "quirk+noise")]
-    QuirkNoise,
-}
-
-impl Transport {
-    /// The short name of the bound backend, for diagnostics like `swoosh status` that report which
-    /// transport carried the session. The label of the concrete backend chosen at the seam, passed as a
-    /// plain value so the verb stays transport-blind and never names the backend itself.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Iroh => "iroh",
-            Self::Quirk => "quirk",
-            Self::QuirkNoise => "quirk+noise",
-        }
-    }
-}
+/// The name of the path a session rides, for the readouts that say which carried it (`via iroh`). A
+/// plain value named here, at the seam, so the verbs that print it stay transport-blind.
+pub const FAST_PATH: &str = "iroh";
 
 /// A direct hint for one peer: its [`NodeId`] mapped to reachable addresses. Parsed at the clap boundary
 /// from `<key>=<host:port>`, where the host may be an IP OR a DNS name (a Docker service, a LAN host): it
 /// resolves via the system resolver, so a readable `nodea:9000` reaches a peer by name. Layered under LAN
-/// mDNS to form the discovery both transports use.
+/// mDNS to form the discovery the bind uses.
 ///
 /// A DIFFERENT concept from the dial target [`Peer`](crate::peer::Peer): a hint says WHERE to find a key,
 /// the dial target says WHO to reach. Named `PeerHint` so the two never share the `Peer` name that used to
@@ -344,7 +279,7 @@ pub struct PeerHint {
     text: String,
 }
 
-/// The discovery both transports compose: explicit `--peer` hints layered over LAN mDNS.
+/// The discovery the bind composes: explicit `--peer` hints layered over LAN mDNS.
 ///
 /// The static hints lead (a hand-fed address wins over a heard one for the same peer), and mDNS fills
 /// in every peer no hint named. An empty resolve from both means "no hints, let the transport try",
