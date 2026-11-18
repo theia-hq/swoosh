@@ -19,18 +19,20 @@
 //! through a running `serve`, before an `Open` that presents a due standing ([`OpenRenewal`]), there
 //! within a fixed bound.
 
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::future::Future;
 use core::time::Duration;
 use std::io;
-use std::rc::Rc;
 use std::time::SystemTime;
 
 use bifrost::{Discovery, NodeId, Transport};
-use futures::FutureExt as _;
 use futures::future::{LocalBoxFuture, Shared};
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt as _, StreamExt as _};
 use nauthy::{Link, Revocations as _, VerifyKey};
+use tightbeam::identity::AsVerifyKey as _;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use crate::contacts::{ContactsStore, DeviceLabel};
@@ -127,15 +129,10 @@ async fn standing_for(home: &Home, peer: VerifyKey, now: SystemTime) -> Result<L
     if doc.is_revoked_key(&peer) {
         return Err(Miss::RowRevoked);
     }
-    let cap = row.standing.cap();
-    let id_revoked = revocations.is_revoked(cap)
-        || cap
-            .root_revocation_id()
-            .is_some_and(|id| doc.revoked().iter().any(|revoked| revoked.id == id));
-    if id_revoked {
+    if revocations.is_revoked(row.standing.cap()) || revokes_id(&doc, &row.standing) {
         return Err(Miss::IdRevoked);
     }
-    match cap.valid_until() {
+    match row.standing.cap().valid_until() {
         Ok(Some(ends)) if ends >= now => Ok(row.standing.clone()),
         _ => Err(Miss::Ended),
     }
@@ -215,13 +212,22 @@ pub async fn read_answer(mut reader: impl AsyncRead + Unpin) -> Result<Option<Li
     }
 }
 
-/// Whether this home's standing needs the route: it is a device's, and it has passed its date or its id
-/// is revoked here. On any other home, and on one whose files cannot be read, it does not.
+/// Whether this home's standing needs the route: it is a device's, and it has passed its date, or its id
+/// is revoked here or by the update held here. On any other home, on one whose files cannot be read, and
+/// on one whose own key a list held here revokes, it does not: that home can take no renewal
+/// ([`take_renewal`](crate::joining::take_renewal)), so waiting on one would only stall it.
 pub async fn is_due(home: &Home, now: SystemTime) -> bool {
-    let until = match Standing::read(home).await {
-        Ok(Standing::Device { until, .. } | Standing::HoldsRoot { until, .. }) => until,
+    let (pin, until) = match Standing::read(home).await {
+        Ok(Standing::Device { pin, until } | Standing::HoldsRoot { pin, until }) => (pin, until),
         Ok(Standing::Unpinned | Standing::InterruptedMint { .. }) | Err(_) => return false,
     };
+    let Ok(pin) = pin.verify_key() else {
+        return false;
+    };
+    // Before the date: a lapsed home whose key is revoked would otherwise stall every verb on a renewal.
+    if crate::root::own_key_revoked(home, pin).unwrap_or(true) {
+        return false;
+    }
     if until <= now {
         return true;
     }
@@ -229,6 +235,21 @@ pub async fn is_due(home: &Home, now: SystemTime) -> bool {
         return false;
     };
     crate::revoked::open(home).is_ok_and(|revoked| revoked.is_revoked(badge.cap()))
+        || held_update_revokes_id(home, pin, &badge)
+}
+
+/// Whether the update held here, under `pin`, revokes `standing`'s id. A fold copies an update's revoked
+/// ids into the revocations file, but `devices` is the record, so it is read as [`standing_for`] reads it.
+pub(crate) fn held_update_revokes_id(home: &Home, pin: VerifyKey, standing: &Link) -> bool {
+    read_held(&home.devices(), pin).is_some_and(|(doc, _)| revokes_id(&doc, standing))
+}
+
+/// Whether `doc` revokes `standing`'s id.
+fn revokes_id(doc: &crate::roster::RosterDoc, standing: &Link) -> bool {
+    standing
+        .cap()
+        .root_revocation_id()
+        .is_some_and(|id| doc.revoked().iter().any(|revoked| revoked.id == id))
 }
 
 /// A standing this machine took from one of your devices.
@@ -243,6 +264,15 @@ pub struct Renewed {
 }
 
 impl Renewed {
+    /// A standing this machine took from `from`, ending at `until`.
+    async fn here(home: &Home, from: String, until: SystemTime) -> Self {
+        Self {
+            from,
+            name: own_name(home).await,
+            until,
+        }
+    }
+
     /// The day the standing it took ends, as a line prints it.
     pub fn ends(&self) -> crate::root::Date {
         crate::root::Date(
@@ -253,95 +283,42 @@ impl Renewed {
     }
 }
 
-/// Ask your devices under `me` for this machine's standing, once each, in the order an exchange asks
-/// them, and take the first that the same-root write takes. Never a machine outside `me`.
+/// Ask your devices under `me` for this machine's standing, once each within [`EACH`], in the order an
+/// exchange asks them, and take the first that the same-root write takes. Never a machine outside `me`.
+/// `home.lock` is waited for as long as another change holds it, and no timer ever covers
+/// [`take_renewal`](crate::joining::take_renewal): once the lock is held, the read and the one atomic write
+/// run to their end.
 pub async fn pick_up(home: &Home, fetch: &impl Fetch) -> eyre::Result<Option<Renewed>> {
-    pick_up_within(home, fetch, Bound::Each).await
-}
-
-/// The body of [`pick_up`], under `bound`. No timer ever covers [`take_renewal`](crate::joining::take_renewal):
-/// once `home.lock` is held, the read and the one atomic write run to their end.
-async fn pick_up_within(
-    home: &Home,
-    fetch: &impl Fetch,
-    bound: Bound,
-) -> eyre::Result<Option<Renewed>> {
     for device in crate::sync::mine(home).await? {
-        let Some(ask) = bound.ask() else {
-            tracing::debug!(device = %device.name, "no time left to ask");
-            break;
+        let Some(fetched) = ask(fetch, &device, Instant::now() + EACH).await else {
+            continue;
         };
-        let fetched = match tokio::time::timeout(ask, fetch.fetch(device.key)).await {
-            Ok(Ok(Some(standing))) => standing,
-            Ok(Ok(None)) => {
-                tracing::debug!(device = %device.name, "no renewal there");
-                continue;
-            }
-            Ok(Err(error)) => {
-                tracing::debug!(device = %device.name, %error, "the pick-up failed");
-                continue;
-            }
-            Err(_) => {
-                tracing::debug!(device = %device.name, "the pick-up timed out");
-                continue;
-            }
-        };
-        let home_lock = bound.lock(home).await?;
+        let home_lock = HomeWrite::take(home).await?;
         let taken = crate::joining::take_renewal(&home_lock, home, &fetched).await?;
         drop(home_lock);
         if let Some(until) = taken {
-            return Ok(Some(Renewed {
-                from: device.name,
-                name: own_name(home).await,
-                until,
-            }));
+            return Ok(Some(Renewed::here(home, device.name, until).await));
         }
         tracing::debug!(device = %device.name, "a fetched standing was not taken");
     }
     Ok(None)
 }
 
-/// What bounds one pick-up's waits.
-#[derive(Debug, Clone, Copy)]
-enum Bound {
-    /// A verb's or a round's own: each device within [`EACH`], and `home.lock` waited for as long as
-    /// another change holds it.
-    Each,
-    /// Before an `Open`: every ask ends by `asks`, and `home.lock` is taken within [`OPEN_LOCK`].
-    Open {
-        /// When the device asks, all together, must end.
-        asks: Instant,
-    },
-}
-
-impl Bound {
-    /// An `Open`'s bound, its asks starting now.
-    fn open() -> Self {
-        Self::Open {
-            asks: Instant::now() + OPEN_ASKS,
+/// Ask `device` until `deadline`: the standing it handed over, or `None` for every other end, each traced.
+async fn ask(fetch: &impl Fetch, device: &Device, deadline: Instant) -> Option<Link> {
+    match tokio::time::timeout_at(deadline, fetch.fetch(device.key)).await {
+        Ok(Ok(Some(standing))) => Some(standing),
+        Ok(Ok(None)) => {
+            tracing::debug!(device = %device.name, "no renewal there");
+            None
         }
-    }
-
-    /// How long the next device may take, or `None` when the asks' share has run out.
-    fn ask(self) -> Option<Duration> {
-        match self {
-            Self::Each => Some(EACH),
-            Self::Open { asks } => {
-                let left = asks.saturating_duration_since(Instant::now());
-                (!left.is_zero()).then(|| EACH.min(left))
-            }
+        Ok(Err(error)) => {
+            tracing::debug!(device = %device.name, %error, "the pick-up failed");
+            None
         }
-    }
-
-    /// Take `home.lock`. Taking it is a try and a sleep, so a timeout ends it between tries, never with
-    /// the lock held.
-    async fn lock(self, home: &Home) -> eyre::Result<HomeWrite> {
-        match self {
-            Self::Each => Ok(HomeWrite::take(home).await?),
-            Self::Open { .. } => tokio::time::timeout(OPEN_LOCK, HomeWrite::take(home))
-                .await
-                .map_err(|_| eyre::eyre!("home.lock was held past {OPEN_LOCK:?}"))?
-                .map_err(Into::into),
+        Err(_) => {
+            tracing::debug!(device = %device.name, "the pick-up timed out");
+            None
         }
     }
 }
@@ -359,17 +336,12 @@ pub enum PickUp {
 }
 
 /// After a round whose `replies` show a device refused this machine's standing, and only when that
-/// standing needs a renewal: try the pick-up route.
+/// standing needs a renewal: try the pick-up route. A failure to run is a miss like any other.
 pub async fn after_round(home: &Home, fetch: &impl Fetch, replies: &[(Device, Reply)]) -> PickUp {
     if !crate::sync::refused(replies) || !is_due(home, SystemTime::now()).await {
         return PickUp::Skipped;
     }
-    try_pick_up(home, fetch, Bound::Each).await
-}
-
-/// A pick-up under `bound`, whose failure to run is a miss like any other.
-async fn try_pick_up(home: &Home, fetch: &impl Fetch, bound: Bound) -> PickUp {
-    match pick_up_within(home, fetch, bound).await {
+    match pick_up(home, fetch).await {
         Ok(Some(renewed)) => PickUp::Took(renewed),
         Ok(None) => PickUp::Missed,
         Err(error) => {
@@ -379,52 +351,110 @@ async fn try_pick_up(home: &Home, fetch: &impl Fetch, bound: Bound) -> PickUp {
     }
 }
 
-/// How long the device asks of a renewal before an `Open` may take, all together.
+/// How long the device asks of a renewal before an `Open` may take: every device is asked at once, and
+/// every ask ends by then.
 const OPEN_ASKS: Duration = Duration::from_secs(6);
 
-/// How long a renewal before an `Open` waits for `home.lock`.
+/// How long a renewal before an `Open` waits for `home.lock` at most, each time, within its bound.
 const OPEN_LOCK: Duration = Duration::from_secs(2);
 
-/// The bound on a renewal before an `Open`, which the wait for an `Open`'s reply counts. The write after
-/// the lock is not timed: it is one atomic file write.
+/// The bound on a renewal before an `Open`, from its start to its end, which the wait for an `Open`'s
+/// reply counts. The write after the lock is not timed: it is one atomic file write.
 pub const OPEN_RENEWAL: Duration = Duration::from_secs(8);
 
 const _: () = assert!(OPEN_ASKS.as_millis() + OPEN_LOCK.as_millis() == OPEN_RENEWAL.as_millis());
-// The first device always gets a whole ask, so on a stalled Main session its open's own deadline fires
-// and evicts before the ask is cut. A second or later device gets only what is left of the asks, which
-// may be less than the Main open deadline, so its ask can be cut first and cannot evict a stalled session.
+// Every device is asked at once, each with a whole `EACH`, so on a stalled Main session its open's own
+// deadline fires and evicts before the ask is cut.
 const _: () = assert!(EACH.as_millis() <= OPEN_ASKS.as_millis());
 
 /// How long after a miss an `Open` does not ask again. The hourly round keeps asking meanwhile.
 pub const OPEN_BACK_OFF: Duration = Duration::from_secs(5 * 60);
+
+/// How long after it was fetched a standing kept while another change held `home.lock` may still be
+/// written.
+const OPEN_KEEP: Duration = Duration::from_secs(5 * 60);
 
 /// The renewal a resident runs before an `Open` that presents this home's standing, when that standing is
 /// due: one flight at a time, shared by every `Open` that arrives while it runs, bounded by
 /// [`OPEN_RENEWAL`], and not tried again for [`OPEN_BACK_OFF`] after it misses. Either way the `Open` then
 /// goes on with whatever standing the home holds.
 ///
-/// Borrowed by the resident for its run. Structured: no task is spawned, and dropping it drops any flight.
+/// Borrowed by the resident for its run, which polls [`drive`](Self::drive) as one of its arms: a flight
+/// runs to its end and its end counts even when every `Open` waiting on it has left, so `Open`s that are
+/// cancelled cannot start flights at will. Structured: no task is spawned, and dropping it drops any
+/// flight.
 pub struct OpenRenewal<'a, F: Fetch> {
     home: &'a Home,
     fetch: &'a F,
-    // The resident's opens interleave on one task, so a `RefCell` suffices; no borrow crosses an await.
+    // The resident's opens and its run interleave on one task, so a `RefCell` suffices; no borrow crosses
+    // an await.
     state: RefCell<Asking<'a>>,
+    // Wakes `drive` when an `Open` starts a flight. A start while `drive` is not waiting leaves a permit,
+    // so no flight goes undriven.
+    started: Notify,
 }
 
 /// Where the renewal before an `Open` stands.
 enum Asking<'a> {
-    /// Nothing in flight, and no recent miss.
+    /// Nothing in flight, no recent miss, and nothing kept.
     Idle,
     /// A flight runs; an `Open` that arrives now waits on it rather than asking again.
-    Flying(Rc<Flight<'a>>),
+    Flying(Flight<'a>),
     /// The last flight missed at this instant.
     Missed(Instant),
+    /// The last flight fetched a standing and could not take `home.lock` in time. The next flight tries to
+    /// write it before asking anyone. Dropped when that flight starts; one older than [`OPEN_KEEP`] is
+    /// dropped unused.
+    Kept(Kept),
 }
 
-/// One shared renewal. Polled by whichever waiter runs, so it never depends on the `Open` that started it.
-struct Flight<'a> {
-    future: Shared<LocalBoxFuture<'a, PickUp>>,
-    waiters: Cell<u16>,
+/// One shared renewal, polled by the run and by every `Open` waiting on it, so it never depends on the
+/// `Open` that started it.
+type Flight<'a> = Shared<LocalBoxFuture<'a, Landed>>;
+
+/// A standing one of your devices handed over that could not be written yet. It is written only through
+/// the same-root write, which re-reads the home under `home.lock`.
+#[derive(Debug, Clone)]
+struct Kept {
+    standing: Link,
+    /// The device it came from, `me/<name>`.
+    from: String,
+    /// When it was fetched.
+    at: Instant,
+}
+
+/// How a flight ended.
+#[derive(Debug, Clone)]
+enum Landed {
+    /// The standing was not due, so nothing was asked.
+    NotDue,
+    /// This machine took its renewal.
+    Took(Renewed),
+    /// A miss: nothing was taken, through no answer, no renewal, a refusal, or a read or write error.
+    Missed,
+    /// A standing was fetched and `home.lock` was not taken before the flight's end. Not a miss: the lock
+    /// is held by a command on this machine, which says nothing about any device.
+    Kept(Kept),
+}
+
+impl Landed {
+    /// What an `Open` waiting on the flight reads. A kept standing is not yet a renewal.
+    fn pick_up(&self) -> PickUp {
+        match self {
+            Self::NotDue => PickUp::Skipped,
+            Self::Took(renewed) => PickUp::Took(renewed.clone()),
+            Self::Missed | Self::Kept(_) => PickUp::Missed,
+        }
+    }
+
+    /// Where the renewal stands after this end. Only a miss starts the back-off.
+    fn next<'a>(self) -> Asking<'a> {
+        match self {
+            Self::NotDue | Self::Took(_) => Asking::Idle,
+            Self::Missed => Asking::Missed(Instant::now()),
+            Self::Kept(kept) => Asking::Kept(kept),
+        }
+    }
 }
 
 impl<'a, F: Fetch> OpenRenewal<'a, F> {
@@ -434,6 +464,7 @@ impl<'a, F: Fetch> OpenRenewal<'a, F> {
             home,
             fetch,
             state: RefCell::new(Asking::Idle),
+            started: Notify::new(),
         }
     }
 
@@ -450,62 +481,167 @@ impl<'a, F: Fetch> OpenRenewal<'a, F> {
         let flight = {
             let mut state = self.state.borrow_mut();
             match &*state {
-                Asking::Flying(flight) => Rc::clone(flight),
+                Asking::Flying(flight) => flight.clone(),
                 Asking::Missed(at) if at.elapsed() < OPEN_BACK_OFF => return PickUp::Skipped,
-                Asking::Missed(_) | Asking::Idle => {
-                    let flight = Rc::new(Flight {
-                        future: Self::fly(self.home, self.fetch).boxed_local().shared(),
-                        waiters: Cell::new(0),
-                    });
-                    *state = Asking::Flying(Rc::clone(&flight));
+                Asking::Missed(_) | Asking::Idle | Asking::Kept(_) => {
+                    let kept = match core::mem::replace(&mut *state, Asking::Idle) {
+                        Asking::Kept(kept) if kept.at.elapsed() < OPEN_KEEP => Some(kept),
+                        _ => None,
+                    };
+                    let flight = Self::fly(self.home, self.fetch, kept)
+                        .boxed_local()
+                        .shared();
+                    *state = Asking::Flying(flight.clone());
+                    self.started.notify_one();
                     flight
                 }
             }
         };
-        flight.waiters.set(flight.waiters.get() + 1);
-        let waiting = Waiting {
-            state: &self.state,
-            flight: Rc::clone(&flight),
-        };
-        let done = flight.future.clone().await;
-        let mut state = self.state.borrow_mut();
-        if matches!(&*state, Asking::Flying(current) if Rc::ptr_eq(current, &flight)) {
-            *state = match done {
-                PickUp::Missed => Asking::Missed(Instant::now()),
-                PickUp::Took(_) | PickUp::Skipped => Asking::Idle,
+        let landed = flight.clone().await;
+        self.land(&flight, &landed);
+        landed.pick_up()
+    }
+
+    /// Drive every flight an `Open` starts to its end, for as long as the run lasts: an arm of the
+    /// resident's run, as [`Peers::sweep`](crate::peers::Peers::sweep) is.
+    pub async fn drive(&self) -> core::convert::Infallible {
+        loop {
+            let flying = match &*self.state.borrow() {
+                Asking::Flying(flight) => Some(flight.clone()),
+                Asking::Idle | Asking::Missed(_) | Asking::Kept(_) => None,
             };
+            match flying {
+                Some(flight) => {
+                    let landed = flight.clone().await;
+                    self.land(&flight, &landed);
+                }
+                None => self.started.notified().await,
+            }
         }
-        drop(state);
-        drop(waiting);
-        done
     }
 
-    /// One flight: when the standing is due, a pick-up under an `Open`'s bound.
-    async fn fly(home: &'a Home, fetch: &'a F) -> PickUp {
-        if !is_due(home, SystemTime::now()).await {
-            return PickUp::Skipped;
-        }
-        try_pick_up(home, fetch, Bound::open()).await
-    }
-}
-
-/// One `Open` waiting on a flight. The last to leave before it lands clears it, so the next `Open` starts
-/// afresh, with a whole bound, rather than resuming a flight whose deadlines have passed.
-struct Waiting<'s, 'a> {
-    state: &'s RefCell<Asking<'a>>,
-    flight: Rc<Flight<'a>>,
-}
-
-impl Drop for Waiting<'_, '_> {
-    fn drop(&mut self) {
-        let remaining = self.flight.waiters.get() - 1;
-        self.flight.waiters.set(remaining);
-        if remaining != 0 {
-            return;
-        }
+    /// Settle the state on `flight`'s end. The run and every waiter call this; only the first, while
+    /// `flight` is still the current one, moves it.
+    fn land(&self, flight: &Flight<'a>, landed: &Landed) {
         let mut state = self.state.borrow_mut();
-        if matches!(&*state, Asking::Flying(current) if Rc::ptr_eq(current, &self.flight)) {
-            *state = Asking::Idle;
+        if matches!(&*state, Asking::Flying(current) if current.ptr_eq(flight)) {
+            *state = landed.clone().next();
+        }
+    }
+
+    /// One flight. When the standing is due: the kept standing first, then every device at once, the
+    /// first standing taken winning. It ends [`OPEN_RENEWAL`] after it starts: every ask by
+    /// [`OPEN_ASKS`], and each wait for `home.lock` within [`OPEN_LOCK`] and the time left.
+    async fn fly(home: &'a Home, fetch: &'a F, kept: Option<Kept>) -> Landed {
+        let start = Instant::now();
+        let (asks_end, end) = (start + OPEN_ASKS, start + OPEN_RENEWAL);
+        if !is_due(home, SystemTime::now()).await {
+            return Landed::NotDue;
+        }
+        if let Some(kept) = kept {
+            match take_by(home, &kept.standing, end).await {
+                Taken::Took(until) => {
+                    return Landed::Took(Renewed::here(home, kept.from, until).await);
+                }
+                Taken::Refused => {
+                    tracing::debug!(device = %kept.from, "a kept standing was not taken")
+                }
+                Taken::LockHeld => return Landed::Kept(kept),
+                Taken::Failed => return Landed::Missed,
+            }
+        }
+        let devices = match crate::sync::mine(home).await {
+            Ok(devices) => devices,
+            Err(error) => {
+                tracing::debug!(%error, "the pick-up could not list your devices");
+                return Landed::Missed;
+            }
+        };
+        let deadline = asks_end.min(Instant::now() + EACH);
+        let mut asks: FuturesUnordered<_> = devices
+            .into_iter()
+            .map(|device| async move {
+                let fetched = ask(fetch, &device, deadline).await;
+                (device, fetched)
+            })
+            .collect();
+        // Answers are taken as they come. While one is being written the other asks are not polled, but
+        // their deadline still runs, so none outlives it.
+        while let Some((device, fetched)) = asks.next().await {
+            let Some(fetched) = fetched else {
+                continue;
+            };
+            let at = Instant::now();
+            match take_by(home, &fetched, end).await {
+                Taken::Took(until) => {
+                    return Landed::Took(Renewed::here(home, device.name, until).await);
+                }
+                Taken::Refused => {
+                    tracing::debug!(device = %device.name, "a fetched standing was not taken");
+                    after_refusal().await;
+                }
+                Taken::LockHeld => {
+                    return Landed::Kept(Kept {
+                        standing: fetched,
+                        from: device.name,
+                        at,
+                    });
+                }
+                Taken::Failed => return Landed::Missed,
+            }
+        }
+        Landed::Missed
+    }
+}
+
+/// After a refused write, before the next answer is read: a test widens it, so an answer already in is
+/// written only after the asks have ended. Per thread, so only the test that sets it is slowed.
+async fn after_refusal() {
+    #[cfg(test)]
+    if let Some(pause) = AFTER_REFUSAL.get() {
+        tokio::time::sleep(pause).await;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_REFUSAL: core::cell::Cell<Option<Duration>> = const { core::cell::Cell::new(None) };
+}
+
+/// How one try at writing a fetched standing ended.
+enum Taken {
+    /// Written; the standing ends then.
+    Took(SystemTime),
+    /// The same-root write refused it.
+    Refused,
+    /// `home.lock` was not taken in time.
+    LockHeld,
+    /// The lock or the home could not be read or written.
+    Failed,
+}
+
+/// Write `standing` through the same-root write, waiting for `home.lock` within [`OPEN_LOCK`] and never
+/// past `end`. Taking the lock is a try and a sleep, so a timeout ends it between tries, never with the
+/// lock held.
+async fn take_by(home: &Home, standing: &Link, end: Instant) -> Taken {
+    let wait = end.min(Instant::now() + OPEN_LOCK);
+    let home_lock = match tokio::time::timeout_at(wait, HomeWrite::take(home)).await {
+        Ok(Ok(home_lock)) => home_lock,
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "home.lock could not be taken");
+            return Taken::Failed;
+        }
+        Err(_) => {
+            tracing::debug!("home.lock was held past the renewal's bound");
+            return Taken::LockHeld;
+        }
+    };
+    match crate::joining::take_renewal(&home_lock, home, standing).await {
+        Ok(Some(until)) => Taken::Took(until),
+        Ok(None) => Taken::Refused,
+        Err(error) => {
+            tracing::debug!(%error, "the fetched standing could not be written");
+            Taken::Failed
         }
     }
 }
