@@ -23,6 +23,7 @@ use super::{
 use crate::config;
 use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::home::Home;
+use crate::peers::Hints;
 use crate::roster::{Epoch, Folded, Member, RosterDoc, fold};
 use crate::serve::control_codec::{OpenLane, OpenRequest};
 use crate::serve::{LOOKUP_ROOT_SERVICE, RENEWAL_SERVICE, SYNC_SERVICE};
@@ -567,7 +568,7 @@ impl Fetch for Held {
 fn open(service: &str, slip: Option<Link>) -> OpenRequest {
     OpenRequest::new(
         node(NAS),
-        Vec::new(),
+        Hints::NONE,
         service.parse().unwrap(),
         OpenLane::Main,
         slip,

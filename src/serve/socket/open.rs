@@ -15,14 +15,15 @@ use tokio::io;
 
 use super::{ControlError, MAX_FRAME, local_detail};
 use crate::credential::LinkExt as _;
+use crate::peers::Hints;
 
 /// The largest body request 4 (Open) may declare. Every other request and every reply keeps
 /// [`MAX_FRAME`]. Declaring more than the grammar can use buys nothing: the decoder requires exact
 /// consumption, so the extra room is never padding.
 pub const MAX_OPEN_REQUEST: usize = 16 * 1024;
 
-/// At most this many dial hints ride one Open.
-const MAX_HINTS: usize = 16;
+/// At most this many dial hints ride one Open: the most one open may hand its dial.
+const MAX_HINTS: usize = Hints::MAX;
 /// A hint's text length. The longest `SocketAddr` text (a scoped IPv6 address with a port) is 58 bytes.
 const MAX_HINT_LEN: usize = 64;
 /// A service name's length, the same bound the service grammar holds.
@@ -154,14 +155,15 @@ pub enum MalformedOpen {
 /// An Open request body: reach `peer`'s `service` on `lane`, presenting `slip` when there is one.
 ///
 /// Built only through [`new`](Self::new) or [`decode`](Self::decode), so a value always encodes.
-/// Hints keep their order and duplicates; they are addresses, never names to resolve. Not `Clone`:
+/// Hints keep their order and duplicates; they are addresses, never names to resolve, held as
+/// [`Hints`] holds them. Not `Clone`:
 /// one request owns its slip, and a copy would be a second credential body to account for.
 ///
 /// Decoded bytes need not re-encode to the same bytes: a hint is parsed into an address and rendered
 /// afresh, never kept as the text that arrived, so two spellings of one address encode as one.
 pub struct OpenRequest {
     peer: NodeId,
-    hints: Vec<SocketAddr>,
+    hints: Hints,
     service: Service,
     lane: OpenLane,
     slip: Option<Link>,
@@ -172,20 +174,17 @@ impl OpenRequest {
     ///
     /// # Errors
     ///
-    /// [`MalformedOpen::HintCount`] past 16 hints, and [`MalformedOpen::SlipPeer`] for a slip that
-    /// does not address `peer`, so a request the resident would refuse is never built. A slip's length
-    /// needs no check: a parsed link's token is held to 13,200 bytes, so its text always fits the slip
-    /// field.
+    /// [`MalformedOpen::SlipPeer`] for a slip that does not address `peer`, so a request the resident
+    /// would refuse is never built. The hint count needs no check here: [`Hints`] holds at most 16. A
+    /// slip's length needs none either: a parsed link's token is held to 13,200 bytes, so its text
+    /// always fits the slip field.
     pub fn new(
         peer: NodeId,
-        hints: Vec<SocketAddr>,
+        hints: Hints,
         service: Service,
         lane: OpenLane,
         slip: Option<Link>,
     ) -> Result<Self, MalformedOpen> {
-        if hints.len() > MAX_HINTS {
-            return Err(MalformedOpen::HintCount);
-        }
         Self::slip_addresses(peer, slip.as_ref())?;
         Ok(Self {
             peer,
@@ -202,7 +201,7 @@ impl OpenRequest {
     }
 
     /// The dial hints, in the order the caller gave them.
-    pub fn hints(&self) -> &[SocketAddr] {
+    pub fn hints(&self) -> &Hints {
         &self.hints
     }
 
@@ -246,9 +245,10 @@ impl OpenRequest {
     pub fn encode(&self) -> Result<Vec<u8>, MalformedOpen> {
         let mut out = Vec::with_capacity(MIN_OPEN_BODY);
         out.extend_from_slice(self.peer.key());
-        // Both counts are held under 256 by construction: `new` bounds the hints, `Service` its length.
-        out.push(u8::try_from(self.hints.len()).map_err(|_| MalformedOpen::HintCount)?);
-        for hint in &self.hints {
+        // Both counts are held under 256 by construction: `Hints` bounds the hints, `Service` its length.
+        let hints = self.hints.as_slice();
+        out.push(u8::try_from(hints.len()).map_err(|_| MalformedOpen::HintCount)?);
+        for hint in hints {
             let mut text = AddrText::default();
             write!(text, "{hint}").map_err(|_| MalformedOpen::HintLength)?;
             out.push(u8::try_from(text.len).map_err(|_| MalformedOpen::HintLength)?);
@@ -286,12 +286,14 @@ impl OpenRequest {
             .map_err(|_| MalformedOpen::Peer)?;
         let mut hints = Vec::with_capacity(raw.hint_count);
         for hint in &raw.hints[..raw.hint_count] {
-            let hint = core::str::from_utf8(hint)
+            let hint: SocketAddr = core::str::from_utf8(hint)
                 .ok()
                 .and_then(|text| text.parse().ok())
                 .ok_or(MalformedOpen::Hint)?;
             hints.push(hint);
         }
+        // The scan already held the count to the same bound.
+        let hints = Hints::new(hints).map_err(|_| MalformedOpen::HintCount)?;
         let service = core::str::from_utf8(raw.service)
             .ok()
             .and_then(|text| text.parse().ok())
@@ -322,7 +324,7 @@ impl fmt::Debug for OpenRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenRequest")
             .field("peer", &self.peer)
-            .field("hints", &self.hints.len())
+            .field("hints", &self.hints)
             .field("service", &self.service)
             .field("lane", &self.lane)
             .field("slip", &self.slip.as_ref().map(|_| Redacted))

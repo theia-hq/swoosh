@@ -10,6 +10,7 @@ use super::{
     OpenRefusal, OpenRequest, PeerRefusal,
 };
 use crate::credential::LinkExt as _;
+use crate::peers::{Hints, TooManyHints};
 use crate::serve::control_codec::{ControlError, Request, Response};
 use crate::testkit::{TestNode, TestRoot};
 
@@ -74,7 +75,7 @@ fn the_minimal_open_body_is_38_bytes_ending_unobserved() {
     expected.extend_from_slice(&[0x00, 0x01, 0x78, 0x00, 0x00, 0x00]);
     let request = OpenRequest::new(
         peer(),
-        Vec::new(),
+        Hints::NONE,
         "x".parse().unwrap(),
         OpenLane::Main,
         None,
@@ -86,7 +87,7 @@ fn the_minimal_open_body_is_38_bytes_ending_unobserved() {
     assert_eq!(encoded, minimal());
     let decoded = decode(&encoded).unwrap();
     assert_eq!(decoded.peer(), peer());
-    assert!(decoded.hints().is_empty());
+    assert!(decoded.hints().as_slice().is_empty());
     assert_eq!(decoded.service().as_str(), "x");
     assert_eq!(decoded.lane(), OpenLane::Main);
     assert!(decoded.slip().is_none());
@@ -103,7 +104,7 @@ fn lanes_are_the_byte_before_slip_presence() {
         bytes[35] = byte;
         assert_eq!(decode(&bytes).unwrap().lane(), lane);
         let request =
-            OpenRequest::new(peer(), Vec::new(), "x".parse().unwrap(), lane, None).unwrap();
+            OpenRequest::new(peer(), Hints::NONE, "x".parse().unwrap(), lane, None).unwrap();
         assert_eq!(request.encode().unwrap(), bytes);
     }
     for byte in [3, 0xff] {
@@ -137,6 +138,7 @@ fn hint_count_is_at_most_16() {
         decode(&body(&[hint; 16], b"x", 0, None, 0))
             .unwrap()
             .hints()
+            .as_slice()
             .len(),
         16
     );
@@ -144,17 +146,19 @@ fn hint_count_is_at_most_16() {
         decode(&body(&[hint; 17], b"x", 0, None, 0)).err(),
         Some(MalformedOpen::HintCount)
     );
+    // A built request cannot hold more: its hints are a `Hints`, which refuses a seventeenth.
     let addr: SocketAddr = "192.0.2.1:7".parse().unwrap();
+    assert_eq!(Hints::new(vec![addr; 17]), Err(TooManyHints));
+}
+
+#[test]
+fn a_mapped_hint_decodes_as_ipv4() {
+    let decoded = decode(&body(&[b"[::ffff:127.0.0.1]:9"], b"x", 0, None, 0)).unwrap();
+    let plain: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    assert_eq!(decoded.hints().as_slice(), [plain]);
     assert_eq!(
-        OpenRequest::new(
-            peer(),
-            vec![addr; 17],
-            "x".parse().unwrap(),
-            OpenLane::Main,
-            None
-        )
-        .err(),
-        Some(MalformedOpen::HintCount)
+        decoded.encode().unwrap(),
+        body(&[b"127.0.0.1:9"], b"x", 0, None, 0)
     );
 }
 
@@ -269,7 +273,7 @@ fn a_full_open_round_trips_with_hint_order_and_duplicates() {
     let slip = slip();
     let request = OpenRequest::new(
         peer(),
-        hints.clone(),
+        Hints::new(hints.clone()).unwrap(),
         "s".repeat(128).parse().unwrap(),
         OpenLane::Isolated,
         Some(slip.clone()),
@@ -286,7 +290,7 @@ fn a_full_open_round_trips_with_hint_order_and_duplicates() {
         body(&spelled, &[b's'; 128], 2, Some(slip.as_str().as_bytes()), 0)
     );
     let decoded = decode(&encoded).unwrap();
-    assert_eq!(decoded.hints(), hints.as_slice());
+    assert_eq!(decoded.hints().as_slice(), hints.as_slice());
     assert_eq!(decoded.lane(), OpenLane::Isolated);
     assert_eq!(decoded.slip().unwrap().as_str(), slip.as_str());
     assert_eq!(decoded.encode().unwrap(), encoded);
@@ -313,7 +317,7 @@ fn a_slip_that_addresses_another_node_is_refused_both_ways() {
     assert_eq!(
         OpenRequest::new(
             peer(),
-            Vec::new(),
+            Hints::NONE,
             ssh(),
             OpenLane::Main,
             Some(foreign.clone())
@@ -327,7 +331,7 @@ fn a_slip_that_addresses_another_node_is_refused_both_ways() {
     );
     // The peer's own slip is taken on every lane, built or read.
     for lane in [OpenLane::Main, OpenLane::Bulk, OpenLane::Isolated] {
-        let built = OpenRequest::new(peer(), Vec::new(), ssh(), lane, Some(slip())).unwrap();
+        let built = OpenRequest::new(peer(), Hints::NONE, ssh(), lane, Some(slip())).unwrap();
         assert_eq!(decode(&built.encode().unwrap()).unwrap().lane(), lane);
     }
 }
@@ -337,7 +341,7 @@ fn into_slip_hands_over_the_slip_itself() {
     let slip = slip();
     let request = OpenRequest::new(
         peer(),
-        Vec::new(),
+        Hints::NONE,
         "ssh".parse().unwrap(),
         OpenLane::Main,
         Some(slip.clone()),
@@ -346,7 +350,7 @@ fn into_slip_hands_over_the_slip_itself() {
     assert_eq!(request.into_slip().unwrap().as_str(), slip.as_str());
     let bare = OpenRequest::new(
         peer(),
-        Vec::new(),
+        Hints::NONE,
         "ssh".parse().unwrap(),
         OpenLane::Main,
         None,
@@ -361,7 +365,7 @@ fn debug_names_no_hint_and_no_slip() {
     let hint: SocketAddr = "192.0.2.7:4433".parse().unwrap();
     let request = OpenRequest::new(
         peer(),
-        vec![hint],
+        Hints::new([hint]).unwrap(),
         "ssh".parse().unwrap(),
         OpenLane::Main,
         Some(slip.clone()),

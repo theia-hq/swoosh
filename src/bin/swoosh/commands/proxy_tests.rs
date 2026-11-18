@@ -9,7 +9,7 @@ use std::sync::Arc;
 use bifrost::Session;
 use clap::Parser as _;
 use swoosh::credential::Credential;
-use swoosh::peers::{Lane, Peers, Presents};
+use swoosh::peers::{Hints, Lane, Peers, Presents};
 use swoosh::reaching::{BindRole, Reaching as _};
 use swoosh::testkit::{TestNode, TestWrite};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -690,6 +690,7 @@ async fn proxy_requests_ride_the_bulk_lane() {
             peers
                 .open(
                     key,
+                    Hints::NONE,
                     "proxy".parse().unwrap(),
                     Lane::Main,
                     Presents::Standing(None),
@@ -702,6 +703,7 @@ async fn proxy_requests_ride_the_bulk_lane() {
         peers
             .open(
                 key,
+                Hints::NONE,
                 "proxy".parse().unwrap(),
                 Lane::Main,
                 Presents::Standing(None)

@@ -37,7 +37,7 @@ use tokio::time::Instant;
 
 use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::home::{Home, HomeWrite};
-use crate::peers::{Lane, OpenError, Presents};
+use crate::peers::{Hints, Lane, OpenError, Presents};
 use crate::roster::{MAX_BADGE, read_held};
 use crate::serve::control_codec::OpenRequest;
 use crate::serve::{PROVEN_ROUTES, RENEWAL_SERVICE, SYNC_SERVICE};
@@ -180,7 +180,13 @@ impl<T: Transport, D: Discovery> Fetch for NodeFetch<'_, '_, T, D> {
         // that is the same miss as the one byte. No badge lookup belongs on this path, even for a key.
         let (_writer, reader) = match self
             .peers
-            .open(peer, service, Lane::Main, Presents::Standing(None))
+            .open(
+                peer,
+                Hints::NONE,
+                service,
+                Lane::Main,
+                Presents::Standing(None),
+            )
             .await
         {
             Ok(stream) => stream,
