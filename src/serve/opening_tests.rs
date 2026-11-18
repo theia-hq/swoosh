@@ -975,13 +975,17 @@ async fn a_peer_clean_end_reaches_the_client_as_end() {
     stream.peer.0.shutdown().await.unwrap();
     let splicing = stream.attach();
     tokio::pin!(splicing);
-    let got = tokio::select! {
-        () = &mut splicing => panic!("the open ended with its upload open"),
-        got = async {
-            attached(&mut client).await;
-            download(&mut client).await
-        } => got,
-    };
+    let got = tokio::time::timeout(HANG_GUARD, async {
+        tokio::select! {
+            () = &mut splicing => panic!("the open ended with its upload open"),
+            got = async {
+                attached(&mut client).await;
+                download(&mut client).await
+            } => got,
+        }
+    })
+    .await
+    .expect("the download's end never reached the client");
     assert_eq!(got, b"whole");
 }
 

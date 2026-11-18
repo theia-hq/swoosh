@@ -22,7 +22,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
 use super::PROVEN_ROUTES;
-use super::socket::splice::{FramedWriter, UploadCut, upload};
+use super::socket::splice::{DataLen, FramedWriter, UploadCut, upload};
 use super::socket::{OpenLane, OpenRefusal, OpenRequest, Response};
 use crate::credential::{Credential, admits_anyone_at};
 use crate::home::Home;
@@ -639,23 +639,27 @@ where
                     return Downloaded::Lost;
                 }
             }
-            Next::Read(Ok(0)) => {
-                downloading = false;
-                let written = if waiting {
-                    to_client.write_end().await.is_ok()
-                } else {
-                    last(to_client.write_end()).await
-                };
-                if !written {
-                    return Downloaded::Lost;
+            Next::Read(Ok(read)) => match DataLen::new(read) {
+                Some(len) => {
+                    if let Err(error) = to_client.write_data(len).await {
+                        tracing::debug!(%error, "a splice stopped writing to its client");
+                        return Downloaded::Lost;
+                    }
                 }
-            }
-            Next::Read(Ok(read)) => {
-                if let Err(error) = to_client.write_data(read).await {
-                    tracing::debug!(%error, "a splice stopped writing to its client");
-                    return Downloaded::Lost;
+                // The body holds one frame's ceiling, so the only read no Data frame can carry is the
+                // read of nothing: the peer's clean end.
+                None => {
+                    downloading = false;
+                    let written = if waiting {
+                        to_client.write_end().await.is_ok()
+                    } else {
+                        last(to_client.write_end()).await
+                    };
+                    if !written {
+                        return Downloaded::Lost;
+                    }
                 }
-            }
+            },
             Next::Read(Err(error)) => {
                 tracing::debug!(%error, "a peer's stream failed mid-splice");
                 return Downloaded::PeerCut(to_client);

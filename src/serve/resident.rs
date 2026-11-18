@@ -328,8 +328,7 @@ impl Resident {
         let (reader, mut writer) = tokio::io::split(stream);
         // Sized for one whole splice frame, header and body, so an attached Open's upload moves through
         // this one buffer in place.
-        let mut reader =
-            tokio::io::BufReader::with_capacity(super::socket::splice::FRAME_BUFFER, reader);
+        let mut reader = super::socket::splice::frame_reader(reader);
         let mut observed = None;
         let request =
             tokio::time::timeout(timeout, Request::read_observed(&mut reader, &mut observed)).await;
