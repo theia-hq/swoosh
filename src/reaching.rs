@@ -226,7 +226,47 @@ impl Resolved {
 /// A stored badge that is already dead REFUSES the dial here (see [`into_slot`]), and one inside
 /// [`badge::DEVICE_WARN_WINDOW`] warns on stderr and dials anyway.
 pub async fn resolve(cred: Credential, node: NodeId, home: &Home) -> eyre::Result<Resolved> {
-    resolve_to(cred, node, home, &mut std::io::stderr()).await
+    resolve_to(cred, node, home, &mut std::io::stderr())
+        .await
+        .map_err(ResolveError::into_report)
+}
+
+/// Why [`resolve_to`] gave no slots: the stored badge has ended, or the home could not be read. A
+/// caller that answers for the dial, rather than printing its cause, tells the two apart: only the
+/// first says anything about this machine's standing.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    /// The stored badge is past its date, so every gate refuses it.
+    #[error(
+        "this device's membership badge {expiry}, so a family-gated peer will refuse this dial; {}",
+        badge::remedy(*node)
+    )]
+    Ended {
+        /// How long ago it ended.
+        expiry: badge::Expiry,
+        /// This machine, named in the remedy.
+        node: NodeId,
+    },
+    /// The standing, the badge or the badge's dates could not be read.
+    #[error(transparent)]
+    Unreadable(eyre::Report),
+}
+
+impl ResolveError {
+    /// The report a verb prints, unchanged from the read that failed so its cause chain and type stay
+    /// as they were.
+    fn into_report(self) -> eyre::Report {
+        match self {
+            ended @ Self::Ended { .. } => eyre::Report::new(ended),
+            Self::Unreadable(report) => report,
+        }
+    }
+}
+
+impl From<eyre::Report> for ResolveError {
+    fn from(report: eyre::Report) -> Self {
+        Self::Unreadable(report)
+    }
 }
 
 /// The body of [`resolve`], with the expiry warning routed to an injected `warn` sink so a test can
@@ -237,7 +277,7 @@ pub(crate) async fn resolve_to<W: std::io::Write>(
     node: NodeId,
     home: &Home,
     warn: &mut W,
-) -> eyre::Result<Resolved> {
+) -> Result<Resolved, ResolveError> {
     let present = match cred {
         // An `anyone` link presents alone: no badge is read or sent, so nothing ties the throwaway key
         // it dials under to this home.
@@ -310,7 +350,11 @@ async fn device_badge(home: &Home, node: NodeId) -> eyre::Result<Option<(Link, N
 ///
 /// The refusal never reaches the wire, so the gate's uniform `not admitted` stays uniform and no peer
 /// learns anything: this is the dialer telling itself what it already knows about its own credential.
-fn into_slot<W: std::io::Write>(badge: Link, node: NodeId, warn: &mut W) -> eyre::Result<Link> {
+fn into_slot<W: std::io::Write>(
+    badge: Link,
+    node: NodeId,
+    warn: &mut W,
+) -> Result<Link, ResolveError> {
     into_slot_at(badge, node, warn, SystemTime::now())
 }
 
@@ -319,12 +363,13 @@ fn into_slot_at<W: std::io::Write>(
     node: NodeId,
     warn: &mut W,
     now: SystemTime,
-) -> eyre::Result<Link> {
-    match badge::Expiry::at(badge.cap().valid_until()?, now) {
-        expiry @ badge::Expiry::Expired { .. } => eyre::bail!(
-            "this device's membership badge {expiry}, so a family-gated peer will refuse this dial; {}",
-            badge::remedy(node)
-        ),
+) -> Result<Link, ResolveError> {
+    let until = badge
+        .cap()
+        .valid_until()
+        .map_err(|error| ResolveError::Unreadable(error.into()))?;
+    match badge::Expiry::at(until, now) {
+        expiry @ badge::Expiry::Expired { .. } => return Err(ResolveError::Ended { expiry, node }),
         badge::Expiry::Expiring { .. } | badge::Expiry::Live { .. } | badge::Expiry::Unknown => {}
     }
     // Exhaustive on purpose: a new reading is a compile error HERE, at the one site that decides whether
@@ -779,7 +824,8 @@ mod tests {
                 &home,
                 &mut warned,
             )
-            .await,
+            .await
+            .map_err(ResolveError::into_report),
         ] {
             let Err(error) = result else {
                 panic!("an expired badge must refuse locally");
@@ -914,7 +960,8 @@ mod tests {
                 &home,
                 &mut warned,
             )
-            .await,
+            .await
+            .map_err(ResolveError::into_report),
         ] {
             let resolved = result.expect("a revoked pin is no pin");
             assert!(resolved.grant.is_none() && resolved.membership.is_none());
@@ -949,7 +996,8 @@ mod tests {
                 &home,
                 &mut warned,
             )
-            .await,
+            .await
+            .map_err(ResolveError::into_report),
         ] {
             let Err(error) = result else {
                 panic!("a root file error cannot become an empty credential");

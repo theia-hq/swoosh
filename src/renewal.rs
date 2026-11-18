@@ -385,10 +385,10 @@ const OPEN_KEEP: Duration = Duration::from_secs(5 * 60);
 /// [`OPEN_RENEWAL`], and not tried again for [`OPEN_BACK_OFF`] after it misses. Either way the `Open` then
 /// goes on with whatever standing the home holds.
 ///
-/// Borrowed by the resident for its run, which polls [`drive`](Self::drive) as one of its arms: a flight
-/// runs to its end and its end counts even when every `Open` waiting on it has left, so `Open`s that are
-/// cancelled cannot start flights at will. Structured: no task is spawned, and dropping it drops any
-/// flight.
+/// Borrowed by the resident for its run, which polls [`drive`](Self::drive) beside its control
+/// socket: a flight runs to its end and its end counts even when every `Open` waiting on it has left,
+/// so `Open`s that are cancelled cannot start flights at will. Structured: no task is spawned, and
+/// dropping it drops any flight.
 pub struct OpenRenewal<'a, F: Fetch> {
     home: &'a Home,
     fetch: &'a F,
@@ -508,8 +508,8 @@ impl<'a, F: Fetch> OpenRenewal<'a, F> {
         landed.pick_up()
     }
 
-    /// Drive every flight an `Open` starts to its end, for as long as the run lasts: an arm of the
-    /// resident's run, as [`Peers::sweep`](crate::peers::Peers::sweep) is.
+    /// Drive every flight an `Open` starts to its end, for as long as the run serves its control socket,
+    /// beside it ([`Opens::drive`](crate::serve::Opens::drive)).
     pub async fn drive(&self) -> core::convert::Infallible {
         loop {
             let flying = match &*self.state.borrow() {
@@ -683,4 +683,4 @@ pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
 
 #[cfg(test)]
 #[path = "renewal_tests.rs"]
-mod renewal_tests;
+pub(crate) mod renewal_tests;

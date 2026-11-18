@@ -478,7 +478,9 @@ async fn read_badge(
 /// The device standing as a verified link, or `None` when there is none. A file that is not one is
 /// damaged: a torn write reads this way.
 async fn load_badge(home: &Home) -> Result<Option<Link>, StandingError> {
-    let Some(text) = read_text(&home.key_cert()).await? else {
+    let path = home.key_cert();
+    // A planted FIFO must not hold the read, nor a device feed it.
+    let Some(text) = text_of(crate::home::read_trust_file_async(&path).await, &path)? else {
         return Ok(None);
     };
     text.and_then(|text| text.trim().parse::<Link>().ok())
@@ -492,12 +494,8 @@ fn unreadable_badge(home: &Home) -> StandingError {
     })
 }
 
-/// A small text file: `None` when it is absent, `Some(None)` when its bytes are not text.
-async fn read_text(path: &Path) -> Result<Option<Option<String>>, StandingError> {
-    text_of(tokio::fs::read_to_string(path).await, path)
-}
-
-/// What [`read_text`] makes of one read of the file at `path`.
+/// What one read of the small text file at `path` makes: `None` when it is absent, `Some(None)` when its
+/// bytes are not text.
 // `core::io::ErrorKind` is still unstable, so the kinds read from `std`.
 #[allow(clippy::std_instead_of_core)]
 fn text_of(read: io::Result<String>, path: &Path) -> Result<Option<Option<String>>, StandingError> {

@@ -88,7 +88,8 @@ pub fn write_signet(home_lock: &HomeWrite, home: &Home, signet: NodeId) -> std::
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
     let path = home.key_cert();
-    match tokio::fs::read_to_string(&path).await {
+    // Through the trust-file guard: a planted FIFO must not hold the read, nor a device feed it.
+    match crate::home::read_trust_file_async(&path).await {
         Ok(text) => {
             let badge = text.trim();
             if badge.is_empty() {

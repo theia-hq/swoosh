@@ -2,9 +2,10 @@
 //! asked for it.
 //!
 //! Every check that can refuse without reaching out runs first: the peer is not this machine, the slip
-//! is not one anyone may hold, and the run has a reach slot for the lane. Only then is the control slot
-//! released, the standing renewed when due, and the peer dialed. Once attached, the two streams are
-//! spliced one direction at a time until both are done, or until the local client is gone entirely.
+//! is not one anyone may hold, the run has a reach slot for the lane, and the peer's lane has room. Only
+//! then is the control slot released, the standing renewed when due, and the peer dialed. Once attached,
+//! the two streams are spliced one direction at a time until both are done, or until the local client
+//! is gone or, once the peer has ended, has finished writing.
 
 use core::pin::pin;
 use core::time::Duration;
@@ -16,12 +17,14 @@ use nauthy::Service;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt as _, Interest};
 use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::time::Instant;
 
 use super::PROVEN_ROUTES;
 use super::socket::{OpenLane, OpenRefusal, OpenRequest, Response};
 use crate::credential::{Credential, admits_anyone_at};
 use crate::home::Home;
 use crate::peers::{DialFailure, Lane, OPEN_TIMEOUT, OpenError, Peers, Presents};
+use crate::reaching::ResolveError;
 use crate::renewal::{Fetch, OpenRenewal};
 
 /// The most streams the run's Opens hold at once, across every peer and lane.
@@ -33,11 +36,44 @@ pub const MAX_BEYOND_MAIN: usize = 224;
 
 const _: () = assert!(MAX_BEYOND_MAIN < MAX_REACH);
 
-/// How long a splice whose local client has closed its socket in both directions may go on sending what
-/// the client wrote before it went, on every lane. Counted from the hang-up and never extended by
-/// progress, so a peer taking a byte at a time cannot hold the splice; at the deadline the splice is
-/// dropped, and with it the reach slots, the lane count and the session, or the isolated connection.
+/// How long a splice whose local client has closed its socket in both directions, or has finished
+/// writing after the peer ended, may go on sending what the client wrote, on every lane. Counted from
+/// that moment and never extended by progress, so a peer taking a byte at a time cannot hold the
+/// splice; at the deadline the splice is dropped, and with it the reach slots, the lane count and the
+/// session, or the isolated connection. An isolated connection's close waits within the same bound.
 pub const HANGUP_DRAIN: Duration = Duration::from_secs(4);
+
+/// The soft open-file limit a run asks for: each Open holds two descriptors, its connection and the
+/// watch's duplicate, and macOS starts a process at 256.
+pub const OPEN_FILES: libc::rlim_t = 4096;
+
+/// Raise this process's soft open-file limit to [`OPEN_FILES`], or to the hard limit when that is lower,
+/// and never lower it. Processes this one starts afterwards (`sshd` shells, the services' backends)
+/// inherit the raised limit.
+///
+/// # Errors
+///
+/// The limit cannot be read or set.
+pub fn raise_open_files() -> io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live, writable `rlimit` for the call to fill.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let wanted = OPEN_FILES.min(limit.rlim_max);
+    if limit.rlim_cur >= wanted {
+        return Ok(());
+    }
+    limit.rlim_cur = wanted;
+    // SAFETY: `limit` is a valid `rlimit` that outlives the call, which only reads it.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 /// How long the reply to an Open, Attached or a refusal, may take to write.
 const REPLY_TIMEOUT: Duration = super::resident::READ_TIMEOUT;
@@ -91,14 +127,15 @@ impl<'r, 'a, 'n, T: Transport, D: Discovery, F: Fetch> Opener<'r, 'a, 'n, T, D, 
     }
 
     /// What the stream presents: the slip when there is one, nothing on a proven-only route, else this
-    /// home's standing as it reads now. A standing that cannot be presented ends the Open here.
+    /// home's standing as it reads now. An ended badge ends the Open with `StandingEnded`; a home that
+    /// cannot be read ends it with the one fixed Error, since it says nothing about the standing.
     // `core::io::sink` is still unstable, so the sink for the warning comes from `std`.
     #[allow(clippy::std_instead_of_core)]
     async fn presents(
         &self,
         service: &Service,
         slip: Option<nauthy::Link>,
-    ) -> Result<Presents, OpenRefusal> {
+    ) -> Result<Presents, Response> {
         if slip.is_none() && PROVEN_ROUTES.contains(&service.as_str()) {
             return Ok(Presents::Standing(None));
         }
@@ -114,7 +151,10 @@ impl<'r, 'a, 'n, T: Transport, D: Discovery, F: Fetch> Opener<'r, 'a, 'n, T, D, 
         .await
         .map_err(|error| {
             tracing::debug!(error = %error, "an open's standing could not be presented");
-            OpenRefusal::StandingEnded
+            match error {
+                ResolveError::Ended { .. } => Response::OpenRefusal(OpenRefusal::StandingEnded),
+                ResolveError::Unreadable(_) => Response::Error(UNREADABLE_HOME.to_owned()),
+            }
         })?;
         Ok(match (slipped, resolved.into_slots()) {
             (true, (Some(slip), membership)) => Presents::Slip { slip, membership },
@@ -145,9 +185,18 @@ pub trait Opens {
     where
         R: AsyncBufRead + Unpin,
         W: AsyncWrite + Unpin;
+
+    /// What runs beside the Opens for as long as the socket is served: a renewal an Open started runs
+    /// to its end and its end counts, even when every Open waiting on it has gone, so a parked flight
+    /// never holds `home.lock`.
+    fn drive(&self) -> impl Future<Output = core::convert::Infallible>;
 }
 
 impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F> {
+    fn drive(&self) -> impl Future<Output = core::convert::Infallible> {
+        self.renewal.drive()
+    }
+
     async fn open<R, W>(
         &self,
         open: OpenRequest,
@@ -172,11 +221,21 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
             Ok(held) => held,
             Err(refusal) => return refuse(&mut to_client, refusal).await,
         };
+        // The peer's lane is counted before renewal, so an Open that would be Busy never starts or joins
+        // a renewal flight.
+        let place = match open.lane() {
+            OpenLane::Main => self.peers.place(peer, Lane::Main).map(Place::Lane),
+            OpenLane::Bulk => self.peers.place(peer, Lane::Bulk).map(Place::Lane),
+            OpenLane::Isolated => self.peers.isolated_place(peer).map(Place::Isolated),
+        };
+        let place = match place {
+            Ok(place) => place,
+            Err(error) => return refuse(&mut to_client, failed(&error)).await,
+        };
         // A stream may live for hours; the control slot is for answering the socket, not for that.
         drop(control);
         // From here the Open reaches out, so a client gone in the meantime ends it at once: nobody is
         // left to read the reply.
-        let lane = open.lane();
         let reached = until_gone(&gone, async {
             // The Open goes on with whatever standing the home holds after this, renewed or not.
             let _ = self.renewal.before(&open).await;
@@ -188,19 +247,19 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
         let Some(reached) = reached else { return };
         let (hints, service, presents) = match reached {
             Ok(reached) => reached,
-            Err(refusal) => return refuse(&mut to_client, refusal).await,
+            Err(reply) => return answer(&mut to_client, reply).await,
         };
-        let held_lane = match lane {
-            OpenLane::Main => Lane::Main,
-            OpenLane::Bulk => Lane::Bulk,
-            OpenLane::Isolated => {
+        let place = match place {
+            Place::Lane(place) => place,
+            Place::Isolated(place) => {
                 let opened = until_gone(&gone, async {
                     let connection = self
                         .peers
-                        .isolated(peer, hints)
+                        .isolated_placed(place, hints)
                         .await
                         .map_err(|error| failed(&error))?;
                     let connector = presents.connector(peer, service);
+                    // Bulk's deadline: nothing is evicted and nothing races this open.
                     match tokio::time::timeout(OPEN_TIMEOUT, connector.open_on(&connection)).await {
                         Ok(Ok((writer, reader))) => Ok((connection, writer, reader)),
                         Ok(Err(error)) => Err(failed(&OpenError::Open(error))),
@@ -214,27 +273,42 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                     Err(refusal) => return refuse(&mut to_client, refusal).await,
                 };
                 let info = connection.conn_info();
-                attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
-                // Dropping the connection closes it; what the peer has not taken by now is lost.
+                let close_by =
+                    attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
+                // Closing a connection discards what the peer has not acknowledged, so the close is
+                // graceful: the stream toward the peer is finished, and the connection stays open for the
+                // transport to deliver it until the peer closes it or `close_by` passes. The transport
+                // offers no wait on one stream's acknowledgement, so a peer that keeps the connection
+                // holds it, and the Open's slots, to the deadline.
+                let _ = tokio::time::timeout_at(close_by, connection.wait_closed()).await;
                 drop((connection, held));
                 return;
             }
         };
         let opened = until_gone(
             &gone,
-            self.peers
-                .open_attached(peer, hints, service, held_lane, presents),
+            self.peers.open_placed(place, hints, service, presents),
         )
         .await;
         let Some(opened) = opened else { return };
         match opened {
+            // The held session outlives this stream, so what the peer has not taken is still delivered
+            // after the splice drops it: no close to wait for.
             Ok((info, to_peer, from_peer)) => {
-                attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
+                let _ = attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
             }
             Err(error) => refuse(&mut to_client, failed(&error)).await,
         }
         drop(held);
     }
+}
+
+/// An Open's place on its peer, taken before anything slow.
+enum Place {
+    /// On a held lane.
+    Lane(crate::peers::LanePlace),
+    /// Among the peer's isolated connections.
+    Isolated(crate::peers::IsolatedPlace),
 }
 
 /// `work`, or `None` once the client is gone.
@@ -247,12 +321,17 @@ async fn until_gone<F: Future>(gone: &ClientGone, work: F) -> Option<F::Output> 
 
 /// Reply `refusal` and end the connection.
 async fn refuse<W: AsyncWrite + Unpin>(to_client: &mut W, refusal: OpenRefusal) {
-    let reply = Response::OpenRefusal(refusal);
+    answer(to_client, Response::OpenRefusal(refusal)).await;
+}
+
+/// Reply `reply`, a refusal or the Error, and end the connection.
+async fn answer<W: AsyncWrite + Unpin>(to_client: &mut W, reply: Response) {
     let _ = tokio::time::timeout(REPLY_TIMEOUT, reply.write(to_client)).await;
     let _ = to_client.shutdown().await;
 }
 
-/// Reply Attached with the path the stream rides, then splice.
+/// Reply Attached with the path the stream rides, then splice. Returns when a graceful close of an
+/// isolated connection must be done by: at once when nothing was spliced.
 async fn attach<R, W, PR, PW>(
     from_client: R,
     mut to_client: W,
@@ -260,7 +339,8 @@ async fn attach<R, W, PR, PW>(
     to_peer: PW,
     info: bifrost::ConnInfo,
     gone: &ClientGone,
-) where
+) -> Instant
+where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     PR: AsyncRead + Unpin,
@@ -271,36 +351,59 @@ async fn attach<R, W, PR, PW>(
         tokio::time::timeout(REPLY_TIMEOUT, reply.write(&mut to_client)).await,
         Ok(Ok(()))
     ) {
-        return;
+        return Instant::now();
     }
-    splice(from_client, to_client, from_peer, to_peer, gone.wait()).await;
+    splice(
+        from_client,
+        to_client,
+        from_peer,
+        to_peer,
+        gone.wait(),
+        gone.finished_writing(),
+    )
+    .await
 }
 
 /// Move bytes both ways, each direction on its own. The client's end of writing shuts the peer's
 /// writing and the peer's end shuts the client's, while the reverse keeps flowing; the splice is done
-/// when both directions are, or when either fails.
+/// when both directions are, or when the direction toward the peer fails.
 ///
 /// `hangup` resolves when the client has closed its socket in both directions. Then the direction
 /// toward the client stops at once, and what the client wrote before it went goes on toward the peer
 /// for at most [`HANGUP_DRAIN`] from that moment; the splice then ends, dropping everything it holds.
 /// The hang-up is watched only while this side still writes to the client: once it has shut that
-/// writing, a hang-up can be its own (macOS reports one), and the client's direction sees a departed
-/// client as its own end of file or error.
+/// writing, a hang-up can be its own (macOS reports one), so a gone client and a half-closed one look
+/// the same. Then `finished` stands in: it resolves when the client has finished writing, gone or
+/// half-closed, and starts the same drain. A client still writing to a peer that has ended stays live.
+///
+/// A write toward the client that fails ends only that direction: the client's bytes still go to the
+/// peer, and a client that went is bounded by `finished` as above.
 ///
 /// Each direction holds one 8 KiB buffer and no more: toward the peer, the client reader's own buffer,
 /// read in place; toward the client, the one buffer of the copy.
+///
+/// Returns when a close that waits for the peer to take what was sent must be done by: the drain's own
+/// deadline once one started, [`HANGUP_DRAIN`] from now after a clean end, and now when the direction
+/// toward the peer failed, since nothing is left to deliver.
 pub(crate) async fn splice<R, W, PR, PW>(
     mut from_client: R,
     mut to_client: W,
     mut from_peer: PR,
     mut to_peer: PW,
     hangup: impl Future<Output = ()>,
-) where
+    finished: impl Future<Output = ()>,
+) -> Instant
+where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     PR: AsyncRead + Unpin,
     PW: AsyncWrite + Unpin,
 {
+    // ABORT GUARD, not yet built: every early end below (the drain's deadline, the failed direction,
+    // the Open dropped by `Stop` or a panic) drops the send half toward the peer, which ends the peer's
+    // stream cleanly, so a cut-off reads to the peer as a finished stream. `to_peer` is to be wrapped
+    // here so that a drop without its shutdown resets the stream, once the transport's write half can
+    // abort; the wrapper disarms after a successful `shutdown`, so a finished stream is never reset.
     // Done when the client stops writing.
     let mut up = pin!(async {
         io::copy_buf(&mut from_client, &mut to_peer).await?;
@@ -311,34 +414,39 @@ pub(crate) async fn splice<R, W, PR, PW>(
         io::copy(&mut from_peer, &mut to_client).await?;
         to_client.shutdown().await
     });
-    let mut hangup = pin!(hangup);
+    let (mut hangup, mut finished) = (pin!(hangup), pin!(finished));
     let (mut up_done, mut down_done) = (false, false);
     loop {
         tokio::select! {
             ended = &mut up, if !up_done => {
                 if let Err(error) = ended {
                     tracing::debug!(%error, "a splice ended toward the peer");
-                    return;
+                    return Instant::now();
                 }
                 up_done = true;
             }
             ended = &mut down, if !down_done => {
                 if let Err(error) = ended {
-                    tracing::debug!(%error, "a splice ended toward the client");
-                    return;
+                    tracing::debug!(%error, "a splice stopped writing to its client");
                 }
                 down_done = true;
             }
             () = &mut hangup, if !down_done => break,
+            // Polled only once nothing more goes to the client, so an upload's data never wakes it
+            // before then.
+            () = &mut finished, if down_done => break,
         }
         if up_done && down_done {
-            return;
+            return Instant::now() + HANGUP_DRAIN;
         }
     }
-    if !up_done {
-        // One deadline from the hang-up; nothing the peer takes moves it.
-        let _ = tokio::time::timeout(HANGUP_DRAIN, &mut up).await;
+    // One deadline from the hang-up; nothing the peer takes moves it.
+    let drained_by = Instant::now() + HANGUP_DRAIN;
+    if !up_done && let Ok(Err(error)) = tokio::time::timeout_at(drained_by, &mut up).await {
+        tracing::debug!(%error, "a splice ended toward the peer");
+        return Instant::now();
     }
+    drained_by
 }
 
 /// The refusal a failed open carries on the wire. The text is fixed here: a transport's own words can
@@ -362,13 +470,19 @@ const UNREACHABLE: &str = "the machine could not be reached";
 /// The detail a Broken refusal carries.
 const BROKEN: &str = "the connection to the machine failed while opening the stream";
 
+/// The Error an Open gets when this machine's home or badge cannot be read. It names no path and no
+/// cause; those stay in the run's log.
+const UNREADABLE_HOME: &str = "this machine's standing could not be read";
+
 /// Watches a control connection for its client closing the socket in both directions.
 ///
 /// A half-close is not that: a client that has finished writing still reads the peer's reply. Only a
 /// socket closed both ways, which a client that exits or drops it leaves, reads as closed for writing
-/// on this side: the kqueue write filter's end of file on macOS, a hang-up on Linux. The watch has a
-/// registration of its own, on a duplicate of the connection's descriptor, so clearing its readiness
-/// never takes a wakeup from the splice writing to the same socket.
+/// on this side: the kqueue write filter's end of file on macOS, a hang-up on Linux. The same watch
+/// also tells when the client has finished writing, gone or half-closed: the read side's end of file,
+/// seen even with the client's bytes still unread. The watch has a registration of its own, on a
+/// duplicate of the connection's descriptor, so clearing its readiness never takes a wakeup from the
+/// splice reading or writing the same socket. The duplicate is a second descriptor per Open.
 pub struct ClientGone(AsyncFd<OwnedFd>);
 
 impl ClientGone {
@@ -384,7 +498,9 @@ impl ClientGone {
         let duplicate = borrowed.try_clone_to_owned()?;
         // SAFETY: the duplicate is an open descriptor this watch owns, so it stays open and names the
         // same socket for as long as the registration lives.
-        let watch = unsafe { AsyncFd::register_with_interest(duplicate, Interest::WRITABLE) }?;
+        let watch = unsafe {
+            AsyncFd::register_with_interest(duplicate, Interest::WRITABLE | Interest::READABLE)
+        }?;
         Ok(Self(watch))
     }
 
@@ -397,6 +513,21 @@ impl ClientGone {
                 return core::future::pending().await;
             };
             if ready.ready().is_write_closed() {
+                return;
+            }
+            ready.clear_ready();
+        }
+    }
+
+    /// Return once the client has finished writing: half-closed, or gone. Each wake that is not that
+    /// clears the edge and waits for the next, so a client still writing never spins the watch.
+    pub(crate) async fn finished_writing(&self) {
+        loop {
+            let Ok(mut ready) = self.0.readable().await else {
+                // A registration that fails can tell nothing; the splice still ends on its own.
+                return core::future::pending().await;
+            };
+            if ready.ready().is_read_closed() {
                 return;
             }
             ready.clear_ready();
