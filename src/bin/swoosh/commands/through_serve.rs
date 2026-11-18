@@ -198,7 +198,7 @@ pub struct Skew;
 /// This home's standing has ended and `serve` could not renew it.
 // The own bind's dead-badge line names the badge's date and a remedy keyed to this machine; reading
 // either here can load the root key, which a run through `serve` never does. So the line's own head,
-// with no date. Its words are owed a ruling (CLI-Architect, Editor).
+// with no date.
 #[derive(Debug, thiserror::Error)]
 #[error("this device's membership badge has ended, so a family-gated peer will refuse this dial")]
 pub struct StandingEnded;

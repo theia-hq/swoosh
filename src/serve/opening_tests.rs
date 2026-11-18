@@ -891,6 +891,48 @@ async fn a_peer_reset_reaches_the_client_without_an_end() {
     assert!(!read.end, "a cut-off download never reads as finished");
 }
 
+/// A peer whose stream fails while its client is connected and idle, with no End sent: the resident
+/// writes no End, and the client learns of the cut only when the Open ends, which waits on the upload.
+/// An idle client is told nothing until it writes or goes.
+#[tokio::test]
+async fn a_peer_cut_under_an_idle_client_is_told_only_at_the_final_close() {
+    let MemStream {
+        sessions,
+        client,
+        server,
+        gone,
+        to_peer,
+        from_peer,
+        peer: (mut peer_write, _peer_read),
+    } = MemStream::new().await;
+    let mut client = client.unwrap();
+    peer_write.abort();
+    let splicing = splice_mem(
+        server.unwrap(),
+        from_peer.unwrap(),
+        to_peer.unwrap(),
+        &sessions[0],
+        &gone,
+    );
+    tokio::pin!(splicing);
+    let waited = tokio::select! {
+        () = &mut splicing => false,
+        () = async {
+            attached(&mut client).await;
+            tokio::time::sleep(HANG_GUARD).await;
+        } => true,
+    };
+    assert!(
+        waited,
+        "the open ended on the cut while its client was idle"
+    );
+    // The client goes: the upload is cut too, and the Open ends with no End written.
+    drop(client);
+    tokio::time::timeout(HANG_GUARD, splicing)
+        .await
+        .expect("the open ends once its client goes");
+}
+
 #[tokio::test]
 async fn a_peer_clean_end_reaches_the_client_as_end() {
     let mut stream = MemStream::new().await;
