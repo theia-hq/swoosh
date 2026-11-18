@@ -348,18 +348,26 @@ async fn pipe_stdio<T: Transport, D: Discovery>(
 /// The upload ends cleanly only at stdin's end; every other way out cuts it, so the far service reads a
 /// reset and never a clean end of a truncated upload: a stdin read error, a failed write toward the
 /// host, a failed stdout write, and the host's half ending first while stdin is still open (the ssh
-/// bridge's normal close). After a clean upload end the run waits for the host's half, then for the word
-/// that the upload landed, where the stream carries one.
+/// bridge's normal close). After a clean upload end the run waits for the host's half, then, when the
+/// upload carried a byte, for the word that it landed, where the stream carries one. An empty upload has
+/// nothing to lose, and a service that stopped reading before its end never says it landed.
 pub(crate) async fn pump_stdio(
     mut writer: impl Upload,
     reader: impl Download,
     mut input: mpsc::Receiver<io::Result<Vec<u8>>>,
     mut output: impl io::AsyncWrite + Unpin,
 ) -> eyre::Result<()> {
+    /// What the upload carried before its clean end.
+    enum Carried {
+        /// stdin ended before a byte was read.
+        Nothing,
+        /// At least one byte went out.
+        Data,
+    }
     /// How the upload stopped.
     enum Up {
         /// stdin ended and the upload's clean end went out.
-        Ended,
+        Ended(Carried),
         /// stdin failed.
         Local(io::Error),
         /// A write toward the host failed.
@@ -372,11 +380,12 @@ pub(crate) async fn pump_stdio(
         /// The upload failed.
         UpFailed(Up),
         /// The upload ended cleanly, then the host's half settled.
-        Uploaded(eyre::Result<()>),
+        Uploaded(Carried, eyre::Result<()>),
     }
     let mut reader = RemoteReader(reader);
     let settled = {
         let upstream = async {
+            let mut carried = Carried::Nothing;
             while let Some(chunk) = input.recv().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
@@ -390,9 +399,12 @@ pub(crate) async fn pump_stdio(
                 if let Err(error) = sent.await {
                     return Up::Remote(error);
                 }
+                if !chunk.is_empty() {
+                    carried = Carried::Data;
+                }
             }
             match writer.shutdown().await {
-                Ok(()) => Up::Ended,
+                Ok(()) => Up::Ended(carried),
                 Err(error) => Up::Remote(error),
             }
         };
@@ -411,7 +423,7 @@ pub(crate) async fn pump_stdio(
             result = &mut downstream => Settled::DownFirst(result),
             up = upstream => match up {
                 // stdin ended first (a piped, finite input): the host's remaining output still drains.
-                Up::Ended => Settled::Uploaded(downstream.await),
+                Up::Ended(carried) => Settled::Uploaded(carried, downstream.await),
                 failed => Settled::UpFailed(failed),
             },
         }
@@ -429,10 +441,12 @@ pub(crate) async fn pump_stdio(
             writer.cut();
             Err(remote_failure(error))
         }
-        Settled::UpFailed(Up::Ended) | Settled::Uploaded(Ok(())) => {
-            reader.0.landed().await.map_err(remote_failure)
-        }
-        Settled::Uploaded(Err(error)) => Err(error),
+        Settled::UpFailed(Up::Ended(carried)) | Settled::Uploaded(carried, Ok(())) => match carried
+        {
+            Carried::Nothing => Ok(()),
+            Carried::Data => reader.0.landed().await.map_err(remote_failure),
+        },
+        Settled::Uploaded(_, Err(error)) => Err(error),
     }
 }
 
@@ -1400,6 +1414,7 @@ mod tests {
     async fn an_upload_that_did_not_land_exits_1_with_connection_lost() {
         let (writer, _, after) = noted();
         let (stdin, input) = mpsc::channel(1);
+        stdin.try_send(Ok(b"up".to_vec())).unwrap();
         drop(stdin);
         let reader = Landing {
             bytes: b"whole download",
@@ -1410,6 +1425,26 @@ mod tests {
         assert_remote(super::pump_stdio(writer, reader, input, &mut output).await);
         // What arrived stays on stdout.
         assert_eq!(output, b"whole download");
+    }
+
+    /// `forward ... - < /dev/null` to a service that stopped reading: nothing was sent, so nothing can
+    /// have been lost, and no Landed is waited for.
+    #[tokio::test]
+    async fn an_empty_upload_that_did_not_land_exits_0() {
+        let (writer, cut, after) = noted();
+        let (stdin, input) = mpsc::channel(1);
+        drop(stdin);
+        let reader = Landing {
+            bytes: b"whole download",
+            landed: Some(io::ErrorKind::ConnectionReset),
+            after,
+        };
+        let mut output = Vec::new();
+        super::pump_stdio(writer, reader, input, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output, b"whole download");
+        assert!(!cut.get(), "an empty upload still ends cleanly");
     }
 
     #[tokio::test]
