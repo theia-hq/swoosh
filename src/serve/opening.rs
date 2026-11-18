@@ -547,7 +547,7 @@ where
 /// `verdict` says so; a dropped `verdict` sender means none will. `over` is told once the download has
 /// ended, cleanly or not; a write failure toward the client drops it, which says the same. Returns the writer once both are
 /// settled, or at once after a failed peer stream, for the final close; `None` once a write toward the
-/// client failed. Every read is cancel-safe and every frame write runs to its end inside this one
+/// client failed or the last frame was not taken within [`REPLY_TIMEOUT`]. Every read is cancel-safe and every frame write runs to its end inside this one
 /// future, so a frame is never cut by a select.
 async fn download<PR, W>(
     mut from_peer: PR,
@@ -582,21 +582,13 @@ where
         match next {
             Next::Verdict(landed) => {
                 waiting = false;
-                if landed
-                    && !matches!(
-                        tokio::time::timeout(REPLY_TIMEOUT, to_client.write_landed()).await,
-                        Ok(Ok(()))
-                    )
-                {
+                if landed && !written(!downloading, to_client.write_landed()).await {
                     return None;
                 }
             }
             Next::Read(Ok(0)) => {
                 downloading = false;
-                if !matches!(
-                    tokio::time::timeout(REPLY_TIMEOUT, to_client.write_end()).await,
-                    Ok(Ok(()))
-                ) {
+                if !written(!waiting, to_client.write_end()).await {
                     return None;
                 }
             }
@@ -614,6 +606,18 @@ where
                 return Some(to_client);
             }
         }
+    }
+}
+
+/// Whether a frame toward the client was written. The last frame, the one after which both directions
+/// are settled, has [`REPLY_TIMEOUT`], so a client that stops reading cannot hold the splice past them;
+/// any earlier one waits as a Data frame does, so a reader that pauses while its upload runs never loses
+/// a download that came whole.
+async fn written(last: bool, write: impl Future<Output = io::Result<()>>) -> bool {
+    if last {
+        matches!(tokio::time::timeout(REPLY_TIMEOUT, write).await, Ok(Ok(())))
+    } else {
+        write.await.is_ok()
     }
 }
 

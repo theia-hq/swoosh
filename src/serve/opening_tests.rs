@@ -546,16 +546,14 @@ async fn an_upload_not_delivered_by_the_deadline_closes_without_landed() {
 
 #[tokio::test(start_paused = true)]
 async fn a_client_that_stops_reading_releases_the_splice_by_the_final_write_deadline() {
-    // Room for one small Data frame and nothing more.
+    // Room for one frame mark and part of a second.
     let pair = Pair::sized(HEADER + 4);
     let (mut client, mut peer, holds) = (pair.client, pair.peer, pair.holds);
     client.write_all(&END).await.unwrap();
-    peer.write_all(b"full").await.unwrap();
+    holds.send(()).unwrap();
+    // An empty download: End and Landed are all the resident writes, and the second one is the last.
     peer.shutdown().await.unwrap();
     let mut spliced = Box::pin(pair.splice);
-    // The Data frame fills the room; the End after it waits on a client that reads nothing.
-    assert!(poll!(&mut spliced).is_pending());
-    holds.send(()).unwrap();
     assert!(poll!(&mut spliced).is_pending());
     tokio::time::advance(REPLY_TIMEOUT - Duration::from_millis(1)).await;
     assert!(poll!(&mut spliced).is_pending());
