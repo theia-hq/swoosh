@@ -2926,7 +2926,7 @@ async fn an_observed_open_past_the_last_ticket_is_an_error_before_any_dial() {
             .await;
             assert_eq!(
                 Response::read_open(&mut client).await.unwrap(),
-                Response::Error("connection observation references are unavailable".to_owned())
+                Response::Error("swoosh serve can read no more paths until it restarts".to_owned())
             );
         })
         .await;

@@ -63,7 +63,7 @@ ed01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.64:51778 and relayed)
 <!-- live-run: real iroh throughput; a public route is metered, so the run may stop before -t -->
 ```console
 $ swoosh speed ed01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq --down -t 5
-speed test to ed01uyi7g54bpea4 via iroh (down)
+speed test to ed01uyi7g54bpea4 (down)
 path: direct to 127.0.0.1:50769
 down  64.00 MiB in 0.58s = 110.87 MiB/s
 ```

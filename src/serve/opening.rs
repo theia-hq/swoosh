@@ -222,7 +222,7 @@ pub enum OpenerError {
     #[error(transparent)]
     Epoch(#[from] EpochError),
     /// The records for its observed Opens could not be allocated.
-    #[error("could not allocate the records for path observation")]
+    #[error("out of memory starting serve")]
     Records(#[source] std::collections::TryReserveError),
 }
 
@@ -852,7 +852,7 @@ const BROKEN: &str = "the connection to the machine failed while opening the str
 const UNREADABLE_HOME: &str = "this machine's home or badge could not be read";
 
 /// The Error an observed Open gets once the run has handed out every reference it can.
-const UNOBSERVABLE: &str = "connection observation references are unavailable";
+const UNOBSERVABLE: &str = "swoosh serve can read no more paths until it restarts";
 
 /// Watches a control connection for its client closing the socket in both directions.
 ///
