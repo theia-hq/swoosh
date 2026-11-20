@@ -273,21 +273,31 @@ impl Dial<'_> {
         self.stopped(socket).await.unwrap_or(own)
     }
 
-    /// `serve`'s own line when it no longer answers, asked after a run broke: `None` while it answers,
-    /// and the break was the machine's or the network's.
+    /// `serve`'s own line when it is gone, asked after a run broke: `None` while anything answers, or
+    /// stalls, there, and the break is the run's own. The ask is bounded by [`STOPPED_ASK`], so a
+    /// resident that accepts and stalls cannot hold a failed run's exit.
     pub async fn stopped(&self, socket: &UidSocket) -> Option<eyre::Report> {
         let named = Machine::of(self.contacts, self.machine.key());
-        serve_gone(socket.status_attributed().await.map(drop), &named).map(eyre::Report::new)
+        let asked = match tokio::time::timeout(STOPPED_ASK, socket.status_attributed()).await {
+            Ok(asked) => asked.map(drop),
+            Err(_elapsed) => Err(ControlError::Timeout {
+                phase: "status after a cut",
+            }),
+        };
+        serve_gone(asked, &named).map(eyre::Report::new)
     }
 }
 
-/// `serve`'s own line when asking it again found nothing answering. An answer that is not a status
-/// still counts as one: something listens, so the cut was not `serve` going.
+/// How long a run that broke waits to learn whether `serve` is gone. A resident that is there answers
+/// its status in a local round trip; one that is gone refuses the connection at once.
+const STOPPED_ASK: core::time::Duration = core::time::Duration::from_secs(1);
+
+/// `serve`'s own line when asking it again showed it gone: no resident, or the connection refused.
+/// Anything else, an answer that is not a status, a reset, a stall, says something is there, so the
+/// break was not `serve` stopping and the line must not claim it did.
 fn serve_gone(asked: Result<(), ControlError>, machine: &Machine) -> Option<ServeStopped> {
     match asked {
-        Err(ControlError::NoResident | ControlError::Io(_) | ControlError::Timeout { .. }) => {
-            Some(ServeStopped(machine.to_string()))
-        }
+        Err(ControlError::NoResident) => Some(ServeStopped(machine.to_string())),
         _ => None,
     }
 }

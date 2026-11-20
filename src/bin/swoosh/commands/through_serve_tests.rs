@@ -42,10 +42,14 @@ fn machine(contacts: &Contacts, typed: &str) -> PeerMachine {
 pub(crate) struct Events {
     log: Rc<RefCell<Vec<String>>>,
     replies: Rc<RefCell<VecDeque<PathReply>>>,
-    /// Stderr written and not yet ended by a newline.
+    /// What this writer has written and not yet ended by a newline.
     pending: Rc<RefCell<String>>,
+    /// Whether this writer stands for stdout rather than stderr.
+    stdout: bool,
     /// Whether the resident takes every query and never answers it.
     stall: bool,
+    /// How long the resident takes to answer each query.
+    delay: core::time::Duration,
 }
 
 impl Events {
@@ -54,6 +58,20 @@ impl Events {
         Self {
             replies: Rc::new(RefCell::new(replies.into_iter().collect())),
             ..Self::default()
+        }
+    }
+
+    /// This resident, answering each query only `delay` after it starts.
+    pub(crate) fn slow(self, delay: core::time::Duration) -> Self {
+        Self { delay, ..self }
+    }
+
+    /// A writer into the same log that stands for stdout: its lines read `stdout: <line>`.
+    pub(crate) fn stdout(&self) -> Self {
+        Self {
+            pending: Rc::default(),
+            stdout: true,
+            ..self.clone()
         }
     }
 
@@ -85,6 +103,7 @@ impl PathSource for Events {
         if self.stall {
             return core::future::pending().await;
         }
+        tokio::time::sleep(self.delay).await;
         let reply = self.replies.borrow_mut().pop_front();
         Ok(reply.unwrap_or(PathReply::Unavailable))
     }
@@ -96,15 +115,29 @@ impl std::io::Write for Events {
         pending.push_str(&String::from_utf8_lossy(buf));
         while let Some(end) = pending.find('\n') {
             let line: String = pending.drain(..=end).collect();
+            let stream = if self.stdout { "stdout" } else { "stderr" };
             self.log
                 .borrow_mut()
-                .push(format!("stderr: {}", line.trim_end()));
+                .push(format!("{stream}: {}", line.trim_end()));
         }
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// A stdout whose every write fails, as a closed pipe's does.
+pub(crate) struct Unwritable;
+
+impl std::io::Write for Unwritable {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(tokio::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(tokio::io::ErrorKind::BrokenPipe.into())
     }
 }
 
@@ -197,7 +230,7 @@ fn serve_lines_keep_their_ruled_words() {
 }
 
 #[test]
-fn a_cut_with_nothing_answering_names_serve_and_otherwise_is_connection_lost() {
+fn a_cut_names_serve_only_when_it_is_gone_and_otherwise_is_connection_lost() {
     let contacts = book();
     let named = Machine::of(&contacts, nas());
     // The line a cut prints: `serve`'s own when it is gone, else the own bind's.
@@ -209,16 +242,16 @@ fn a_cut_with_nothing_answering_names_serve_and_otherwise_is_connection_lost() {
         "error: swoosh serve stopped here and ended the connection to me/nas\n  Commands here \
          connect through it while it runs.\n  Run this command again to reconnect.\n"
     );
-    for gone in [
+    // Something is there, if stalled or broken: the break is the run's own, and the line must not
+    // claim `serve` stopped.
+    for there in [
         ControlError::Io(tokio::io::ErrorKind::ConnectionReset.into()),
         ControlError::Timeout {
             phase: "response read",
         },
     ] {
-        assert!(
-            printed(&after_a_cut(Err(gone), &named, ConnectionLost.into()))
-                .starts_with("error: swoosh serve stopped")
-        );
+        let lost = after_a_cut(Err(there), &named, ConnectionLost.into());
+        assert!(lost.is::<ConnectionLost>(), "{lost:#}");
     }
     // `serve` still answers: the cut was the pipe's, and the line is the own bind's.
     let lost = after_a_cut(Ok(()), &named, ConnectionLost.into());
@@ -778,4 +811,46 @@ async fn an_unreachable_open_reaches_ping_and_status_as_their_own_line() {
         };
         assert_eq!(printed(&unreached), "error: could not reach me/nas\n");
     }
+}
+
+/// Asking whether `serve` went after a run broke takes at most a second: a resident that accepts and
+/// stalls is there, so the answer is that it did not, and the run's own line stands.
+#[tokio::test]
+async fn asking_a_stalled_serve_whether_it_went_is_bounded_and_says_no() {
+    let mut served = Served::new("stalled").await;
+    let listener = served.listener();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let reach = reach(&["forward"]);
+    let service = "ping".parse().unwrap();
+    let dial = Dial {
+        machine: &peer,
+        service: &service,
+        slip: None,
+        reach: &reach,
+        contacts: &contacts,
+    };
+    let (socket, _connected) = super::serve(&served.home).await.unwrap().unwrap();
+    // Every connection is taken and held, and nothing is ever answered.
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((conn, _)) = listener.accept().await {
+            held.push(conn);
+        }
+    });
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let stopped = tokio::time::timeout(core::time::Duration::from_secs(60), dial.stopped(&socket))
+        .await
+        .expect("the ask ends");
+    assert!(stopped.is_none(), "a stalled serve is not a stopped one");
+    // The timer's own granularity may add a millisecond.
+    let bound = core::time::Duration::from_secs(1);
+    assert!(
+        (bound..bound + core::time::Duration::from_millis(50)).contains(&started.elapsed()),
+        "{:?}",
+        started.elapsed()
+    );
 }

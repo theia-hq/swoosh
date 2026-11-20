@@ -248,6 +248,11 @@ impl StatusCmd {
     }
 }
 
+/// How long one of your devices may take to answer `control.services`, its request and its reply: the
+/// family's patience for one network step, and measure's bound on one ping probe, so both probes give up
+/// on a silent machine alike.
+const SERVICES_BOUND: Duration = Duration::from_secs(10);
+
 /// What `status` asks a reached device, chosen from the resolved machine's kind before the dial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
@@ -318,7 +323,10 @@ async fn observed<P: PathSource, S: Session>(
             {
                 return Err(through_serve::failed(gone, observer, err).await);
             }
-            writeln!(out, "{line}")?;
+            // A line that cannot be written ends the run as a failure, Finished all the same.
+            if let Err(error) = writeln!(out, "{line}") {
+                return Err(through_serve::failed(error.into(), observer, err).await);
+            }
             return through_serve::ended(line.outcome().unbound_result(peer), observer, err).await;
         }
     };
@@ -405,12 +413,21 @@ async fn probe_services<S: Session>(session: &S, label: &str) -> Result<Answered
     };
     // The read sends nothing; ending the write half lets the node's reply complete. Ended, not dropped:
     // through `serve` a half dropped unended reaches the node as a reset.
-    if let Err(error) = writer.shutdown().await {
-        return Err(Line::failed(label, causes(&error)));
-    }
-    let catalog = match reach::read_catalog(reader).await {
-        Ok(catalog) => catalog,
-        Err(error) => return Err(Line::failed(label, format!("{error:#}"))),
+    let exchange = async {
+        writer
+            .shutdown()
+            .await
+            .map_err(|error| Line::failed(label, causes(&error)))?;
+        reach::read_catalog(reader)
+            .await
+            .map_err(|error| Line::failed(label, format!("{error:#}")))
+    };
+    // A device that took the request and says nothing holds the run no longer than a ping probe would:
+    // its probe went unanswered.
+    let catalog = match tokio::time::timeout(SERVICES_BOUND, exchange).await {
+        Ok(Ok(catalog)) => catalog,
+        Ok(Err(line)) => return Err(line),
+        Err(_silent) => return Err(Line::unanswered(label, 1)),
     };
     let rtt = asked.elapsed();
     let serving = catalog
@@ -995,10 +1012,26 @@ mod tests {
         replies: impl IntoIterator<Item = swoosh::serve::control_codec::PathReply>,
         gone: Option<&str>,
     ) -> ((String, Vec<String>, eyre::Result<()>), bool) {
-        use crate::commands::through_serve::tests::{Events, reading, relayed};
-
-        let events = Events::answering(replies);
+        let events = crate::commands::through_serve::tests::Events::answering(replies);
         let mut out = Vec::new();
+        let (ended, was_asked) = run_through_serve(session, asked, &events, gone, &mut out).await;
+        (
+            (String::from_utf8(out).expect("text"), events.log(), ended),
+            was_asked,
+        )
+    }
+
+    /// `status me/nas` through `serve`, over `session`, asking `asked`, the resident and stderr being
+    /// `events` and stdout `out`: how it ended, and whether `serve` was asked if it went.
+    async fn run_through_serve(
+        session: &impl Session,
+        asked: Probe,
+        events: &crate::commands::through_serve::tests::Events,
+        gone: Option<&str>,
+        out: &mut impl std::io::Write,
+    ) -> (eyre::Result<()>, bool) {
+        use crate::commands::through_serve::tests::{reading, relayed};
+
         let was_asked = core::cell::Cell::new(false);
         let ended = super::observed(
             session,
@@ -1010,14 +1043,87 @@ mod tests {
                 was_asked.set(true);
                 gone.map(|line| eyre::eyre!("{line}"))
             },
-            &mut out,
+            out,
             &mut events.clone(),
         )
         .await;
-        (
-            (String::from_utf8(out).expect("text"), events.log(), ended),
-            was_asked.get(),
+        (ended, was_asked.get())
+    }
+
+    /// A refusal's line that cannot be written to stdout ends the run as a failure, its error printed
+    /// and its receipt Finished all the same.
+    #[tokio::test(start_paused = true)]
+    async fn an_unwritable_stdout_still_finishes_the_probe() {
+        use crate::commands::through_serve::Reported;
+        use crate::commands::through_serve::tests::{Events, Unwritable};
+
+        let refusing = ServicesSession {
+            reply: Err(bifrost::Refusal::NotAdmitted),
+        };
+        let events = Events::default();
+        let (ended, _) =
+            run_through_serve(&refusing, Probe::Services, &events, None, &mut Unwritable).await;
+        assert!(ended.expect_err("exit 1").is::<Reported>());
+        assert_eq!(events.log(), ["stderr: error: broken pipe", "Finish"]);
+    }
+
+    /// An answered probe keeps the Finish's full bound, past the spacing and a second: its line waits
+    /// for the path it prints.
+    #[tokio::test(start_paused = true)]
+    async fn an_answered_probe_waits_for_a_slow_finish() {
+        use swoosh::serve::control_codec::PathReply;
+
+        use crate::commands::through_serve::tests::Events;
+
+        let answering = ServicesSession {
+            reply: Ok(catalog_of(&["web=echo:"])),
+        };
+        let direct = ConnInfo {
+            path: Path::Direct,
+            ..ConnInfo::default()
+        };
+        let events =
+            Events::answering([PathReply::Sample(direct)]).slow(core::time::Duration::from_secs(4));
+        let mut out = Vec::new();
+        let started = tokio::time::Instant::now();
+        let (ended, _) =
+            run_through_serve(&answering, Probe::Services, &events, None, &mut out).await;
+        ended.expect("the probe answered");
+        assert_eq!(started.elapsed(), core::time::Duration::from_secs(4));
+        assert_eq!(
+            String::from_utf8(out).expect("text"),
+            "me/nas, path: direct, rtt 0.000 ms; serving: web\n"
+        );
+    }
+
+    /// One of your devices that takes `control.services` and says nothing holds the probe ten seconds,
+    /// measure's bound on a ping probe, and reads as an unanswered probe, on both paths.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_device_is_unanswered_after_ten_seconds() {
+        let silent = AnswersAnEnd { answers: false };
+        let started = tokio::time::Instant::now();
+        let own = tokio::time::timeout(
+            core::time::Duration::from_secs(60),
+            probe_own(&silent, Probe::Services, "me/nas"),
         )
+        .await
+        .expect("the probe is bounded");
+        assert_eq!(started.elapsed(), core::time::Duration::from_secs(10));
+        assert_eq!(
+            own.to_string(),
+            "me/nas: reached, but the probe went unanswered (1 sent, 0 back)"
+        );
+        let ((out, _, ended), _) = tokio::time::timeout(
+            core::time::Duration::from_secs(60),
+            through_serve_as(&silent, Probe::Services, [], None),
+        )
+        .await
+        .expect("the probe is bounded");
+        assert!(ended.is_err());
+        assert_eq!(
+            out,
+            "me/nas: reached, but the probe went unanswered (1 sent, 0 back)\n"
+        );
     }
 
     /// A probe that broke through `serve`, or went unanswered, asks whether `serve` went before blaming
@@ -1164,8 +1270,10 @@ mod tests {
 
     /// One of your devices that answers `control.services` only once the request's write half has
     /// ended cleanly, as a node behind `serve` sees it: a half dropped unended is a reset, and the node
-    /// answers nothing.
-    struct AnswersAnEnd;
+    /// answers nothing. Unless it `answers`, it takes the request and holds the stream, saying nothing.
+    struct AnswersAnEnd {
+        answers: bool,
+    }
 
     impl Session for AnswersAnEnd {
         type Write = TestWrite<Ending>;
@@ -1181,8 +1289,13 @@ mod tests {
             let (ended, end) = tokio::sync::oneshot::channel();
             let (mut node, read) = tokio::io::duplex(4096);
             let catalog = catalog_of(&["web=echo:"]);
+            let answers = self.answers;
             tokio::spawn(async move {
                 if end.await.is_ok() {
+                    if !answers {
+                        let _held = node;
+                        return core::future::pending().await;
+                    }
                     let _ = node.write_all(&catalog).await;
                 }
             });
@@ -1215,7 +1328,7 @@ mod tests {
     async fn the_services_probe_ends_its_write_half_on_both_paths() {
         use swoosh::serve::control_codec::PathReply;
 
-        let own = probe_own(&AnswersAnEnd, Probe::Services, "me/nas").await;
+        let own = probe_own(&AnswersAnEnd { answers: true }, Probe::Services, "me/nas").await;
         assert_eq!(
             own.to_string(),
             "me/nas, path: direct, rtt 0.000 ms; serving: web"
@@ -1224,7 +1337,8 @@ mod tests {
             path: Path::Direct,
             ..ConnInfo::default()
         };
-        let (out, _, ended) = through_serve(&AnswersAnEnd, [PathReply::Sample(direct)]).await;
+        let (out, _, ended) =
+            through_serve(&AnswersAnEnd { answers: true }, [PathReply::Sample(direct)]).await;
         ended.expect("the device answered");
         assert_eq!(out, "me/nas, path: direct, rtt 0.000 ms; serving: web\n");
     }

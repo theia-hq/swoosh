@@ -176,7 +176,7 @@ impl PingCmd {
                 print_block(
                     &mut io::stdout(),
                     &label,
-                    Some(&session.conn_info().path),
+                    || Ok(Some(session.conn_info().path)),
                     &report,
                 )?;
                 reach::Outcome::Healthy
@@ -287,7 +287,10 @@ impl PingCmd {
             // Both live callbacks print, one per probe and one per move, so they share the writer.
             let live = RefCell::new(&mut *out);
             let mut shown = observer.latest().path.clone();
-            writeln!(live.borrow_mut(), "{}", path_line(&label, &shown))?;
+            let written = writeln!(live.borrow_mut(), "{}", path_line(&label, &shown));
+            if let Err(error) = written {
+                return Err(through_serve::failed(error.into(), observer, err).await);
+            }
             // A live row that cannot be written is dropped: the block after the run, which carries the
             // result, reports the failed write.
             let probes = self.plan().observing(session, |probe| {
@@ -319,11 +322,12 @@ impl PingCmd {
                     && let Some(gone) = stopped().await
                 {
                     through_serve::log_path(observed);
-                    print_block(out, &label, None, &report)?;
+                    print_block(out, &label, || Ok(None), &report)?;
                     return Err(gone);
                 }
-                let path = through_serve::final_path(observed, err)?;
-                print_block(out, &label, path.as_ref().map(|info| &info.path), &report)?;
+                // The warning for a path that could not be read lands where its row would have.
+                let path = || Ok(through_serve::final_path(observed, err)?.map(|info| info.path));
+                print_block(out, &label, path, &report)?;
                 return Ok(());
             }
             // No session here to ask one of your devices why, so the refusal names no cause it cannot
@@ -342,7 +346,10 @@ impl PingCmd {
                 None => (failed_line(&label, &error), reach::Outcome::Failed),
             },
         };
-        writeln!(out, "{line}")?;
+        // A line that cannot be written ends the run as a failure, Finished all the same.
+        if let Err(error) = writeln!(out, "{line}") {
+            return Err(through_serve::failed(error.into(), observer, err).await);
+        }
         through_serve::ended(outcome.unbound_result(&self.peer), observer, err).await
     }
 
@@ -355,17 +362,18 @@ impl PingCmd {
     }
 }
 
-/// Print one machine's block on `out`: the machine, its `path:` row when there is a reading of it, then
-/// the `ping(8)` counts and RTT distribution indented beneath it.
+/// Print one machine's block on `out`: the machine, its `path:` row when `path` reads one, then the
+/// `ping(8)` counts and RTT distribution indented beneath it. `path` is read after the machine's line,
+/// so whatever it says about a path it could not read lands where the row would have.
 fn print_block(
     out: &mut impl Write,
     label: &str,
-    path: Option<&Path>,
+    path: impl FnOnce() -> io::Result<Option<Path>>,
     report: &PingReport,
 ) -> io::Result<()> {
     writeln!(out, "{label}")?;
-    if let Some(path) = path {
-        writeln!(out, "  path: {}", reach::PathLine(path))?;
+    if let Some(path) = path()? {
+        writeln!(out, "  path: {}", reach::PathLine(&path))?;
     }
     let loss_pct = report.loss() * 100.0;
     writeln!(
@@ -645,9 +653,27 @@ mod tests {
         replies: impl IntoIterator<Item = swoosh::serve::control_codec::PathReply>,
         gone: Option<&str>,
     ) -> ((String, Vec<String>, eyre::Result<()>), bool) {
+        let events = crate::commands::through_serve::tests::Events::answering(replies);
+        let mut out = Vec::new();
+        let (ended, asked) = run_through_serve(argv, session, &events, gone, &mut out).await;
+        (
+            (String::from_utf8(out).expect("text"), events.log(), ended),
+            asked,
+        )
+    }
+
+    /// `ping <argv>` to `me/nas` through `serve`, over `session`, the resident and stderr being `events`
+    /// and stdout `out`: how it ended, and whether `serve` was asked if it went.
+    async fn run_through_serve(
+        argv: &[&str],
+        session: &Echo,
+        events: &crate::commands::through_serve::tests::Events,
+        gone: Option<&str>,
+        out: &mut impl Write,
+    ) -> (eyre::Result<()>, bool) {
         use clap::Parser as _;
 
-        use crate::commands::through_serve::tests::{Events, reading, relayed};
+        use crate::commands::through_serve::tests::{reading, relayed};
 
         #[derive(clap::Parser)]
         struct Wrap {
@@ -663,8 +689,6 @@ mod tests {
             .expect("ping parses")
             .ping;
         let machine = cmd.peer.machine(&contacts).expect("one machine");
-        let events = Events::answering(replies);
-        let mut out = Vec::new();
         let asked = core::cell::Cell::new(false);
         // On the paused clock, and past measure's own bound on an unanswered probe.
         let ended = tokio::time::timeout(
@@ -677,16 +701,66 @@ mod tests {
                     asked.set(true);
                     gone.map(|line| eyre::eyre!("{line}"))
                 },
-                &mut out,
+                out,
                 &mut events.clone(),
             ),
         )
         .await
         .expect("the run ends");
-        (
-            (String::from_utf8(out).expect("text"), events.log(), ended),
-            asked.get(),
+        (ended, asked.get())
+    }
+
+    /// A line that cannot be written to stdout ends the run as a failure, its error printed and its
+    /// receipt Finished all the same: the `-v` row before the probes, and the refusal's line after them.
+    #[tokio::test(start_paused = true)]
+    async fn an_unwritable_stdout_still_finishes_the_run() {
+        use crate::commands::through_serve::Reported;
+        use crate::commands::through_serve::tests::{Events, Unwritable};
+
+        let busy = bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded("busy"),
+        };
+        for (argv, session) in [
+            (&["-v", "-c", "1"][..], Echo::default()),
+            (&["-c", "1"][..], Echo::refusing(busy)),
+        ] {
+            let events = Events::default();
+            let (ended, _) =
+                run_through_serve(argv, &session, &events, None, &mut Unwritable).await;
+            assert!(ended.expect_err("exit 1").is::<Reported>(), "{argv:?}");
+            assert_eq!(
+                events.log(),
+                ["stderr: error: broken pipe", "Finish"],
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// A path that could not be read warns where its row would have printed, inside the block, as
+    /// `speed` does.
+    #[tokio::test(start_paused = true)]
+    async fn the_path_warning_lands_where_the_row_would_have() {
+        use crate::commands::through_serve::tests::Events;
+
+        let events = Events::default();
+        let (ended, _) = run_through_serve(
+            &["-c", "1"],
+            &Echo::default(),
+            &events,
+            None,
+            &mut events.stdout(),
         )
+        .await;
+        ended.expect("the run measured");
+        assert_eq!(
+            events.log()[..4],
+            [
+                "Finish",
+                "stdout: me/nas",
+                "stderr: warning: could not read the path of this run",
+                "stdout:   1 sent, 1 received, 0% loss",
+            ]
+        );
     }
 
     /// Through `serve` the block's `path:` is the Finish's, read after the run, never the path the
