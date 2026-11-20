@@ -1,5 +1,6 @@
 //! Verbs that dial through a running `swoosh serve` rather than binding this home's key:
-//! `forward <machine> <service> -`, and `speed`, which also follows its connection's path there.
+//! `forward <machine> <service> -`, and `speed` and `ping`, which also follow their connection's path
+//! there.
 //!
 //! When `serve` answers on this home's control socket, the verb's stream is one Open there: this
 //! process binds nothing, reads no key and asks no passphrase, and the resident presents this home's
@@ -327,6 +328,23 @@ pub async fn failed<P: PathSource>(
         None => tracing::debug!("the failed run's Finish passed its bound and was dropped"),
     }
     Reported.into()
+}
+
+/// End a run through `serve` whose result is `ended`, its own lines already printed: a failure as
+/// [`failed`] ends one, a success once its observation is Finished, so no exit leaves the reference to
+/// the resident's retention.
+pub async fn ended<P: PathSource>(
+    ended: eyre::Result<()>,
+    observer: Observer<P>,
+    err: &mut impl std::io::Write,
+) -> eyre::Result<()> {
+    match ended {
+        Ok(()) => {
+            log_path(observer.finish().await);
+            Ok(())
+        }
+        Err(report) => Err(failed(report, observer, err).await),
+    }
 }
 
 /// Log the observation of a run through `serve` that prints no path: its own line is what it prints.

@@ -159,7 +159,7 @@ fn a_bare_person_with_one_machine_dials_it_and_says_so() {
     );
     assert_eq!(
         text(&out.stdout),
-        "alice/laptop via iroh: unreachable\n",
+        "alice/laptop: unreachable\n",
         "it dialed the one machine"
     );
 }

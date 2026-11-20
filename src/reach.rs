@@ -337,10 +337,20 @@ impl Outcome {
         bound: &transport::Bound,
     ) -> eyre::Result<()> {
         match self {
+            Self::Unreachable => Err(hint(eyre::eyre!("could not reach {target}"), bound)),
+            reached => reached.unbound_result(target),
+        }
+    }
+
+    /// [`into_result`](Self::into_result) for a run that made no bind of its own, such as one through a
+    /// local resident: no bind's reach setting can be the cause of an unreachable machine, so none is
+    /// named.
+    pub fn unbound_result(self, target: &impl core::fmt::Display) -> eyre::Result<()> {
+        match self {
             Self::Healthy => Ok(()),
             Self::Failed => Err(eyre::eyre!("{target}: reached, but the probe failed")),
             Self::Refused => Err(eyre::eyre!("{target}: reached, but refused")),
-            Self::Unreachable => Err(hint(eyre::eyre!("could not reach {target}"), bound)),
+            Self::Unreachable => Err(eyre::eyre!("could not reach {target}")),
         }
     }
 }

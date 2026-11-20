@@ -999,9 +999,9 @@ async fn run() -> eyre::Result<()> {
         }
     }
 
-    // `speed` while `serve` runs here, the same way: one observed Open there, its path read through
-    // `serve` after the run.
-    if matches!(reach, Outward::Speed(_))
+    // `speed` and `ping` while `serve` runs here, the same way: one observed Open there, its path
+    // read through `serve` after the run.
+    if matches!(reach, Outward::Speed(_) | Outward::Ping(_))
         && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
@@ -1010,6 +1010,10 @@ async fn run() -> eyre::Result<()> {
         let routed = match &reach {
             Outward::Speed(cmd) => Some((
                 "speed",
+                cmd.through_serve(&home, machine, slip, contacts).await?,
+            )),
+            Outward::Ping(cmd) => Some((
+                "ping",
                 cmd.through_serve(&home, machine, slip, contacts).await?,
             )),
             _ => None,
