@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bifrost::{
-    NoDiscovery, Node, NodeId, Refusal, RefusalDetail, Session as _, Transport as _, WriteEnd,
+    ConnInfo, NoDiscovery, Node, NodeId, Refusal, RefusalDetail, Session as _, Transport as _,
+    WriteEnd,
 };
 use bifrost_mem::{MemRead, MemSession, MemTransport, MemWrite};
 use futures::poll;
@@ -20,16 +21,20 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, DuplexStream};
 use tokio::net::UnixStream;
 
 use super::{
-    BROKEN, ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, Opens as _,
-    REPLY_TIMEOUT, ToPeer, UNREACHABLE, UNREADABLE_HOME, attach, failed, raise_open_files, splice,
+    BROKEN, Carrier, ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Observing,
+    Opener, Opens as _, REPLY_TIMEOUT, TERMINAL_RETENTION, ToPeer, UNREACHABLE, UNREADABLE_HOME,
+    attach, failed, raise_open_files, splice,
 };
 use crate::home::Home;
 use crate::peers::{DialFailure, Hints, OpenError, Peers};
 use crate::renewal::renewal_tests::{DAY, LAPTOP, device, lapsed_laptop, node, now};
 use crate::renewal::{Fetch, FetchError, OpenRenewal};
 use crate::serve::control_codec::{
-    MAX_FRAME, OpenLane, OpenRefusal, OpenRequest, PeerRefusal, Request, Response,
+    Attached, Epoch, MAX_FRAME, OpenLane, OpenRefusal, OpenRequest, PathAction, PathRef, PathReply,
+    PathRequest, PeerRefusal, Request, Response,
 };
+use crate::serve::observing::Observations;
+use crate::serve::socket::Ticket;
 use crate::serve::socket::splice::{DataLen, Frame, HEADER, Toward, read_frame};
 use crate::serve::{MAX_CONTROL_CONNS, Resident};
 use crate::testkit::{Script, ScriptedPeer, TestNode, TestWrite};
@@ -115,12 +120,12 @@ async fn an_anyone_slip_is_not_here_and_dials_nothing() {
 }
 
 #[tokio::test]
-async fn an_observed_open_is_an_error_before_any_dial() {
+async fn an_unknown_observation_mode_is_an_error_before_any_dial() {
     let fixture = Fixture::new("observed", [Script::Lists(vec![])]);
     let mut body = request(fixture.peer, OpenLane::Main, None)
         .encode()
         .unwrap();
-    *body.last_mut().unwrap() = 1;
+    *body.last_mut().unwrap() = 2;
     fixture
         .run(async |socket| {
             let mut client = UnixStream::connect(socket).await.unwrap();
@@ -592,6 +597,7 @@ async fn a_clean_end_then_half_close_after_the_downloads_end_starts_no_clock() {
         info,
         &gone,
         core::future::pending(),
+        unobserved(),
     ));
     let waiting = async {
         attached(&mut client).await;
@@ -895,6 +901,7 @@ async fn an_attached_reply_that_cannot_be_written_resets_the_peers_stream() {
         stream.sessions[0].conn_info(),
         &stream.gone,
         core::future::pending(),
+        unobserved(),
     )
     .await;
     assert_eq!(stream.peer_reads().await, Ended::Reset);
@@ -1263,7 +1270,7 @@ async fn a_whole_open_dropped_mid_splice_resets_the_peers_stream() {
     let home = Home::resolve(Some(scratch("dropped-open"))).unwrap();
     let asks = Asks::default();
     let renewal = OpenRenewal::new(&home, &asks);
-    let opener = Opener::new(&peers, &renewal, &home, node.node_id());
+    let opener = Opener::new(&peers, &renewal, &home, node.node_id()).unwrap();
     let (server, mut client) = UnixStream::pair().unwrap();
     let gone = ClientGone::watch(server.as_raw_fd()).unwrap();
     let (from_client, to_client) = server.into_split();
@@ -1830,7 +1837,7 @@ impl Fixture {
             resident,
             peers,
             asks,
-            opener: Opener::new(peers, renewal, home, this),
+            opener: Opener::new(peers, renewal, home, this).unwrap(),
             dir,
         }
     }
@@ -2143,6 +2150,61 @@ async fn attached(client: &mut UnixStream) {
     ));
 }
 
+/// Read the Attached reply and the reference it carries.
+async fn observed(client: &mut UnixStream) -> PathRef {
+    let Response::Attached(Attached {
+        reference: Some(reference),
+        ..
+    }) = Response::read_open(client).await.unwrap()
+    else {
+        panic!("expected attached with a reference");
+    };
+    reference
+}
+
+/// Ask the resident at `socket` to act on `reference`, on a connection of its own, and read the reply
+/// and the close after it.
+async fn path(socket: &std::path::Path, reference: PathRef, action: PathAction) -> Response {
+    let mut client = UnixStream::connect(socket).await.unwrap();
+    Request::Path(PathRequest { reference, action })
+        .write(&mut client)
+        .await
+        .unwrap();
+    let reply = Response::read_path(&mut client).await.unwrap();
+    let mut rest = Vec::new();
+    client.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
+    reply
+}
+
+/// A sample of `info`, as a Path reply.
+fn sampled(info: &ConnInfo) -> Response {
+    Response::Path(PathReply::Sample(info.clone()))
+}
+
+/// The unavailable Path reply.
+const UNAVAILABLE: Response = Response::Path(PathReply::Unavailable);
+
+/// A direct path report.
+fn direct() -> ConnInfo {
+    ConnInfo {
+        path: bifrost::Path::Direct,
+        rtt: Some(Duration::from_micros(12_031)),
+        remote: Some("192.0.2.9:7".parse().unwrap()),
+    }
+}
+
+/// A relayed path report.
+fn relayed() -> ConnInfo {
+    ConnInfo {
+        path: bifrost::Path::Relayed(bifrost::Relay::from(
+            url::Url::parse("https://relay.example/").unwrap(),
+        )),
+        rtt: None,
+        remote: None,
+    }
+}
+
 /// Wait at most `within` for every reach slot to be back.
 async fn released(opener: &Opener<'_, '_, '_, ScriptedPeer, NoDiscovery, Asks>, within: Duration) {
     let back = tokio::time::timeout(
@@ -2208,6 +2270,7 @@ impl MemStream {
             self.sessions[0].conn_info(),
             &self.gone,
             self.sessions[0].wait_closed(),
+            unobserved(),
         )
         .await;
     }
@@ -2216,6 +2279,14 @@ impl MemStream {
     async fn peer_reads(&mut self) -> Ended {
         reads(&mut self.peer.1).await
     }
+}
+
+/// No observation, for an attach a test drives directly.
+fn unobserved() -> Option<(
+    &'static Observing<'static, Carrier<MemSession>>,
+    Carrier<MemSession>,
+)> {
+    None
 }
 
 /// Attach an Open's parts: what [`MemStream::attach`] does, borrowing only the watch, so a test can
@@ -2236,6 +2307,7 @@ async fn splice_mem(
         session.conn_info(),
         gone,
         session.wait_closed(),
+        unobserved(),
     )
     .await;
 }
@@ -2388,5 +2460,400 @@ impl WriteEnd for Unshut {
 
     fn delivered(self) -> impl Future<Output = std::io::Result<()>> + Send + 'static {
         core::future::pending()
+    }
+}
+
+#[tokio::test]
+async fn an_observed_open_samples_its_own_connection_and_finish_retires_only_the_reference() {
+    let fixture = Fixture::new("obs-own", [Script::Lists(vec![]), Script::Reads]);
+    fixture
+        .run(async |socket| {
+            // An unobserved Open first: it takes no ticket, so the observed one is ticket 1.
+            let mut plain = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            assert!(matches!(
+                Response::read_open(&mut plain).await.unwrap(),
+                Response::Attached(Attached {
+                    reference: None,
+                    ..
+                })
+            ));
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Isolated, None).observed(),
+            )
+            .await;
+            let reference = observed(&mut client).await;
+            assert_eq!(reference.ticket(), Ticket::FIRST);
+            // The sample reads the connection as it is now, not as it attached.
+            fixture.scripted.set_path(1, direct());
+            assert_eq!(
+                path(socket, reference, PathAction::Sample).await,
+                sampled(&direct())
+            );
+            fixture.scripted.set_path(1, relayed());
+            assert_eq!(
+                path(socket, reference, PathAction::Finish).await,
+                sampled(&relayed())
+            );
+            assert_eq!(
+                path(socket, reference, PathAction::Finish).await,
+                UNAVAILABLE
+            );
+            assert_eq!(
+                path(socket, reference, PathAction::Sample).await,
+                UNAVAILABLE
+            );
+            // Another run's epoch names nothing here.
+            let elsewhere = PathRef::new(Epoch::draw(&mut Fill(9)).unwrap(), reference.ticket());
+            assert_eq!(
+                path(socket, elsewhere, PathAction::Sample).await,
+                UNAVAILABLE
+            );
+            // The stream still carries: a Finish retired only the observation.
+            client.write_all(&ended(b"after finish")).await.unwrap();
+            let read = read_all(&mut client).await;
+            assert!(read.end && read.landed, "{read:?}");
+            assert_eq!(fixture.scripted.received(), b"after finish");
+            // Finished, so the ended Open lets its slots go at once.
+            drop(plain);
+            released(&fixture.opener, HANG_GUARD).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn two_isolated_runs_each_sample_their_own_connection() {
+    let fixture = Fixture::new("obs-two", [Script::Holds, Script::Holds]);
+    fixture
+        .run(async |socket| {
+            let isolated = || request(fixture.peer, OpenLane::Isolated, None).observed();
+            let mut a = open(socket, isolated()).await;
+            let a_ref = observed(&mut a).await;
+            let mut b = open(socket, isolated()).await;
+            let b_ref = observed(&mut b).await;
+            assert_ne!(a_ref, b_ref);
+            fixture.scripted.set_path(0, relayed());
+            fixture.scripted.set_path(1, direct());
+            assert_eq!(
+                path(socket, a_ref, PathAction::Sample).await,
+                sampled(&relayed())
+            );
+            assert_eq!(
+                path(socket, b_ref, PathAction::Sample).await,
+                sampled(&direct())
+            );
+            // Only A's own connection moving changes A's sample.
+            fixture.scripted.set_path(0, direct());
+            fixture.scripted.set_path(1, ConnInfo::default());
+            assert_eq!(
+                path(socket, a_ref, PathAction::Sample).await,
+                sampled(&direct())
+            );
+            assert_eq!(
+                path(socket, b_ref, PathAction::Sample).await,
+                sampled(&ConnInfo::default())
+            );
+            // B ending changes nothing for A.
+            assert_eq!(
+                path(socket, b_ref, PathAction::Finish).await,
+                sampled(&ConnInfo::default())
+            );
+            drop(b);
+            assert_eq!(
+                path(socket, a_ref, PathAction::Finish).await,
+                sampled(&direct())
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn opens_sharing_a_held_session_take_their_own_tickets_and_survive_its_replacement() {
+    let fixture = Fixture::new("obs-reuse", [Script::Holds, Script::Holds, Script::Holds]);
+    fixture
+        .run(async |socket| {
+            let main = || request(fixture.peer, OpenLane::Main, None).observed();
+            let mut first = open(socket, main()).await;
+            let first_ref = observed(&mut first).await;
+            let mut second = open(socket, main()).await;
+            let second_ref = observed(&mut second).await;
+            assert_eq!(fixture.scripted.dials(), 1);
+            assert_ne!(first_ref.ticket(), second_ref.ticket());
+            fixture.scripted.set_path(0, relayed());
+            assert_eq!(
+                path(socket, first_ref, PathAction::Finish).await,
+                sampled(&relayed())
+            );
+            assert_eq!(
+                path(socket, second_ref, PathAction::Sample).await,
+                sampled(&relayed())
+            );
+            // The host cuts the session; the next Open dials a new one into the same cache slot. The
+            // old reference still reads the old session, through its retention.
+            fixture.scripted.cut();
+            let mut third = open(socket, main()).await;
+            let third_ref = observed(&mut third).await;
+            assert_eq!(fixture.scripted.dials(), 2);
+            fixture.scripted.set_path(1, direct());
+            assert_eq!(
+                path(socket, second_ref, PathAction::Sample).await,
+                sampled(&relayed())
+            );
+            assert_eq!(
+                path(socket, third_ref, PathAction::Sample).await,
+                sampled(&direct())
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_ended_observed_open_gives_back_its_lane_but_keeps_its_reach_slot_until_finished() {
+    // Four isolated connections are a peer's cap; a fifth Open fits only once their counts are back.
+    let fixture = Fixture::new(
+        "obs-ended",
+        [
+            Script::Reads,
+            Script::Reads,
+            Script::Reads,
+            Script::Reads,
+            Script::Lists(vec![]),
+        ],
+    );
+    fixture
+        .run(async |socket| {
+            let mut references = Vec::new();
+            for _ in 0..4 {
+                let mut client = open(
+                    socket,
+                    request(fixture.peer, OpenLane::Isolated, None).observed(),
+                )
+                .await;
+                references.push(observed(&mut client).await);
+                client.write_all(&ended(b"")).await.unwrap();
+                let read = read_all(&mut client).await;
+                assert!(read.end && read.landed, "{read:?}");
+            }
+            // Every stream has ended both ways: their lanes are back, their reach slots are not.
+            let mut fifth = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
+            attached(&mut fifth).await;
+            assert_eq!(download(&mut fifth).await, [0, 0, 0, 0]);
+            drop(fifth);
+            until_true(|| fixture.opener.reach.available_permits() == MAX_REACH - 4).await;
+            // Each ended connection still answers, and a Finish lets its slot go at once.
+            for (at, reference) in references.into_iter().enumerate() {
+                assert!(matches!(
+                    path(socket, reference, PathAction::Finish).await,
+                    Response::Path(PathReply::Sample(_))
+                ));
+                let left = MAX_REACH - 3 + at;
+                tokio::time::timeout(
+                    HANG_GUARD,
+                    until_true(|| fixture.opener.reach.available_permits() == left),
+                )
+                .await
+                .unwrap();
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ended_observed_open_unfinished_lets_go_at_the_retention_deadline() {
+    let fixture = Fixture::new("obs-expire", [Script::Reads]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Isolated, None).observed(),
+            )
+            .await;
+            observed(&mut client).await;
+            client.write_all(&ended(b"")).await.unwrap();
+            read_all(&mut client).await;
+            let ended = tokio::time::Instant::now();
+            released(&fixture.opener, TERMINAL_RETENTION * 2).await;
+            let held = tokio::time::Instant::now() - ended;
+            assert!(
+                held >= TERMINAL_RETENTION - Duration::from_millis(1),
+                "{held:?}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn path_takes_no_reach_slot() {
+    let fixture = Fixture::new("obs-full", [Script::Holds]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Main, None).observed(),
+            )
+            .await;
+            let reference = observed(&mut client).await;
+            let rest = u32::try_from(MAX_REACH - 1).unwrap();
+            let _full = fixture.opener.reach.try_acquire_many(rest).unwrap();
+            assert_eq!(fixture.opener.reach.available_permits(), 0);
+            assert_eq!(
+                path(socket, reference, PathAction::Finish).await,
+                sampled(&ConnInfo::default())
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_malformed_path_is_the_fixed_error_and_finishes_nothing() {
+    let fixture = Fixture::new("obs-bad", [Script::Holds]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Main, None).observed(),
+            )
+            .await;
+            let reference = observed(&mut client).await;
+            let mut sample = Vec::new();
+            Request::Path(PathRequest {
+                reference,
+                action: PathAction::Sample,
+            })
+            .write(&mut sample)
+            .await
+            .unwrap();
+            for patch in [(31, 2), (31, 0xff)] {
+                let mut bad = sample.clone();
+                bad[patch.0] = patch.1;
+                let mut raw = UnixStream::connect(socket).await.unwrap();
+                raw.write_all(&bad).await.unwrap();
+                assert_eq!(
+                    Response::read_path(&mut raw).await.unwrap(),
+                    Response::Error("invalid path request".to_owned())
+                );
+            }
+            // A body of 24 is refused without being read, with the same words.
+            let mut raw = UnixStream::connect(socket).await.unwrap();
+            raw.write_all(b"SWC1\x05\x00\x18").await.unwrap();
+            assert_eq!(
+                Response::read_path(&mut raw).await.unwrap(),
+                Response::Error("invalid path request".to_owned())
+            );
+            assert_eq!(
+                path(socket, reference, PathAction::Finish).await,
+                sampled(&ConnInfo::default())
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn an_observed_open_past_the_last_ticket_is_an_error_before_any_dial() {
+    let fixture = Fixture::new("obs-spent", [Script::Lists(vec![])]);
+    fixture.opener.observations.spend_tickets();
+    fixture
+        .run(async |socket| {
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Main, None).observed(),
+            )
+            .await;
+            assert_eq!(
+                Response::read_open(&mut client).await.unwrap(),
+                Response::Error("connection observation references are unavailable".to_owned())
+            );
+        })
+        .await;
+    assert_eq!(fixture.scripted.dials(), 0);
+    released(&fixture.opener, HANG_GUARD).await;
+}
+
+/// An Attached written part way is not yet a reference anyone can use; written whole, it is, before
+/// the splice can yield; cut part way, it never becomes one.
+#[tokio::test]
+async fn a_reference_answers_only_once_attached_is_written_whole() {
+    let scripted = ScriptedPeer::new(
+        TestNode::seeded(PEER).node_id(),
+        [Script::Holds, Script::Holds],
+    );
+    let node = Node::new(scripted.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let set = Observations::new(Epoch::draw(&mut Fill(1)).unwrap(), 4).unwrap();
+    let sample = |reference| {
+        set.answer(
+            PathRequest {
+                reference,
+                action: PathAction::Sample,
+            },
+            tokio::time::Instant::now(),
+        )
+    };
+    for whole in [true, false] {
+        let connection = Rc::new(
+            peers
+                .isolated(scripted.node_id(), Hints::NONE)
+                .await
+                .unwrap(),
+        );
+        let (to_peer, from_peer) = bifrost::Session::open_bi(&*connection).await.unwrap();
+        let observing = set.reserve().unwrap();
+        let reference = observing.reference();
+        let (watched, _client) = UnixStream::pair().unwrap();
+        let gone = ClientGone::watch(watched.as_raw_fd()).unwrap();
+        // Room for 8 bytes, so the 35-byte Attached frame waits on the reader.
+        let (mut reader, to_client) = tokio::io::duplex(8);
+        let (_upload, from_client) = tokio::io::duplex(64);
+        let mut attaching = Box::pin(attach(
+            BufReader::new(from_client),
+            to_client,
+            from_peer,
+            to_peer,
+            connection.conn_info(),
+            &gone,
+            core::future::pending(),
+            Some((&observing, Carrier::Isolated(Rc::clone(&connection)))),
+        ));
+        assert!(poll!(attaching.as_mut()).is_pending());
+        assert_eq!(sample(reference), PathReply::Unavailable);
+        if !whole {
+            drop(attaching);
+            assert_eq!(sample(reference), PathReply::Unavailable);
+            drop(observing);
+            assert_eq!(sample(reference), PathReply::Unavailable);
+            continue;
+        }
+        let mut frame = [0; 35];
+        let mut read = 0;
+        while read < frame.len() {
+            read += reader.read(&mut frame[read..]).await.unwrap();
+            // Each poll that finishes the write publishes before it can return pending.
+            let _ = poll!(attaching.as_mut());
+        }
+        assert_eq!(&frame[..7], b"SWC1\x06\x00\x1c");
+        assert_eq!(sample(reference), PathReply::Sample(ConnInfo::default()));
+        drop(attaching);
+    }
+}
+
+/// A random source that fills with one byte.
+struct Fill(u8);
+
+impl rand::RngCore for Fill {
+    fn next_u32(&mut self) -> u32 {
+        u32::from(self.0)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        u64::from(self.0)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        dest.fill(self.0);
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        dest.fill(self.0);
+        Ok(())
     }
 }

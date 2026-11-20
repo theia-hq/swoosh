@@ -17,8 +17,8 @@ use tokio::time::timeout;
 
 use crate::home::{Home, ProcessId};
 use crate::serve::control_codec::{
-    ControlError, LocalServiceSnapshot, OpenRead, OpenRefusal, OpenRequest, OpenWrite, Request,
-    Response, ServiceMenu, StatusReply,
+    ControlError, LocalServiceSnapshot, Observation, OpenRead, OpenRefusal, OpenRequest, OpenWrite,
+    PathRef, PathReply, PathRequest, Request, Response, ServiceMenu, StatusReply,
 };
 
 /// How long a connect to the local control socket may take before it is a [`ControlError::Timeout`].
@@ -44,6 +44,8 @@ pub enum Opened {
     Attached {
         /// The path the stream rides, read as it attached.
         info: bifrost::ConnInfo,
+        /// The reference Path samples the connection by: present exactly when the Open was observed.
+        reference: Option<PathRef>,
         /// The peer's bytes, a clean end only at the resident's End.
         read: OpenRead,
         /// The bytes toward the peer; `shutdown` is the upload's clean end.
@@ -284,6 +286,7 @@ impl UidSocket {
         request: OpenRequest,
     ) -> Result<Opened, ControlError> {
         let (mut read, mut write) = stream.into_split();
+        let observation = request.observation();
         Self::write_request(&mut write, &Request::Open(request)).await?;
         // The reply is read off the bare socket: its reader takes exactly the frame, so the first
         // splice byte stays for the read half.
@@ -293,11 +296,29 @@ impl UidSocket {
                 phase: "response read",
             })??;
         Ok(match reply {
-            Response::Attached(info) => Opened::Attached {
-                info,
-                read: OpenRead::new(read),
-                write: OpenWrite::new(write),
-            },
+            Response::Attached(attached) => {
+                // A reference the Open did not ask for, or none where it did, answered some other
+                // request: the halves are never handed out on it.
+                match (observation, attached.reference) {
+                    (Observation::Unobserved, None) | (Observation::Observed, Some(_)) => {}
+                    (Observation::Unobserved, Some(_)) => {
+                        return Err(ControlError::Protocol(
+                            "attached carries an unrequested path reference".to_owned(),
+                        ));
+                    }
+                    (Observation::Observed, None) => {
+                        return Err(ControlError::Protocol(
+                            "attached lacks the requested path reference".to_owned(),
+                        ));
+                    }
+                }
+                Opened::Attached {
+                    info: attached.info,
+                    reference: attached.reference,
+                    read: OpenRead::new(read),
+                    write: OpenWrite::new(write),
+                }
+            }
             Response::OpenRefusal(refusal) => Opened::Refused(refusal),
             Response::Error(reason) => Opened::Error(reason),
             other => {
@@ -306,6 +327,30 @@ impl UidSocket {
                 )));
             }
         })
+    }
+
+    /// Act on an observed Open's reference, on a connection of its own: sample its connection, or sample
+    /// it and finish the reference. Unavailable is an answer, not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution fails, the request cannot be written, the resident answers with
+    /// its Error, or no valid reply arrives within the bound.
+    pub async fn path(&self, request: PathRequest) -> Result<PathReply, ControlError> {
+        let (mut stream, _) = self.connect().await?;
+        Self::write_request(&mut stream, &Request::Path(request)).await?;
+        let reply = timeout(IO_TIMEOUT, Response::read_path(&mut stream))
+            .await
+            .map_err(|_| ControlError::Timeout {
+                phase: "response read",
+            })??;
+        match reply {
+            Response::Path(reply) => Ok(reply),
+            Response::Error(reason) => Err(ControlError::Protocol(reason)),
+            other => Err(ControlError::Protocol(format!(
+                "unexpected reply to path: {other:?}"
+            ))),
+        }
     }
 
     /// Request a graceful stop and return the kernel-reported listener PID checked on that connection

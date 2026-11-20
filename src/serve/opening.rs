@@ -6,10 +6,15 @@
 //! then is the control slot released, the standing renewed when due, and the peer dialed. Once attached,
 //! the two streams are spliced in SWC1 frames, one direction at a time, until both are settled or the
 //! local client is gone; a finished upload is answered with Landed once the peer holds it.
+//!
+//! An observed Open also takes a reference to its connection before it reaches out, hands it over in
+//! Attached, and keeps the connection for Path until a Finish or [`TERMINAL_RETENTION`] after the
+//! stream ends; its reach slots stay taken for as long.
 
 use core::pin::pin;
 use core::time::Duration;
 use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use bifrost::{Discovery, NodeId, RefusalDetail, Session as _, Transport, WriteEnd};
@@ -22,8 +27,13 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
 use super::PROVEN_ROUTES;
+pub use super::observing::TERMINAL_RETENTION;
+use super::observing::{Carrier, Observations, Observing};
 use super::socket::splice::{DataLen, FramedWriter, UploadCut, upload};
-use super::socket::{OpenLane, OpenRefusal, OpenRequest, Response};
+use super::socket::{
+    Attached, Epoch, EpochError, Observation, OpenLane, OpenRefusal, OpenRequest, PathReply,
+    PathRequest, Response,
+};
 use crate::credential::{Credential, admits_anyone_at};
 use crate::home::Home;
 use crate::peers::{
@@ -96,8 +106,8 @@ pub(crate) const OPEN_REPLY_BOUND: Duration = OPEN_RENEWAL
 // A Main open's deadline is the shorter, so the bound counts Bulk's.
 const _: () = assert!(MAIN_OPEN_TIMEOUT.as_millis() <= OPEN_TIMEOUT.as_millis());
 
-/// What the run lends the resident to answer Opens: its sessions, its renewal and its home, and the
-/// reach slots every Open takes for as long as its stream lives.
+/// What the run lends the resident to answer Opens: its sessions, its renewal and its home, the reach
+/// slots every Open takes for as long as its stream lives, and the observed Opens Path answers for.
 pub struct Opener<'r, 'a, 'n, T: Transport, D: Discovery, F: Fetch> {
     peers: &'r Peers<'n, T, D>,
     renewal: &'r OpenRenewal<'a, F>,
@@ -106,24 +116,48 @@ pub struct Opener<'r, 'a, 'n, T: Transport, D: Discovery, F: Fetch> {
     this: NodeId,
     reach: Semaphore,
     beyond_main: Semaphore,
+    observations: Observations<Carrier<T::Session>>,
 }
 
 impl<'r, 'a, 'n, T: Transport, D: Discovery, F: Fetch> Opener<'r, 'a, 'n, T, D, F> {
-    /// Answer Opens for the run whose node is `this`.
+    /// Answer Opens for the run whose node is `this`, its references under an epoch drawn from the
+    /// operating system's random source.
+    ///
+    /// # Errors
+    ///
+    /// The random source fails or draws zero, or the observation records cannot be allocated.
     pub fn new(
         peers: &'r Peers<'n, T, D>,
         renewal: &'r OpenRenewal<'a, F>,
         home: &'r Home,
         this: NodeId,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, OpenerError> {
+        let epoch = Epoch::draw(&mut rand::rngs::OsRng)?;
+        Self::with_epoch(peers, renewal, home, this, epoch)
+    }
+
+    /// [`new`](Self::new), under `epoch`.
+    ///
+    /// # Errors
+    ///
+    /// The observation records cannot be allocated.
+    pub fn with_epoch(
+        peers: &'r Peers<'n, T, D>,
+        renewal: &'r OpenRenewal<'a, F>,
+        home: &'r Home,
+        this: NodeId,
+        epoch: Epoch,
+    ) -> Result<Self, OpenerError> {
+        Ok(Self {
             peers,
             renewal,
             home,
             this,
             reach: Semaphore::new(MAX_REACH),
             beyond_main: Semaphore::new(MAX_BEYOND_MAIN),
-        }
+            // One record per reach slot at most: only an Open holding a slot records.
+            observations: Observations::new(epoch, MAX_REACH).map_err(OpenerError::Records)?,
+        })
     }
 
     /// The reach slots an Open on `lane` takes, or `Busy`. A slip's stream is never ordinary Main: it
@@ -181,7 +215,18 @@ impl<'r, 'a, 'n, T: Transport, D: Discovery, F: Fetch> Opener<'r, 'a, 'n, T, D, 
     }
 }
 
-/// An Open's reach slots, released when its stream ends.
+/// Why a run could not start answering Opens.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenerError {
+    /// The epoch for its references could not be drawn.
+    #[error(transparent)]
+    Epoch(#[from] EpochError),
+    /// The records for its observed Opens could not be allocated.
+    #[error("could not allocate the records for path observation")]
+    Records(#[source] std::collections::TryReserveError),
+}
+
+/// An Open's reach slots, released when its stream ends, or when its observation lets go after that.
 struct Held<'o> {
     _reach: SemaphorePermit<'o>,
     _beyond_main: Option<SemaphorePermit<'o>>,
@@ -204,6 +249,10 @@ pub trait Opens {
         R: AsyncBufRead + Unpin,
         W: AsyncWrite + Unpin;
 
+    /// Answer a Path request on the control slot that read it: the referenced connection's report as
+    /// it reads now, or Unavailable. Synchronous, so no state is held across the reply's write.
+    fn path(&self, request: PathRequest) -> PathReply;
+
     /// What runs beside the Opens for as long as the socket is served: a renewal an Open started runs
     /// to its end and its end counts, even when every Open waiting on it has gone, so a parked flight
     /// never holds `home.lock`.
@@ -213,6 +262,12 @@ pub trait Opens {
 impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F> {
     fn drive(&self) -> impl Future<Output = core::convert::Infallible> {
         self.renewal.drive()
+    }
+
+    // Path takes no reach slot: a run whose slots are all held by ended observed Opens still answers the
+    // Finish that frees one.
+    fn path(&self, request: PathRequest) -> PathReply {
+        self.observations.answer(request, Instant::now())
     }
 
     async fn open<R, W>(
@@ -238,6 +293,17 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
         let held = match self.hold(open.lane(), open.slip().is_some()) {
             Ok(held) => held,
             Err(refusal) => return refuse(&mut to_client, refusal).await,
+        };
+        // Taken while the Open holds its reach slot, so records never outnumber the slots. The ticket is
+        // spent whether or not the Open attaches; the record is invisible until Attached is written.
+        let observing = match open.observation() {
+            Observation::Unobserved => None,
+            Observation::Observed => match self.observations.reserve() {
+                Ok(observing) => Some(observing),
+                Err(_) => {
+                    return answer(&mut to_client, Response::Error(UNOBSERVABLE.to_owned())).await;
+                }
+            },
         };
         // The peer's lane is counted before renewal, so an Open that would be Busy never starts or joins
         // a renewal flight.
@@ -290,12 +356,17 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                     Ok(opened) => opened,
                     Err(refusal) => return refuse(&mut to_client, refusal).await,
                 };
+                let connection = Rc::new(connection);
                 let info = connection.conn_info();
                 // Closing a connection discards what the peer has not acknowledged. The splice has
                 // already waited for the peer to hold a finished upload, for as long as the client stayed
                 // attached and within the drain after its hang-up, so the close follows at once: after a
                 // delivery, nothing is lost; without one, the close is the reset a held lane cannot send.
+                // An observed Open closes it only once its observation lets go.
                 let lost = connection.wait_closed();
+                let observed = observing
+                    .as_ref()
+                    .map(|observing| (observing, Carrier::Isolated(Rc::clone(&connection))));
                 attach(
                     from_client,
                     to_client,
@@ -304,8 +375,14 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                     info,
                     &gone,
                     lost,
+                    observed,
                 )
                 .await;
+                drop(gone);
+                connection.release_place();
+                if let Some(observing) = observing {
+                    observing.retain().await;
+                }
                 drop((connection, held));
                 return;
             }
@@ -323,6 +400,9 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
             // Landed.
             Ok((info, session, to_peer, from_peer)) => {
                 let lost = session.closed();
+                let observed = observing
+                    .as_ref()
+                    .map(|observing| (observing, Carrier::Held(session.clone())));
                 attach(
                     from_client,
                     to_client,
@@ -331,8 +411,15 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                     info,
                     &gone,
                     lost,
+                    observed,
                 )
                 .await;
+                // The stream's halves are gone, and with them its lane count; the session stays for an
+                // observation, never past it.
+                drop(gone);
+                if let Some(observing) = observing {
+                    observing.retain().await;
+                }
             }
             Err(error) => refuse(&mut to_client, failed(&error)).await,
         }
@@ -368,7 +455,9 @@ async fn answer<W: AsyncWrite + Unpin>(to_client: &mut W, reply: Response) {
 }
 
 /// Reply Attached with the path the stream rides, then splice; `lost` resolves once the session the
-/// stream rides has closed.
+/// stream rides has closed. An observed Open's record goes live on `carrier` in the poll that finished
+/// writing Attached, before the splice can yield, so its reference answers as soon as the client holds
+/// it; a reply that fails or is cancelled never makes it queryable.
 ///
 /// However this ends, short of a successful shutdown of `to_peer`, the peer's stream is aborted: a
 /// failed reply, an upload cut off or malformed, a failed write toward the peer, a failed stream from
@@ -376,7 +465,11 @@ async fn answer<W: AsyncWrite + Unpin>(to_client: &mut W, reply: Response) {
 /// A client gone while it splices does not drop this future: what it wrote drains, a drain that
 /// reaches the client's End in time ends cleanly, and only one still running at the deadline is
 /// aborted.
-async fn attach<R, W, PR, PW>(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the two streams' four halves, the report, the two watches and the observation"
+)]
+async fn attach<R, W, PR, PW, S>(
     from_client: R,
     mut to_client: W,
     from_peer: PR,
@@ -384,20 +477,30 @@ async fn attach<R, W, PR, PW>(
     info: bifrost::ConnInfo,
     gone: &ClientGone,
     lost: impl Future<Output = ()>,
+    observed: Option<(&Observing<'_, Carrier<S>>, Carrier<S>)>,
 ) where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     PR: AsyncRead + Unpin,
     PW: AsyncWrite + WriteEnd + Unpin,
+    S: bifrost::Session,
 {
     // Armed before anything can return, so no early exit leaves the peer a clean end.
     let to_peer = ToPeer::arm(to_peer);
-    let reply = Response::Attached(info);
+    let reply = Response::Attached(Attached {
+        reference: observed
+            .as_ref()
+            .map(|(observing, _)| observing.reference()),
+        info,
+    });
     if !matches!(
         tokio::time::timeout(REPLY_TIMEOUT, reply.write(&mut to_client)).await,
         Ok(Ok(()))
     ) {
         return;
+    }
+    if let Some((observing, carrier)) = observed {
+        observing.publish(carrier);
     }
     splice(
         from_client,
@@ -747,6 +850,9 @@ const BROKEN: &str = "the connection to the machine failed while opening the str
 /// The Error an Open gets when this machine's home or badge cannot be read. It names no path and no
 /// cause; those stay in the run's log.
 const UNREADABLE_HOME: &str = "this machine's home or badge could not be read";
+
+/// The Error an observed Open gets once the run has handed out every reference it can.
+const UNOBSERVABLE: &str = "connection observation references are unavailable";
 
 /// Watches a control connection for its client closing the socket in both directions.
 ///

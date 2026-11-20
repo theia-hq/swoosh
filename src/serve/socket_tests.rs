@@ -76,7 +76,7 @@ async fn unknown_tags_and_incomplete_headers_do_not_acquire_operation_context() 
         );
         assert_eq!(observed, None);
     }
-    for tag in [0, 5, 7, 0xff] {
+    for tag in [0, 7, 8, 0xff] {
         let frame = [b'S', b'W', b'C', b'1', tag, 0, 0];
         let mut reader = frame.as_slice();
         let mut observed = None;

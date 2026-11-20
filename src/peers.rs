@@ -414,7 +414,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
             .map_err(OpenError::Unreachable)?;
         Ok(Isolated {
             session,
-            _budget: budget,
+            budget: Cell::new(Some(budget)),
         })
     }
 
@@ -707,15 +707,27 @@ impl<S: Session> Drop for Active<S> {
     }
 }
 
-/// A watch on the held session a stream rides, for a caller that must learn the session ended while
-/// nothing reads or writes the stream: a stream already ended both ways reports nothing more. It keeps
-/// the session as the stream's halves do, so it lives no longer than they.
+/// A hold on the held session a stream rides: a watch for a caller that must learn the session ended
+/// while nothing reads or writes the stream, and the session an observed stream's path is read from. It
+/// keeps the session as the stream's halves do, but counts toward no lane and leaves the idle clock
+/// alone, so holding it past the stream keeps the session open without keeping it busy.
 pub(crate) struct SessionEnd<S: Session>(Rc<Entry<S>>);
 
 impl<S: Session> SessionEnd<S> {
     /// Resolve once the session has closed: the host ended it, or the path to it failed.
     pub(crate) async fn closed(&self) {
         self.0.session.wait_closed().await;
+    }
+
+    /// The session's path report as it reads now.
+    pub(crate) fn conn_info(&self) -> ConnInfo {
+        self.0.session.conn_info()
+    }
+}
+
+impl<S: Session> Clone for SessionEnd<S> {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
     }
 }
 
@@ -765,10 +777,19 @@ impl<H: AsyncWrite + Unpin, S: Session> AsyncWrite for Half<H, S> {
 /// A connection [`Peers::isolated`] dialed for one caller: never held, shared or reused.
 ///
 /// Dropping it closes the connection and releases its per-peer count, so the count is exactly the live
-/// connections; a stream that outlived it ends with it.
+/// connections; a stream that outlived it ends with it. A caller whose streams on it have ended may
+/// release the count earlier and keep the connection open to read its path.
 pub struct Isolated<S: Session> {
     session: S,
-    _budget: Budget,
+    budget: Cell<Option<Budget>>,
+}
+
+impl<S: Session> Isolated<S> {
+    /// Give back this connection's place among the peer's isolated connections, keeping the connection
+    /// open. Once only: a second call has nothing left to release.
+    pub(crate) fn release_place(&self) {
+        drop(self.budget.take());
+    }
 }
 
 impl<S: Session> Session for Isolated<S> {

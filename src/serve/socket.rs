@@ -1,19 +1,20 @@
 //! The SWC1 local control codec.
 //!
-//! Each connection carries one request and one response. Reads expose status,
-//! service membership or local startup targets; Stop requests a graceful shutdown.
-//! Service edits remain file operations.
+//! Each connection carries one request and one response, except an Open, which splices once attached.
+//! Reads expose status, service membership or local startup targets; Path samples an observed Open's
+//! connection; Stop requests a graceful shutdown. Service edits remain file operations.
 
 use core::net::SocketAddr;
 use std::path::PathBuf;
 
-use bifrost::{ConnInfo, NodeId};
+use bifrost::NodeId;
 use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
 mod attached;
 mod local_detail;
 mod open;
+mod path;
 pub(crate) mod splice;
 pub use attached::{OpenRead, OpenWrite};
 #[cfg(test)]
@@ -22,7 +23,12 @@ pub use local_detail::{
     LocalDetailCaptureError, LocalDetailError, LocalDetailLimit, LocalServiceName,
     LocalServicePair, LocalServicePairs, LocalServiceSnapshot, LocalServiceTarget,
 };
-pub use open::{MAX_OPEN_REQUEST, MalformedOpen, OpenLane, OpenRefusal, OpenRequest, PeerRefusal};
+pub use open::{
+    Attached, MAX_OPEN_REQUEST, MalformedOpen, OpenLane, OpenRefusal, OpenRequest, PeerRefusal,
+};
+pub use path::{
+    Epoch, EpochError, Observation, PathAction, PathRef, PathReply, PathRequest, Ticket,
+};
 
 /// The control wire's identity: the bytes every control frame opens with, at every version, forever.
 /// A frame that does not open with these is not a control frame, and that is the only thing an
@@ -158,6 +164,8 @@ pub enum Request {
     LocalServiceDetail,
     /// Open one admitted stream to a peer, spliced onto this connection once attached.
     Open(OpenRequest),
+    /// Sample, or sample and finish, the connection an observed Open attached to.
+    Path(PathRequest),
 }
 
 impl Request {
@@ -169,16 +177,18 @@ impl Request {
             Self::Stop => RequestKind::Stop,
             Self::LocalServiceDetail => RequestKind::LocalServiceDetail,
             Self::Open(_) => RequestKind::Open,
+            Self::Path(_) => RequestKind::Path,
         }
     }
 
     /// Write one request frame: magic, tag, then the length-prefixed payload, empty for every request
-    /// but an Open.
+    /// but an Open and a Path.
     pub async fn write<W: io::AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
         let body = match self {
             Self::Open(open) => open
                 .encode()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+            Self::Path(path) => path.encode(),
             Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail => Vec::new(),
         };
         let len = u16::try_from(body.len())
@@ -220,6 +230,7 @@ impl Request {
         }
         let request = match kind {
             RequestKind::Open => return read_open(reader, len).await.map(Self::Open),
+            RequestKind::Path => return PathRequest::read(reader, len).await.map(Self::Path),
             RequestKind::Services => Self::Services,
             RequestKind::Status => Self::Status,
             RequestKind::Stop => Self::Stop,
@@ -275,6 +286,8 @@ pub(super) enum RequestKind {
     LocalServiceDetail,
     /// Open one admitted stream to a peer.
     Open,
+    /// Sample an observed Open's connection.
+    Path,
 }
 
 impl RequestKind {
@@ -285,6 +298,7 @@ impl RequestKind {
             Self::Status => 2,
             Self::Stop => 3,
             Self::Open => 4,
+            Self::Path => 5,
             Self::LocalServiceDetail => 6,
         }
     }
@@ -296,6 +310,7 @@ impl RequestKind {
             2 => Ok(Self::Status),
             3 => Ok(Self::Stop),
             4 => Ok(Self::Open),
+            5 => Ok(Self::Path),
             6 => Ok(Self::LocalServiceDetail),
             other => {
                 // Keep the existing hex diagnostic without an infallible formatting allocation.
@@ -316,7 +331,11 @@ impl RequestKind {
     /// another's.
     const fn cap(self) -> usize {
         match self {
-            Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail => MAX_FRAME,
+            // A Path declares exactly 25, checked before its body is read; up to here it keeps the
+            // ceiling every other request does, so 8193 still reads as too large.
+            Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail | Self::Path => {
+                MAX_FRAME
+            }
             // The one body that carries a whole link.
             Self::Open => MAX_OPEN_REQUEST,
         }
@@ -565,9 +584,11 @@ pub enum Response {
     /// A local startup service snapshot or a typed capture failure.
     LocalServiceDetail(Result<LocalServiceSnapshot, LocalDetailCaptureError>),
     /// The Open's stream is attached; the path report is the session's at attach time.
-    Attached(ConnInfo),
+    Attached(Attached),
     /// The Open was not attached, and why.
     OpenRefusal(OpenRefusal),
+    /// The answer to a Path request.
+    Path(PathReply),
 }
 
 impl Response {
@@ -586,6 +607,8 @@ impl Response {
         }
         let reason = if matches!(observed, Some(RequestKind::LocalServiceDetail)) {
             local_detail::diagnostic("invalid local service detail request")?
+        } else if matches!(observed, Some(RequestKind::Path)) {
+            local_detail::diagnostic(path::INVALID_PATH)?
         } else {
             // Preserve existing request diagnostics without infallible formatting or extra heap storage.
             local_detail::error_diagnostic(&error)?
@@ -603,6 +626,7 @@ impl Response {
             Self::Error(_) => 5,
             Self::Attached(_) => 6,
             Self::OpenRefusal(_) => 7,
+            Self::Path(_) => 8,
             Self::LocalServiceDetail(_) => 9,
         }
     }
@@ -613,7 +637,8 @@ impl Response {
             Self::LocalServiceDetail(reply) => return local_detail::write(reply, writer).await,
             Self::Catalog(menu) => menu.encode()?,
             Self::Status(status) => status.encode()?,
-            Self::Attached(info) => open::encode_attached(info)?,
+            Self::Attached(attached) => open::encode_attached(attached)?,
+            Self::Path(reply) => reply.encode()?,
             Self::OpenRefusal(refusal) => refusal.encode(),
             Self::Ack => Vec::new(),
             Self::Refused(reason) | Self::Error(reason) => {
@@ -662,6 +687,12 @@ impl Response {
     /// byte of its body is read.
     pub async fn read_open<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
         Self::read_frame(reader, ResponseRead::Open).await
+    }
+
+    /// Read the reply to a Path: [`Path`](Self::Path) or [`Error`](Self::Error), and nothing else, each
+    /// held to its own declared ceiling before a byte of its body is read.
+    pub async fn read_path<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
+        Self::read_frame(reader, ResponseRead::Path).await
     }
 
     pub(crate) fn into_local_snapshot(self) -> Result<LocalServiceSnapshot, ControlError> {
@@ -728,21 +759,26 @@ impl Response {
                 }
             }
         }
-        if let ResponseRead::Open = operation {
-            let cap = match tag[0] {
-                6 => open::MAX_ATTACHED,
-                7 => open::MAX_OPEN_REFUSAL,
-                5 => open::MAX_OPEN_ERROR,
-                _ => return Err(local_detail::protocol("unexpected reply to open")),
+        if let ResponseRead::Open | ResponseRead::Path = operation {
+            let cap = match (operation, tag[0]) {
+                (ResponseRead::Open, 6) => open::MAX_ATTACHED,
+                (ResponseRead::Open, 7) => open::MAX_OPEN_REFUSAL,
+                (ResponseRead::Path, 8) => path::MAX_PATH_REPLY,
+                (_, 5) => open::MAX_OPEN_ERROR,
+                (ResponseRead::Open, _) => {
+                    return Err(local_detail::protocol("unexpected reply to open"));
+                }
+                _ => return Err(local_detail::protocol("unexpected reply to path")),
             };
             // Each reply's own ceiling, before any body byte is read; every one fits this buffer.
             if len > cap {
                 return Err(ControlError::TooLarge(len));
             }
-            // The buffer is sized by Attached, the largest Open reply.
+            // The buffer is sized by Attached, the largest Open or Path reply.
             const _: () = assert!(
                 open::MAX_OPEN_REFUSAL <= open::MAX_ATTACHED
                     && open::MAX_OPEN_ERROR <= open::MAX_ATTACHED
+                    && path::MAX_PATH_REPLY <= open::MAX_ATTACHED
             );
             let mut payload = [0u8; open::MAX_ATTACHED];
             let payload = &mut payload[..len];
@@ -750,6 +786,7 @@ impl Response {
             return match tag[0] {
                 6 => Ok(Self::Attached(open::decode_attached(payload)?)),
                 7 => Ok(Self::OpenRefusal(OpenRefusal::decode(payload)?)),
+                8 => Ok(Self::Path(PathReply::decode(payload)?)),
                 _ => {
                     // The 258-byte declaration already holds the reason to 256 bytes.
                     let reason = read_str_slice(payload)
@@ -800,6 +837,7 @@ enum ResponseRead {
     Generic,
     LocalDetail,
     Open,
+    Path,
 }
 
 /// Why a control frame could not be read or written, or a control operation could not be attempted.

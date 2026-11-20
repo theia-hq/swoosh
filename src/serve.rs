@@ -23,6 +23,7 @@ use crate::home::{Home, canonical_to_be};
 mod activity;
 mod definition;
 mod lookup;
+mod observing;
 mod opening;
 #[cfg(test)]
 #[path = "serve/recv_home_tests.rs"]
@@ -38,18 +39,19 @@ mod socket;
 mod stop;
 pub mod control_codec {
     pub use super::socket::{
-        ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, LocalDetailLimit,
-        LocalServiceName, LocalServicePair, LocalServicePairs, LocalServiceSnapshot,
-        LocalServiceTarget, MAX_DISABLED_NAMES, MAX_FRAME, MAX_OPEN_REQUEST, MAX_STATUS_STRING,
-        MAX_WARM_ENTRIES, MalformedOpen, OpenLane, OpenRead, OpenRefusal, OpenRequest, OpenWrite,
-        PeerEntry, PeerRefusal, Request, Response, ServiceMenu, StatusReply, WireVersion,
+        Attached, ControlError, DisabledList, Epoch, EpochError, LocalDetailCaptureError,
+        LocalDetailError, LocalDetailLimit, LocalServiceName, LocalServicePair, LocalServicePairs,
+        LocalServiceSnapshot, LocalServiceTarget, MAX_DISABLED_NAMES, MAX_FRAME, MAX_OPEN_REQUEST,
+        MAX_STATUS_STRING, MAX_WARM_ENTRIES, MalformedOpen, Observation, OpenLane, OpenRead,
+        OpenRefusal, OpenRequest, OpenWrite, PathAction, PathRef, PathReply, PathRequest,
+        PeerEntry, PeerRefusal, Request, Response, ServiceMenu, StatusReply, Ticket, WireVersion,
     };
 }
 pub use activity::{Activity, RecvLines};
 pub(crate) use opening::OPEN_REPLY_BOUND;
 pub use opening::{
-    ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, Opens,
-    raise_open_files,
+    ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, OpenerError, Opens,
+    TERMINAL_RETENTION, raise_open_files,
 };
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};

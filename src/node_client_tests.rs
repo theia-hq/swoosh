@@ -1179,3 +1179,49 @@ async fn local_detail_credential_query_failure_and_symlinks_stay_untrusted() {
     drop(listener);
     std::fs::remove_dir_all(leaf).unwrap();
 }
+
+/// An Open's reply carries a reference exactly when the Open asked for one; any other reply is a
+/// protocol error before either half is handed out.
+#[tokio::test]
+async fn an_attached_reference_must_match_what_the_open_asked_for() {
+    use crate::serve::control_codec::{Attached, Epoch, OpenLane, OpenRequest, PathRef, Ticket};
+
+    let reference = PathRef::new(Epoch::draw(&mut rand::rngs::OsRng).unwrap(), Ticket::FIRST);
+    let peer = crate::testkit::TestNode::seeded(0x63).node_id();
+    for (observe, carried, matches) in [
+        (false, None, true),
+        (true, Some(reference), true),
+        (false, Some(reference), false),
+        (true, None, false),
+    ] {
+        let request = OpenRequest::new(
+            peer,
+            crate::peers::Hints::NONE,
+            "ssh".parse().unwrap(),
+            OpenLane::Main,
+            None,
+        )
+        .unwrap();
+        let request = if observe { request.observed() } else { request };
+        let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let answering = async {
+            Request::read(&mut server).await.unwrap();
+            Response::Attached(Attached {
+                reference: carried,
+                info: bifrost::ConnInfo::default(),
+            })
+            .write(&mut server)
+            .await
+            .unwrap();
+            server
+        };
+        let (opened, _server) = tokio::join!(UidSocket::open_on(client, request), answering);
+        match (opened, matches) {
+            (Ok(super::Opened::Attached { reference: got, .. }), true) => {
+                assert_eq!(got, carried);
+            }
+            (Err(ControlError::Protocol(_)), false) => {}
+            (other, _) => panic!("{observe} {carried:?}: {other:?}"),
+        }
+    }
+}

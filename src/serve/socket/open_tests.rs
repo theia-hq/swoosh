@@ -6,12 +6,14 @@ use bifrost::{ConnInfo, NodeId, Path, Refusal, RefusalDetail, Relay};
 use nauthy::Link;
 
 use super::{
-    MAX_ATTACHED, MAX_OPEN_BODY, MAX_OPEN_ERROR, MAX_OPEN_REFUSAL, MalformedOpen, OpenLane,
-    OpenRefusal, OpenRequest, PeerRefusal,
+    Attached, MAX_ATTACHED, MAX_OPEN_BODY, MAX_OPEN_ERROR, MAX_OPEN_REFUSAL, MalformedOpen,
+    OpenLane, OpenRefusal, OpenRequest, PeerRefusal,
 };
 use crate::credential::LinkExt as _;
 use crate::peers::{Hints, HintsError};
-use crate::serve::control_codec::{ControlError, Request, Response};
+use crate::serve::control_codec::{
+    ControlError, Observation, PathAction, PathRequest, Request, Response,
+};
 use crate::serve::socket::RequestKind;
 use crate::testkit::{TestNode, TestRoot};
 
@@ -117,9 +119,28 @@ fn lanes_are_the_byte_before_slip_presence() {
 }
 
 #[test]
-fn observation_one_is_malformed_exactly_like_two() {
-    // An observed Open (`... 00 01 78 00 00 01`) is not a request this build serves.
-    for observe in [1, 2, 0xff] {
+fn an_observed_open_ends_in_01_and_any_other_mode_is_malformed() {
+    // The minimal observed Open: `K[32] | 00 01 78 00 00 01`, still 38 bytes.
+    let mut expected = peer().key().to_vec();
+    expected.extend_from_slice(&[0x00, 0x01, 0x78, 0x00, 0x00, 0x01]);
+    let request = OpenRequest::new(
+        peer(),
+        Hints::NONE,
+        "x".parse().unwrap(),
+        OpenLane::Main,
+        None,
+    )
+    .unwrap()
+    .observed();
+    assert_eq!(request.encode().unwrap(), expected);
+    let decoded = decode(&expected).unwrap();
+    assert_eq!(decoded.observation(), Observation::Observed);
+    assert_eq!(decoded, request);
+    assert_eq!(
+        decode(&minimal()).unwrap().observation(),
+        Observation::Unobserved
+    );
+    for observe in [2, 0xff] {
         assert_eq!(
             decode(&body(&[], b"x", 0, None, observe)).err(),
             Some(MalformedOpen::Observation)
@@ -127,9 +148,26 @@ fn observation_one_is_malformed_exactly_like_two() {
     }
     // The same answer when every typed field would fail its parse: the byte is read before any field
     // is turned into a value, so a decoder that parses first answers with a field instead.
-    let mut bytes = body(&[b"999"], b"no spaces", 2, Some(b"not a link"), 1);
+    let mut bytes = body(&[b"999"], b"no spaces", 2, Some(b"not a link"), 2);
     bytes[..32].copy_from_slice(&invalid_key());
     assert_eq!(decode(&bytes).err(), Some(MalformedOpen::Observation));
+}
+
+#[test]
+fn every_lane_and_slip_combines_with_either_mode() {
+    let ssh = || "ssh".parse().unwrap();
+    for lane in [OpenLane::Main, OpenLane::Bulk, OpenLane::Isolated] {
+        for slip in [None, Some(slip())] {
+            let request = OpenRequest::new(peer(), Hints::NONE, ssh(), lane, slip).unwrap();
+            let observed =
+                OpenRequest::new(peer(), Hints::NONE, ssh(), lane, request.slip().cloned())
+                    .unwrap()
+                    .observed();
+            for request in [request, observed] {
+                assert_eq!(decode(&request.encode().unwrap()).unwrap(), request);
+            }
+        }
+    }
 }
 
 #[test]
@@ -413,7 +451,7 @@ fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn attached_unknown_is_the_published_bytes() {
-    let response = Response::Attached(ConnInfo::default());
+    let response = Response::Attached(ConnInfo::default().into());
     let bytes = written(&response).await;
     assert_eq!(bytes, b"SWC1\x06\x00\x04\x00\x00\x00\x00");
     assert_eq!(read_open(&bytes).await.unwrap(), response);
@@ -426,18 +464,24 @@ async fn attached_and_refusal_bodies_are_spelled_by_the_table() {
     attached.extend_from_slice(&1234u64.to_be_bytes());
     attached.extend_from_slice(&[1, 0, 15]);
     attached.extend_from_slice(b"[2001:db8::1]:7");
-    let response = Response::Attached(ConnInfo {
-        path: Path::Direct,
-        rtt: Some(Duration::from_nanos(1_234_999)),
-        remote: Some("[2001:db8::1]:7".parse().unwrap()),
-    });
+    let response = Response::Attached(
+        ConnInfo {
+            path: Path::Direct,
+            rtt: Some(Duration::from_nanos(1_234_999)),
+            remote: Some("[2001:db8::1]:7".parse().unwrap()),
+        }
+        .into(),
+    );
     assert_eq!(written(&response).await, frame(6, &attached));
     // Relayed spells its URL with a u16 length after the class.
-    let relayed = Response::Attached(ConnInfo {
-        path: Path::Relayed(Relay::from(url::Url::parse("https://r.example/").unwrap())),
-        rtt: None,
-        remote: None,
-    });
+    let relayed = Response::Attached(
+        ConnInfo {
+            path: Path::Relayed(Relay::from(url::Url::parse("https://r.example/").unwrap())),
+            rtt: None,
+            remote: None,
+        }
+        .into(),
+    );
     assert_eq!(
         written(&relayed).await,
         frame(6, &relayed_body(b"https://r.example/"))
@@ -456,21 +500,49 @@ async fn attached_and_refusal_bodies_are_spelled_by_the_table() {
 }
 
 #[tokio::test]
-async fn attached_with_a_path_reference_is_a_protocol_error() {
+async fn an_observed_attached_carries_its_reference_first() {
     // An observed Attached: 01 | epoch[16] | ticket 1 | Unknown.
+    let mut epoch = [0; 16];
+    epoch[15] = 1;
     let mut body = vec![1];
-    body.extend_from_slice(&[0x11; 16]);
+    body.extend_from_slice(&epoch);
     body.extend_from_slice(&1u64.to_be_bytes());
     body.extend_from_slice(&[0, 0, 0]);
     let bytes = frame(6, &body);
     assert_eq!(&bytes[..7], b"SWC1\x06\x00\x1c");
+    let Response::Attached(attached) = read_open(&bytes).await.unwrap() else {
+        panic!("expected attached");
+    };
+    let reference = attached.reference.unwrap();
+    assert_eq!(attached.info, ConnInfo::default());
+    assert_eq!(written(&Response::Attached(attached)).await, bytes);
+    let mut sample = Vec::new();
+    Request::Path(PathRequest {
+        reference,
+        action: PathAction::Sample,
+    })
+    .write(&mut sample)
+    .await
+    .unwrap();
+    assert_eq!(&sample[7..31], &body[1..25]);
+    for presence in [2, 0xff] {
+        assert_eq!(
+            protocol_reason(read_open(&frame(6, &[presence, 0, 0, 0])).await),
+            "attached reference presence is invalid"
+        );
+    }
+    // A zero epoch or ticket is no run's reference.
+    let mut zero = body.clone();
+    zero[1..17].fill(0);
     assert_eq!(
-        protocol_reason(read_open(&bytes).await),
-        "attached carries an unrequested path reference"
+        protocol_reason(read_open(&frame(6, &zero)).await),
+        "attached path reference is zero"
     );
+    let mut zero = body;
+    zero[17..25].fill(0);
     assert_eq!(
-        protocol_reason(read_open(&frame(6, &[2, 0, 0, 0])).await),
-        "attached reference presence is invalid"
+        protocol_reason(read_open(&frame(6, &zero)).await),
+        "attached path reference is zero"
     );
 }
 
@@ -494,7 +566,7 @@ async fn attached_round_trips_every_optional() {
             remote: None,
         },
     ] {
-        let response = Response::Attached(info);
+        let response = Response::Attached(info.into());
         assert_eq!(
             read_open(&written(&response).await).await.unwrap(),
             response
@@ -502,10 +574,13 @@ async fn attached_round_trips_every_optional() {
     }
     // A round trip past u64 microseconds is refused before a header is written.
     let mut out = Vec::new();
-    let too_long = Response::Attached(ConnInfo {
-        rtt: Some(Duration::MAX),
-        ..ConnInfo::default()
-    });
+    let too_long = Response::Attached(
+        ConnInfo {
+            rtt: Some(Duration::MAX),
+            ..ConnInfo::default()
+        }
+        .into(),
+    );
     assert!(too_long.write(&mut out).await.is_err());
     assert!(out.is_empty());
 }
@@ -531,8 +606,11 @@ async fn relay_url_length_is_1_to_1024() {
         .unwrap();
     assert!(matches!(
         edge,
-        Response::Attached(ConnInfo {
-            path: Path::Relayed(_),
+        Response::Attached(Attached {
+            info: ConnInfo {
+                path: Path::Relayed(_),
+                ..
+            },
             ..
         })
     ));
@@ -545,12 +623,15 @@ async fn relay_url_length_is_1_to_1024() {
         );
     }
     // The writer refuses what the reader would, before a header.
-    let long = Response::Attached(ConnInfo {
-        path: Path::Relayed(Relay::from(
-            url::Url::parse(core::str::from_utf8(&url_of(1025)).unwrap()).unwrap(),
-        )),
-        ..ConnInfo::default()
-    });
+    let long = Response::Attached(
+        ConnInfo {
+            path: Path::Relayed(Relay::from(
+                url::Url::parse(core::str::from_utf8(&url_of(1025)).unwrap()).unwrap(),
+            )),
+            ..ConnInfo::default()
+        }
+        .into(),
+    );
     let mut out = Vec::new();
     assert!(long.write(&mut out).await.is_err());
     assert!(out.is_empty());
@@ -723,7 +804,7 @@ async fn the_generic_reader_still_calls_open_replies_unknown() {
 }
 
 #[tokio::test]
-async fn request_tag_4_is_held_to_its_own_cap_and_tag_5_stays_unknown() {
+async fn request_tag_4_is_held_to_its_own_cap_and_path_keeps_the_frame_ceiling() {
     // An Open is declared up to 16384 bytes and refused past it before a byte of the body is read.
     let mut reader = b"SWC1\x04\x40\x01".as_slice();
     let mut observed = None;
@@ -737,17 +818,9 @@ async fn request_tag_4_is_held_to_its_own_cap_and_tag_5_stays_unknown() {
         Request::read(&mut b"SWC1\x04\x00\x00".as_slice()).await,
         Err(ControlError::Open(MalformedOpen::Truncated))
     ));
-    // Path names no operation yet: its declaration is never read.
-    let mut reader = b"SWC1\x05\x00\x19".as_slice();
-    let mut observed = None;
-    let error = Request::read_observed(&mut reader, &mut observed)
-        .await
-        .unwrap_err();
-    assert!(matches!(error, ControlError::Protocol(_)));
-    assert_eq!(observed, None);
-    assert_eq!(reader.len(), 2);
-    // Every other known operation is still held to the frame ceiling on its declaration alone.
-    for tag in [1, 2, 3, 6] {
+    // Every other known operation, Path among them, is still held to the frame ceiling on its
+    // declaration alone.
+    for tag in [1, 2, 3, 5, 6] {
         let header = [b'S', b'W', b'C', b'1', tag, 0x20, 0x01];
         let mut reader = header.as_slice();
         assert!(matches!(

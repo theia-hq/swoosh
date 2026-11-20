@@ -13,6 +13,7 @@ use bifrost::{ConnInfo, NodeId, Path, Refusal, RefusalDetail, Relay};
 use nauthy::{Link, Service};
 use tokio::io;
 
+use super::path::{BadRef, Observation, PathRef};
 use super::{ControlError, MAX_FRAME, local_detail};
 use crate::credential::LinkExt as _;
 use crate::peers::{Hints, HintsError};
@@ -30,11 +31,6 @@ const MAX_HINT_LEN: usize = 64;
 const MAX_SERVICE_LEN: usize = 128;
 /// A slip's text length: a whole link, whose token can run past 13,000 characters.
 const MAX_SLIP_LEN: usize = 14_336;
-
-/// The observation byte this build writes and the only one it reads. Observing an Open's path needs a
-/// reference the resident does not yet hand out, so a request asking for one is malformed rather than
-/// silently attached unobserved.
-const UNOBSERVED: u8 = 0;
 
 /// The smallest Open body: a peer, no hints, a one-byte service, a lane, no slip, the observation byte.
 const MIN_OPEN_BODY: usize = 32 + 1 + (1 + 1) + 1 + 1 + 1;
@@ -58,10 +54,9 @@ const MAX_RELAY_URL: usize = 1024;
 /// A remote address's text length inside a path report.
 const MAX_REMOTE: usize = 256;
 /// The largest path report: class, the longest relay URL, a round trip, the longest remote address.
-const MAX_CONN_INFO: usize = 1 + (2 + MAX_RELAY_URL) + (1 + 8) + (1 + 2 + MAX_REMOTE);
-/// The largest Attached body a peer may declare: reference presence, a path reference, a path report.
-/// This build reads only reference-free bodies, but the declaration ceiling is the grammar's.
-pub(super) const MAX_ATTACHED: usize = 1 + 24 + MAX_CONN_INFO;
+pub(super) const MAX_CONN_INFO: usize = 1 + (2 + MAX_RELAY_URL) + (1 + 8) + (1 + 2 + MAX_REMOTE);
+/// The largest Attached body: reference presence, a path reference, a path report.
+pub(super) const MAX_ATTACHED: usize = 1 + PathRef::LEN + MAX_CONN_INFO;
 /// The largest OpenRefusal body: an outer class, a nested peer class, and the longest detail.
 pub(super) const MAX_OPEN_REFUSAL: usize = 1 + 1 + 2 + RefusalDetail::MAX_LEN;
 /// The largest Error body an Open reader accepts: a length and at most 256 reason bytes.
@@ -147,7 +142,7 @@ pub enum MalformedOpen {
     /// The slip addresses a node other than the peer, or none bifrost can dial.
     #[error("open request slip does not address its peer")]
     SlipPeer,
-    /// The observation byte is not the one this build reads.
+    /// The observation byte is neither 0 nor 1.
     #[error("open request observation mode is unsupported")]
     Observation,
     /// Bytes follow the observation byte.
@@ -155,7 +150,8 @@ pub enum MalformedOpen {
     Trailing,
 }
 
-/// An Open request body: reach `peer`'s `service` on `lane`, presenting `slip` when there is one.
+/// An Open request body: reach `peer`'s `service` on `lane`, presenting `slip` when there is one, and
+/// asking for a reference to the connection when observed.
 ///
 /// Built only through [`new`](Self::new) or [`decode`](Self::decode), so a value always encodes.
 /// Hints keep their order and duplicates; they are addresses, never names to resolve, held as
@@ -170,10 +166,11 @@ pub struct OpenRequest {
     service: Service,
     lane: OpenLane,
     slip: Option<Link>,
+    observation: Observation,
 }
 
 impl OpenRequest {
-    /// An Open for `service` at `peer`.
+    /// An unobserved Open for `service` at `peer`.
     ///
     /// # Errors
     ///
@@ -195,7 +192,22 @@ impl OpenRequest {
             service,
             lane,
             slip,
+            observation: Observation::Unobserved,
         })
+    }
+
+    /// The same Open, asking for a reference to the connection it attaches to.
+    #[must_use]
+    pub fn observed(self) -> Self {
+        Self {
+            observation: Observation::Observed,
+            ..self
+        }
+    }
+
+    /// Whether the Open asks for a reference to its connection.
+    pub fn observation(&self) -> Observation {
+        self.observation
     }
 
     /// The peer to reach.
@@ -240,7 +252,7 @@ impl OpenRequest {
         }
     }
 
-    /// The body as it goes on the wire. The observation byte is always the unobserved value.
+    /// The body as it goes on the wire.
     ///
     /// # Errors
     ///
@@ -271,7 +283,7 @@ impl OpenRequest {
                 out.extend_from_slice(slip);
             }
         }
-        out.push(UNOBSERVED);
+        out.push(self.observation.byte());
         Ok(out)
     }
 
@@ -320,6 +332,7 @@ impl OpenRequest {
             service,
             lane: raw.lane,
             slip,
+            observation: raw.observation,
         })
     }
 }
@@ -332,6 +345,7 @@ impl PartialEq for OpenRequest {
             && self.service == other.service
             && self.lane == other.lane
             && self.slip.as_ref().map(Link::as_str) == other.slip.as_ref().map(Link::as_str)
+            && self.observation == other.observation
     }
 }
 
@@ -347,6 +361,7 @@ impl fmt::Debug for OpenRequest {
             .field("service", &self.service)
             .field("lane", &self.lane)
             .field("slip", &self.slip.as_ref().map(|_| Redacted))
+            .field("observation", &self.observation)
             .finish()
     }
 }
@@ -368,6 +383,7 @@ struct RawOpen<'a> {
     service: &'a [u8],
     lane: OpenLane,
     slip: Option<&'a [u8]>,
+    observation: Observation,
 }
 
 impl<'a> RawOpen<'a> {
@@ -404,9 +420,8 @@ impl<'a> RawOpen<'a> {
             }
             _ => return Err(MalformedOpen::SlipPresence),
         };
-        if cursor.byte().ok_or(MalformedOpen::Truncated)? != UNOBSERVED {
-            return Err(MalformedOpen::Observation);
-        }
+        let observation = Observation::from_byte(cursor.byte().ok_or(MalformedOpen::Truncated)?)
+            .ok_or(MalformedOpen::Observation)?;
         if !cursor.0.is_empty() {
             return Err(MalformedOpen::Trailing);
         }
@@ -417,6 +432,7 @@ impl<'a> RawOpen<'a> {
             service,
             lane,
             slip,
+            observation,
         })
     }
 }
@@ -608,11 +624,44 @@ fn take_detail(cursor: &mut Cursor<'_>) -> Result<RefusalDetail, ControlError> {
         .ok_or_else(|| local_detail::protocol("open refusal detail is not UTF-8"))
 }
 
-/// Encode an Attached body: no path reference, then the path report. Every bound and conversion is
-/// checked here, before the caller writes a header.
-pub(super) fn encode_attached(info: &ConnInfo) -> io::Result<Vec<u8>> {
+/// Reply 6: the stream is attached, on the connection this report describes as it attached, with a
+/// reference to that connection when the Open was observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    /// The reference Path samples the connection by, present exactly when the Open was observed.
+    pub reference: Option<PathRef>,
+    /// The connection's path report, read as the stream attached.
+    pub info: ConnInfo,
+}
+
+impl From<ConnInfo> for Attached {
+    /// An unobserved Open's reply: the report alone.
+    fn from(info: ConnInfo) -> Self {
+        Self {
+            reference: None,
+            info,
+        }
+    }
+}
+
+/// Encode an Attached body: the reference's presence and the reference, then the path report. Every
+/// bound and conversion is checked here, before the caller writes a header.
+pub(super) fn encode_attached(attached: &Attached) -> io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(1 + 3);
-    out.push(0);
+    match attached.reference {
+        None => out.push(0),
+        Some(reference) => {
+            out.push(1);
+            reference.encode_into(&mut out);
+        }
+    }
+    encode_conn_info(&mut out, &attached.info)?;
+    Ok(out)
+}
+
+/// Write a path report at the end of `out`: class, the relay URL when relayed, then the round trip and
+/// the remote address, each behind its own presence byte.
+pub(super) fn encode_conn_info(out: &mut Vec<u8>, info: &ConnInfo) -> io::Result<()> {
     match &info.path {
         Path::Unknown => out.push(0),
         Path::Direct => out.push(1),
@@ -647,29 +696,35 @@ pub(super) fn encode_attached(info: &ConnInfo) -> io::Result<Vec<u8>> {
             out.extend_from_slice(text.as_bytes());
         }
     }
-    Ok(out)
+    Ok(())
 }
 
-/// Decode an Attached body. A path reference is a protocol error: this build never asks for one, so
-/// a reply carrying one answered some other request.
+/// Decode an Attached body. Either presence decodes here; whether a reference was asked for is the
+/// client's to check, since only it knows what it sent.
 ///
 /// Decoded bytes need not re-encode to the same bytes: the relay URL and the remote address are
 /// parsed into typed values, never kept as the text that arrived, and render in their canonical form.
-pub(super) fn decode_attached(body: &[u8]) -> Result<ConnInfo, ControlError> {
+pub(super) fn decode_attached(body: &[u8]) -> Result<Attached, ControlError> {
     let mut cursor = Cursor(body);
-    match cursor.byte().ok_or_else(truncated)? {
-        0 => {}
-        1 => {
-            return Err(local_detail::protocol(
-                "attached carries an unrequested path reference",
-            ));
-        }
+    let reference = match cursor.byte().ok_or_else(truncated)? {
+        0 => None,
+        1 => Some(PathRef::decode(&mut cursor).map_err(|bad| match bad {
+            BadRef::Truncated => truncated(),
+            BadRef::Zero => local_detail::protocol("attached path reference is zero"),
+        })?),
         _ => {
             return Err(local_detail::protocol(
                 "attached reference presence is invalid",
             ));
         }
-    }
+    };
+    let info = decode_conn_info(&mut cursor)?;
+    finish(&cursor)?;
+    Ok(Attached { reference, info })
+}
+
+/// Read a path report at `cursor`, advancing it past the report.
+pub(super) fn decode_conn_info(cursor: &mut Cursor<'_>) -> Result<ConnInfo, ControlError> {
     let path = match cursor.byte().ok_or_else(truncated)? {
         0 => Path::Unknown,
         1 => Path::Direct,
@@ -721,7 +776,6 @@ pub(super) fn decode_attached(body: &[u8]) -> Result<ConnInfo, ControlError> {
             ));
         }
     };
-    finish(&cursor)?;
     Ok(ConnInfo { path, rtt, remote })
 }
 
@@ -738,7 +792,7 @@ fn finish(cursor: &Cursor<'_>) -> Result<(), ControlError> {
 
 /// Reads fields off the front of a body. Every read is `None` past the end, and the caller names the
 /// failure, so one cursor serves the request's typed errors and the replies' protocol errors.
-struct Cursor<'a>(&'a [u8]);
+pub(super) struct Cursor<'a>(pub(super) &'a [u8]);
 
 impl<'a> Cursor<'a> {
     fn take(&mut self, len: usize) -> Option<&'a [u8]> {
@@ -747,11 +801,11 @@ impl<'a> Cursor<'a> {
         Some(part)
     }
 
-    fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
+    pub(super) fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
         self.take(N)?.try_into().ok()
     }
 
-    fn byte(&mut self) -> Option<u8> {
+    pub(super) fn byte(&mut self) -> Option<u8> {
         let [byte] = self.array()?;
         Some(byte)
     }
