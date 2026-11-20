@@ -46,6 +46,7 @@ pub mod control_codec {
     };
 }
 pub use activity::{Activity, RecvLines};
+pub(crate) use opening::OPEN_REPLY_BOUND;
 pub use opening::{
     ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, Opens,
     raise_open_files,

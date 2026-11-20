@@ -4,11 +4,14 @@
 
 use bifrost::{NodeId, RefusalDetail};
 use swoosh::contacts::Contacts;
+use swoosh::node_client::NodeClient;
 use swoosh::peer::{Machine as PeerMachine, Peer};
-use swoosh::serve::control_codec::{ControlError, OpenRefusal, PeerRefusal};
+use swoosh::serve::control_codec::{
+    ControlError, DisabledList, OpenRefusal, PeerRefusal, ServiceMenu, StatusReply,
+};
 use swoosh::transport::ReachArgs;
 
-use super::{Busy, Moot, Pipe, Skew, ThisMachine, after_a_cut};
+use super::{Busy, Moot, Pipe, Skew, StandingEnded, ThisMachine, after_a_cut};
 use crate::commands::connect::{ConnectionLost, Machine};
 
 /// The key of `me/nas`.
@@ -123,8 +126,65 @@ fn this_machine_prints_as_it_was_typed() {
     );
 }
 
-#[test]
-fn a_refusal_through_serve_prints_the_own_binds_line() {
+/// A `serve` that answers status as the machine `this`, or not at all, and nothing else.
+struct Serve(Option<NodeId>);
+
+impl NodeClient for Serve {
+    async fn services(&self) -> Result<ServiceMenu, ControlError> {
+        Err(ControlError::NoResident)
+    }
+
+    async fn status(&self) -> Result<StatusReply, ControlError> {
+        let node_id = self.0.ok_or(ControlError::NoResident)?;
+        Ok(StatusReply {
+            node_id,
+            pid: 1,
+            addr: None,
+            uptime_secs: 0,
+            menu: ServiceMenu {
+                catalog: tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),
+                disabled: DisabledList::Known(Vec::new()),
+            },
+            warm: Vec::new(),
+        })
+    }
+
+    async fn stop(&self) -> Result<(), ControlError> {
+        Err(ControlError::NoResident)
+    }
+}
+
+#[tokio::test]
+async fn an_ended_standing_names_the_own_binds_remedy_when_serve_says_who_it_is() {
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let service = "ssh".parse().unwrap();
+    let reach = reach(&["forward"]);
+    let pipe = Pipe {
+        machine: &peer,
+        service: &service,
+        slip: None,
+        reach: &reach,
+        contacts: &contacts,
+    };
+    let this = NodeId::from_ed25519_secret(&[0x62; 32]);
+    let head = "error: this device's membership badge has ended, so a family-gated peer will refuse \
+                this dial";
+    let named = pipe
+        .refused(OpenRefusal::StandingEnded, &Serve(Some(this)))
+        .await;
+    assert!(named.is::<StandingEnded>());
+    assert_eq!(
+        printed(&named),
+        format!("{head}; {}\n", swoosh::badge::remedy(this))
+    );
+    // `serve`'s status cannot be read: the head alone, never a remedy keyed to a guess.
+    let alone = pipe.refused(OpenRefusal::StandingEnded, &Serve(None)).await;
+    assert_eq!(printed(&alone), format!("{head}\n"));
+}
+
+#[tokio::test]
+async fn a_refusal_through_serve_prints_the_own_binds_line() {
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
     let service = "ssh".parse().unwrap();
@@ -139,13 +199,32 @@ fn a_refusal_through_serve_prints_the_own_binds_line() {
     // The dial refusal for one of your devices, with no cause asked: the same head the own bind prints
     // when it cannot tell.
     assert_eq!(
-        printed(&pipe.refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted))),
+        printed(
+            &pipe
+                .refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted), &Serve(None))
+                .await
+        ),
         printed(&crate::commands::machine::refused(&peer, &service, None))
     );
-    assert!(pipe.refused(OpenRefusal::Busy).is::<Busy>());
-    assert!(pipe.refused(OpenRefusal::NotHere).is::<ThisMachine>());
+    assert!(
+        pipe.refused(OpenRefusal::Busy, &Serve(None))
+            .await
+            .is::<Busy>()
+    );
+    assert!(
+        pipe.refused(OpenRefusal::NotHere, &Serve(None))
+            .await
+            .is::<ThisMachine>()
+    );
     // Peer text is escaped, as every peer word in an error chain is.
     let hostile = RefusalDetail::try_from("no\u{1b}[2K").unwrap();
-    let line = printed(&pipe.refused(OpenRefusal::Peer(PeerRefusal::Unavailable(hostile))));
+    let line = printed(
+        &pipe
+            .refused(
+                OpenRefusal::Peer(PeerRefusal::Unavailable(hostile)),
+                &Serve(None),
+            )
+            .await,
+    );
     assert!(!line.contains('\u{1b}'), "{line}");
 }

@@ -114,13 +114,14 @@ impl Credential {
         }
     }
 
-    /// Whether a dial with this credential may use the resident's warm reach. The default member
-    /// badge reaches as THIS home's node (the peer sees the resident key, which is the warm-reuse
-    /// tradeoff); any personal credential must never ride the socket.
-    pub fn warm_mode(&self) -> WarmMode {
+    /// The slip a dial with this credential hands a local resident to present, or `None` when it must
+    /// never ride one. The resident reaches as this home, so a [`Family`](Self::Family) dial rides it,
+    /// with the link typed as the machine as its slip, if one was; an [`Anyone`](Self::Anyone) link never
+    /// does, since it dials under a throwaway key of its own so nothing of this home travels with it.
+    pub fn through_resident(self) -> Option<Option<Link>> {
         match self {
-            Self::Family { present: None } => WarmMode::Resident,
-            Self::Family { present: Some(_) } | Self::Anyone(_) => WarmMode::Personal,
+            Self::Family { present } => Some(present),
+            Self::Anyone(_) => None,
         }
     }
 }
@@ -153,25 +154,43 @@ pub fn admits_anyone_at(link: &Link, service: &str, now: std::time::SystemTime) 
         .is_ok()
 }
 
-/// Whether a dial may use the resident's warm reach.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WarmMode {
-    /// The default member-badge dial: the resident may reach as THIS home's node. The peer sees the
-    /// resident key, which is the warm-reuse tradeoff.
-    Resident,
-    /// A personal credential (a link typed as the peer): never warm. A personal
-    /// credential must not ride the socket.
-    Personal,
-}
-
 #[cfg(test)]
 mod tests {
     use core::time::Duration;
 
     use nauthy::Request;
 
-    use super::admits_anyone;
+    use super::{Credential, admits_anyone};
     use crate::testkit::TestNode;
+
+    /// A family dial rides a resident, with its slip if it has one; an `anyone` link never does.
+    #[test]
+    fn only_a_family_dial_rides_the_resident() {
+        let link = || {
+            TestNode::seeded(2)
+                .slip(
+                    &"ssh".parse().expect("a service"),
+                    Request::expires_in(Duration::from_secs(3600)),
+                )
+                .expect("mint a slip")
+                .seal()
+                .expect("seal")
+                .link()
+                .expect("a link")
+        };
+        assert!(matches!(
+            Credential::Family { present: None }.through_resident(),
+            Some(None)
+        ));
+        assert!(matches!(
+            Credential::Family {
+                present: Some(link())
+            }
+            .through_resident(),
+            Some(Some(_))
+        ));
+        assert!(Credential::Anyone(link()).through_resident().is_none());
+    }
 
     /// One run asks whether a link admits anyone more than once, and every ask agrees even when the link
     /// expires between them: otherwise the run binds a throwaway key for the first answer and presents this

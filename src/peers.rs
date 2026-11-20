@@ -34,7 +34,7 @@ use tightbeam::tunnel::{Connector, WrongPeer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Instant;
 
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 // A Bulk or Isolated open's deadline. Neither caller waits on its open with anything racing it, so the
 // open itself bounds how long a silent session, or a fresh isolated connection, is kept.
 pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(10);

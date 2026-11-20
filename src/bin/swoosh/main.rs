@@ -489,7 +489,8 @@ async fn main() -> std::process::ExitCode {
 /// one machine is refused with [`stop::ONE_MACHINE`], and one given a link or a path with
 /// [`stop::A_LINK_STOPS_NOTHING`]; an `invite` given a root's key for the device's is refused with
 /// [`invite::ROOT_IS_NO_MACHINE`], and a `serve --admit` given a machine's key with
-/// [`serve::ADMIT_TAKES_A_ROOT`]. A serve argument conflict between positional definitions and relative flags uses a fixed message instead of echoing operand values. Every other error is clap's own. Refused here, at parse, so nothing is
+/// [`serve::ADMIT_TAKES_A_ROOT`]. A `forward` whose `--peer` gives one key more addresses than one dial
+/// takes is refused with [`transport::CrowdedHints`]. A serve argument conflict between positional definitions and relative flags uses a fixed message instead of echoing operand values. Every other error is clap's own. Refused here, at parse, so nothing is
 /// read, opened or bound first, the home included.
 fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
@@ -584,8 +585,20 @@ where
                 })),
             ..
         }) => Err(usage(&["stop"], stop::A_LINK_STOPS_NOTHING)),
-        parsed => parsed,
+        Ok(cli) => crowded_hints(cli),
+        Err(error) => Err(error),
     }
+}
+
+/// `cli`, or a `forward` whose `--peer` hints give one key more addresses than one dial takes, refused
+/// here whether or not `serve` runs, so nothing is read or bound first.
+fn crowded_hints(cli: Cli) -> Result<Cli, clap::Error> {
+    if let Some(Command::Forward(forward)) = &cli.command
+        && let Err(crowded) = forward.reach.reject_crowded_hints()
+    {
+        return Err(usage(&["forward"], &crowded.to_string()));
+    }
+    Ok(cli)
 }
 
 /// Whether `error`, an unexpected argument, is a link or a path typed on a `stop` line: the argument clap
@@ -953,13 +966,14 @@ async fn run() -> eyre::Result<()> {
     // throwaway key of its own.
     if let Outward::Forward(cmd) = &reach
         && cmd.to == commands::connect::To::Stdout
-        && let BindRole::Dialing(credential::Credential::Family { present }) = reach.bind_role()
+        && let BindRole::Dialing(credential) = reach.bind_role()
+        && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
     {
         let pipe = commands::through_serve::Pipe {
             machine,
             service: &cmd.service,
-            slip: present,
+            slip,
             reach: &cmd.reach,
             contacts: store.contacts(),
         };
@@ -1500,6 +1514,49 @@ mod tests {
             printed.contains("Usage: swoosh forward"),
             "it prints forward's own usage line: {printed}"
         );
+    }
+
+    /// More `--peer` addresses for one key than one dial takes is a usage error at parse, exit 2, naming
+    /// the key whole. Addresses count, not hints, and each key counts on its own.
+    #[test]
+    fn a_forward_giving_one_key_more_than_sixteen_addresses_is_a_usage_error() {
+        let (crowded, other) = (
+            NodeId::from_ed25519_secret(&[1u8; 32]),
+            NodeId::from_ed25519_secret(&[2u8; 32]),
+        );
+        let hints = |key: NodeId, many: u16| -> Vec<String> {
+            (0..many)
+                .flat_map(|at| {
+                    [
+                        "--peer".to_owned(),
+                        format!("{key}=127.0.0.1:{}", 9000 + at),
+                    ]
+                })
+                .collect()
+        };
+        let forward = |extra: Vec<String>| {
+            let mut argv = vec!["swoosh", "forward", "me/nas", "ssh", "-"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            argv.extend(extra);
+            parse_from(argv)
+        };
+        assert!(forward(hints(crowded, 16)).is_ok(), "sixteen is the bound");
+        let mut apart = hints(crowded, 16);
+        apart.extend(hints(other, 16));
+        assert!(forward(apart).is_ok(), "each key counts on its own");
+        let error = forward(hints(crowded, 17))
+            .expect_err("a seventeenth address for one key refuses at parse");
+        assert_eq!(error.exit_code(), 2, "a usage error exits 2");
+        let printed = error.to_string();
+        assert!(
+            printed.starts_with(&format!(
+                "error: --peer or SWOOSH_PEER gives more than 16 addresses for {crowded}\n"
+            )),
+            "{printed}"
+        );
+        assert!(printed.contains("Usage: swoosh forward"), "{printed}");
     }
 
     /// The `swoosh ssh` ProxyCommand ABI, which is the PUBLIC `forward` verb: ssh re-invokes

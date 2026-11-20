@@ -1,9 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use tokio::io::{self, AsyncReadExt as _, BufReader};
+use tokio::io::AsyncReadExt as _;
 
 use super::{
-    DataLen, FRAME_BUFFER, Frame, FramedWriter, HEADER, MalformedFrame, Toward, UploadCut, upload,
+    DataLen, FRAME_BUFFER, Frame, FramedWriter, HEADER, MalformedFrame, Toward, UploadCut,
+    frame_reader, upload,
 };
 use crate::serve::control_codec::MAX_FRAME;
 
@@ -82,7 +83,7 @@ fn a_malformed_header_is_refused_by_what_broke() {
 
 /// Run [`upload`] over `wire`, returning how it ended and what reached the peer.
 async fn uploaded(wire: &[u8]) -> (Result<(), UploadCut>, Vec<u8>) {
-    let mut from_client = BufReader::with_capacity(FRAME_BUFFER, wire);
+    let mut from_client = frame_reader(wire);
     let mut to_peer = Vec::new();
     let ended = upload(&mut from_client, &mut to_peer).await;
     (ended, to_peer)
@@ -136,7 +137,7 @@ async fn a_full_data_frame_is_read_in_one_buffer() {
     wire.extend(header(10, 8192));
     wire.extend([9; MAX_FRAME]);
     wire.extend(header(11, 0));
-    let mut from_client = BufReader::with_capacity(FRAME_BUFFER, wire.as_slice());
+    let mut from_client = frame_reader(wire.as_slice());
     // The whole frame fits the reader's one buffer, header and body.
     use tokio::io::AsyncBufReadExt as _;
     assert_eq!(from_client.fill_buf().await.unwrap().len(), FRAME_BUFFER);
@@ -150,7 +151,10 @@ async fn peer_bytes_that_spell_a_frame_reach_the_client_as_data() {
     let mut framed = FramedWriter::new(Vec::new());
     let spelled = Frame::End.header();
     framed.body()[..HEADER].copy_from_slice(&spelled);
-    framed.write_data(HEADER).await.unwrap();
+    framed
+        .write_data(DataLen::new(HEADER).unwrap())
+        .await
+        .unwrap();
     framed.write_end().await.unwrap();
     framed.write_landed().await.unwrap();
     let wire = framed.writer;
@@ -172,12 +176,4 @@ async fn peer_bytes_that_spell_a_frame_reach_the_client_as_data() {
     reader.read_exact(&mut header).await.unwrap();
     assert_eq!(Frame::parse(header, Toward::Client), Ok(Frame::Landed));
     assert!(reader.is_empty());
-}
-
-#[tokio::test]
-async fn an_empty_read_writes_no_frame() {
-    let mut framed = FramedWriter::new(Vec::new());
-    framed.write_data(0).await.unwrap();
-    assert!(framed.writer.is_empty());
-    let _: io::Result<()> = framed.shutdown().await;
 }

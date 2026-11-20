@@ -14,7 +14,7 @@ use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::MAX_FRAME;
-use super::splice::{DataLen, FRAME_BUFFER, Frame, HEADER, Toward};
+use super::splice::{DataLen, FRAME_BUFFER, Frame, HEADER, Toward, frame_reader};
 
 /// What the peer's direction has said so far, past the frame being read.
 #[derive(Debug, Default)]
@@ -53,7 +53,7 @@ fn cut_off() -> io::Error {
 impl OpenRead {
     pub(crate) fn new(read: OwnedReadHalf) -> Self {
         Self {
-            reader: BufReader::with_capacity(FRAME_BUFFER, read),
+            reader: frame_reader(read),
             header: [0; HEADER],
             gathered: 0,
             body: 0,

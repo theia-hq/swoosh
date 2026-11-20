@@ -17,7 +17,7 @@
 
 use tokio::io::{
     self, AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite,
-    AsyncWriteExt as _,
+    AsyncWriteExt as _, BufReader,
 };
 
 use super::{IDENTITY, MAX_FRAME, VERSION};
@@ -27,6 +27,12 @@ pub(crate) const HEADER: usize = 7;
 
 /// One frame header and the largest Data body: the one buffer each framed direction holds.
 pub(crate) const FRAME_BUFFER: usize = HEADER + MAX_FRAME;
+
+/// A reader of frames from `reader`, its buffer sized to [`FRAME_BUFFER`] so a whole frame, header and
+/// body, moves through it in place. Every framed reader is built here, so none can drift from the size.
+pub(crate) fn frame_reader<R: AsyncRead>(reader: R) -> BufReader<R> {
+    BufReader::with_capacity(FRAME_BUFFER, reader)
+}
 
 const DATA: u8 = 10;
 const END: u8 = 11;
@@ -174,7 +180,7 @@ impl core::fmt::Display for UploadCut {
 
 /// Copy the client's Data bodies toward `to_peer` until the client's End, which is where this returns
 /// `Ok`; nothing past End is read. Each body moves through the reader's own buffer in place, so the
-/// declared length never sizes a buffer; size the reader to [`FRAME_BUFFER`] for a whole frame to fit.
+/// declared length never sizes a buffer; a [`frame_reader`] holds a whole frame.
 pub(crate) async fn upload<R, W>(from_client: &mut R, to_peer: &mut W) -> Result<(), UploadCut>
 where
     R: AsyncBufRead + Unpin,
@@ -226,19 +232,18 @@ impl<W: AsyncWrite + Unpin> FramedWriter<W> {
         }
     }
 
-    /// The room a Data body is read into before [`write_data`](Self::write_data) frames it.
+    /// The room a Data body is read into before [`write_data`](Self::write_data) frames it: exactly
+    /// [`MAX_FRAME`] bytes, so every read into it but an empty one is a [`DataLen`].
     pub(crate) fn body(&mut self) -> &mut [u8] {
         &mut self.buffer[HEADER..]
     }
 
-    /// Write the first `len` bytes of [`body`](Self::body) as one Data frame. An empty body writes
-    /// nothing, since a Data frame is never empty.
-    pub(crate) async fn write_data(&mut self, len: usize) -> io::Result<()> {
-        let Some(data) = DataLen::new(len) else {
-            return Ok(());
-        };
-        self.buffer[..HEADER].copy_from_slice(&Frame::Data(data).header());
-        self.writer.write_all(&self.buffer[..HEADER + len]).await
+    /// Write the first `len` bytes of [`body`](Self::body) as one Data frame.
+    pub(crate) async fn write_data(&mut self, len: DataLen) -> io::Result<()> {
+        self.buffer[..HEADER].copy_from_slice(&Frame::Data(len).header());
+        self.writer
+            .write_all(&self.buffer[..HEADER + len.get()])
+            .await
     }
 
     /// Write the End frame: the download ended cleanly.

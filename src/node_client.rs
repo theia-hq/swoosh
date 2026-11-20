@@ -34,6 +34,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// ends a wait on a resident that has stopped answering.
 const OPEN_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
+// Derived from the resident's own bounds, so a slower renewal, dial or open cannot outgrow the wait.
+const _: () = assert!(crate::serve::OPEN_REPLY_BOUND.as_millis() < OPEN_REPLY_TIMEOUT.as_millis());
+
 /// What an Open got back from the resident.
 #[derive(Debug)]
 pub enum Opened {
