@@ -882,6 +882,8 @@ pub struct ScriptedPeer {
     state: std::sync::Arc<std::sync::Mutex<Scripted>>,
     /// Whether the host has cut its sessions, for every session's `wait_closed`.
     cut: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+    /// This session's own path report, which a test may change mid-run: each dial gets one of its own.
+    path: std::sync::Arc<std::sync::Mutex<bifrost::ConnInfo>>,
 }
 
 /// What a [`ScriptedPeer`] has left to answer, and what it has read.
@@ -890,6 +892,8 @@ struct Scripted {
     script: VecDeque<Script>,
     requests: Vec<tightbeam::protocol::Request>,
     dials: u32,
+    /// Each dialed session's path report, in dial order.
+    paths: Vec<std::sync::Arc<std::sync::Mutex<bifrost::ConnInfo>>>,
     received: Vec<u8>,
     closes: u32,
 }
@@ -904,7 +908,20 @@ impl ScriptedPeer {
                 ..Scripted::default()
             })),
             cut: std::sync::Arc::new(tokio::sync::watch::Sender::new(false)),
+            path: std::sync::Arc::default(),
         }
+    }
+
+    /// Set the path report of the session dialed `nth`, counting from 0, as a transport's path moves.
+    ///
+    /// # Panics
+    ///
+    /// Fewer than `nth + 1` sessions were dialed.
+    pub fn set_path(&self, nth: usize, info: bifrost::ConnInfo) {
+        let path = std::sync::Arc::clone(&self.lock().paths[nth]);
+        *path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = info;
     }
 
     /// Cut every session to it, as a host does on a revoke or an expiry: each session's `wait_closed`
@@ -1061,8 +1078,14 @@ impl bifrost::Transport for ScriptedPeer {
     }
 
     async fn connect(&self, _addr: bifrost::Addr) -> Result<Self, bifrost::Error> {
-        self.lock().dials += 1;
-        Ok(self.clone())
+        let path = std::sync::Arc::<std::sync::Mutex<bifrost::ConnInfo>>::default();
+        let mut state = self.lock();
+        state.dials += 1;
+        state.paths.push(std::sync::Arc::clone(&path));
+        Ok(Self {
+            path,
+            ..self.clone()
+        })
     }
 
     async fn accept(&self) -> Result<Self, bifrost::Error> {
@@ -1114,6 +1137,14 @@ impl bifrost::Session for ScriptedPeer {
         self.lock().closes += 1;
     }
 
+    /// The session's own report, as [`set_path`](Self::set_path) last left it.
+    fn conn_info(&self) -> bifrost::ConnInfo {
+        self.path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// No transport under it, so no path.
     fn path_changes(&self) -> bifrost::PathChanges {
         bifrost::PathChanges::fixed(bifrost::Path::Unknown)
@@ -1140,6 +1171,14 @@ impl crate::serve::Opens for NoOpens {
         R: tokio::io::AsyncBufRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
+    }
+
+    /// No Open is ever attached, so no reference names one.
+    fn path(
+        &self,
+        _request: crate::serve::control_codec::PathRequest,
+    ) -> crate::serve::control_codec::PathReply {
+        crate::serve::control_codec::PathReply::Unavailable
     }
 
     async fn drive(&self) -> core::convert::Infallible {

@@ -22,7 +22,7 @@ use tokio::sync::Semaphore;
 use super::opening::{ClientGone, Opens};
 use super::socket::{
     ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, OpenRefusal,
-    OpenRequest, Request, Response, ServiceMenu, StatusReply,
+    OpenRequest, PathRequest, Request, Response, ServiceMenu, StatusReply,
 };
 use crate::node_client::{NodeClient, euid, real_peer_uid};
 use crate::serve_toml::LiveServeToml;
@@ -224,17 +224,31 @@ impl Resident {
                 Ok(stream) => {
                     handlers.push(async move {
                         // The slot covers the uid check and the request read; an Open takes it
-                        // along, to release once its own checks pass.
-                        if let Some(opening) = self.serve_one(stream).await {
-                            opens
-                                .open(
-                                    opening.request,
-                                    opening.from_client,
-                                    opening.to_client,
-                                    opening.gone,
-                                    permit,
-                                )
-                                .await;
+                        // along, to release once its own checks pass, and a Path keeps it through
+                        // its reply.
+                        match self.serve_one(stream).await {
+                            Some(Handed::Open(opening)) => {
+                                opens
+                                    .open(
+                                        opening.request,
+                                        opening.from_client,
+                                        opening.to_client,
+                                        opening.gone,
+                                        permit,
+                                    )
+                                    .await;
+                            }
+                            Some(Handed::Path {
+                                request,
+                                mut to_client,
+                            }) => {
+                                let reply = Response::Path(opens.path(request));
+                                self.reply_then_fire(&mut to_client, &reply, false, READ_TIMEOUT)
+                                    .await;
+                                let _ = to_client.shutdown().await;
+                                drop(permit);
+                            }
+                            None => {}
                         }
                     });
                 }
@@ -284,7 +298,7 @@ impl Resident {
     }
 
     /// Serve one accepted connection under the production peer-credential check and read deadline.
-    async fn serve_one<S>(&self, stream: S) -> Option<Opening<S>>
+    async fn serve_one<S>(&self, stream: S) -> Option<Handed<S>>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRawFd + Unpin,
     {
@@ -302,13 +316,14 @@ impl Resident {
     /// confirm can never lose the race to exit.
     ///
     /// An Open is not answered here: it comes back with its connection, still holding every byte the
-    /// client sent after the request, for the caller to answer.
+    /// client sent after the request, for the caller to answer. Nor is a Path, whose answer the
+    /// caller's Opens hold: it comes back with the half to reply on.
     async fn serve_checked_with<S>(
         &self,
         stream: S,
         checker: fn(i32) -> std::io::Result<u32>,
         timeout: Duration,
-    ) -> Option<Opening<S>>
+    ) -> Option<Handed<S>>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRawFd + Unpin,
     {
@@ -346,11 +361,17 @@ impl Resident {
                         return None;
                     }
                 };
-                return Some(Opening {
+                return Some(Handed::Open(Opening {
                     request,
                     from_client: reader,
                     to_client: writer,
                     gone,
+                }));
+            }
+            Ok(Ok(Request::Path(request))) => {
+                return Some(Handed::Path {
+                    request,
+                    to_client: writer,
                 });
             }
             Ok(Ok(Request::Stop)) => (Response::Ack, true, false),
@@ -407,6 +428,17 @@ impl Resident {
             self.fire_stop();
         }
     }
+}
+
+/// A request read off a control connection that the caller's Opens answer.
+enum Handed<S> {
+    /// An Open, answered and spliced on its connection.
+    Open(Opening<S>),
+    /// A Path, answered on the half it came with.
+    Path {
+        request: PathRequest,
+        to_client: tokio::io::WriteHalf<S>,
+    },
 }
 
 /// An Open read off a control connection, with the connection it is answered and spliced on. The

@@ -1888,12 +1888,14 @@ fn the_control_socket_adds_no_service() {
         Request::LocalServiceDetail,
     ] {
         match request {
-            // An Open reaches a peer's service; it never turns one here on or off.
+            // An Open reaches a peer's service and a Path reads its connection's path; neither turns
+            // one here on or off.
             Request::Services
             | Request::Status
             | Request::Stop
             | Request::LocalServiceDetail
-            | Request::Open(_) => {}
+            | Request::Open(_)
+            | Request::Path(_) => {}
         }
     }
 }
