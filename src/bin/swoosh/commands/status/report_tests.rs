@@ -1020,8 +1020,8 @@ async fn status_prints_every_state_verbatim() {
                     "me/desk ended on {ended}; your devices refuse it. Where your root is kept: swoosh \
                      invite desk"
                 ),
-                "this machine picks it up the next time it reaches one of your devices, or now: swoosh \
-                 sync"
+                "this machine picks it up the next time it reaches one of your devices, or now with \
+                 swoosh sync"
                     .to_owned(),
             ],
         ),

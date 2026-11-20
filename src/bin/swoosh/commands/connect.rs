@@ -14,9 +14,9 @@
 //! The own bind ends when the host cuts the session (on a revoke or an expiry), whatever the local
 //! side is doing. Through `serve` only the stdout sink is routed, and it ends the same way:
 //! [`pump_stdio`] says how, including that a stdin that is not a terminal still finishes its upload
-//! after a clean end. tightbeam's own stdio bridge and port forward do not yet: the bridge waits on a
-//! stdin read before the process can exit, and the forward keeps listening on a session that is
-//! gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
+//! after a clean end. tightbeam's own stdio bridge and port forward end neither way yet: the bridge
+//! waits on a stdin read before the process can exit, and the forward keeps listening on a session
+//! that is gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
 //! frames, until tightbeam's own end the same way.
 
 use core::pin::Pin;

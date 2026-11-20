@@ -19,6 +19,7 @@
 //! The full verb arc (send, tunnel, share, fetch, run, cluster, MagicDNS names) is tracked in the README's
 //! Roadmap; it ticks as it ships.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
@@ -478,7 +479,9 @@ async fn main() -> std::process::ExitCode {
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(report) => {
-            eprintln!("error: {report:#}");
+            // Never `eprintln!`, which panics when the write fails: stderr can be a socket whose
+            // writing `forward -` has already ended with its stdout, and the run must still exit 1.
+            let _ = writeln!(std::io::stderr(), "error: {report:#}");
             std::process::ExitCode::FAILURE
         }
     }

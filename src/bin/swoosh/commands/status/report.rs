@@ -390,7 +390,7 @@ impl Report {
                 Date(until)
             ));
             self.nags.push(
-                "this machine picks it up the next time it reaches one of your devices, or now: swoosh sync"
+                "this machine picks it up the next time it reaches one of your devices, or now with swoosh sync"
                     .to_owned(),
             );
         } else if until - now <= badge::DEVICE_WARN_WINDOW.as_secs() {

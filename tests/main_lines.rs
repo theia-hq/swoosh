@@ -46,6 +46,29 @@ fn a_refusal_starts_with_error_colon() {
     );
 }
 
+/// A refusal still exits 1 when its line cannot be written: here stdout and stderr are one socket
+/// whose writing has ended, as `forward -` leaves it after it ends its stdout.
+#[test]
+fn a_refusal_exits_1_when_stderr_cannot_be_written() {
+    use std::os::unix::net::UnixStream;
+
+    let file = scratch("ended-stderr");
+    std::fs::write(&file, "").unwrap();
+    let (_reader, ended) = UnixStream::pair().unwrap();
+    ended.shutdown(std::net::Shutdown::Write).unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .args(["--home", file.to_str().unwrap(), "status"])
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::null())
+        .stdout(std::os::fd::OwnedFd::from(ended.try_clone().unwrap()))
+        .stderr(std::os::fd::OwnedFd::from(ended))
+        .status()
+        .unwrap();
+    let _ = std::fs::remove_file(&file);
+
+    assert_eq!(status.code(), Some(1));
+}
+
 /// A bare `swoosh` is a mistake: its help goes to stderr, stdout stays empty, and it exits 2, with or
 /// without `SWOOSH_HOME` set.
 #[test]
