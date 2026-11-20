@@ -1575,7 +1575,7 @@ async fn a_held_iroh_stream_is_delivered_once_the_far_side_holds_it_past_a_close
     let exercise = async {
         let peers = Peers::new(&node);
         let place = peers.place(host.node_id(), Main).unwrap();
-        let (_, mut writer, _reader) = peers
+        let (_, _, mut writer, _reader) = peers
             .open_placed(place, Hints::NONE, service(), Standing(Some(badge.clone())))
             .await
             .unwrap();
@@ -1630,7 +1630,7 @@ async fn a_held_iroh_stream_whose_far_side_stops_reading_is_never_delivered() {
     let exercise = async {
         let peers = Peers::new(&node);
         let place = peers.place(host.node_id(), Main).unwrap();
-        let (_, mut writer, mut reader) = peers
+        let (_, _, mut writer, mut reader) = peers
             .open_placed(place, Hints::NONE, service(), Standing(Some(badge.clone())))
             .await
             .unwrap();
@@ -1707,7 +1707,7 @@ async fn delivered_on_a_held_iroh_lane_errors_once_the_peer_goes_silent() {
         .unwrap();
     let peers = Peers::new(&node);
     let place = peers.place(key, Main).unwrap();
-    let (_, mut writer, _reader) = peers
+    let (_, _, mut writer, _reader) = peers
         .open_placed(place, Hints::NONE, service(), Standing(Some(badge)))
         .await
         .unwrap();

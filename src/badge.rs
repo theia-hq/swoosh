@@ -101,8 +101,8 @@ impl fmt::Display for Expiry {
 #[must_use]
 pub fn remedy(node: NodeId) -> String {
     format!(
-        "where your root is kept: swoosh invite <name> {node}. This machine picks it up the next time it \
-         reaches one of your devices (or now: swoosh sync)."
+        "renew it where your root is kept: swoosh invite <name> {node}. This machine picks it up the next \
+         time it reaches one of your devices, or now with swoosh sync."
     )
 }
 

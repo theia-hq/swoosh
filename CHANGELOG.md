@@ -22,7 +22,11 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
-- **A forward, or a TCP service you serve, that the other machine cuts off now ends with a reset, not a clean
+- **`forward <machine> <service> -` tells a finished stream from a cut-off one.** It exits 0 only when the other
+  side ends cleanly and, if you sent anything, the other machine holds it; any other end prints
+  `error: connection lost` and exits 1, with or without `swoosh serve` running. With a file or pipe on stdin, it
+  no longer cuts the upload when the other side finishes first.
+- **A forward to a port, or a TCP service you serve, that the other machine cuts off now ends with a reset, not a clean
   close.** A cut-off transfer no longer reads as complete. A forward's local client is also reset when the session
   is lost or the stream is refused.
 - **`service off` takes any service name.** It no longer needs the name saved or a running serve, and says
