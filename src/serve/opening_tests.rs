@@ -1,9 +1,11 @@
 //! Server Open through the resident's real accept path over a unix socket, against a scripted peer.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 use std::os::fd::AsRawFd as _;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -19,17 +21,18 @@ use tokio::net::UnixStream;
 
 use super::{
     BROKEN, ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, Opens as _,
-    ToPeer, UNREACHABLE, UNREADABLE_HOME, attach, failed, raise_open_files, splice,
+    REPLY_TIMEOUT, ToPeer, UNREACHABLE, UNREADABLE_HOME, attach, failed, raise_open_files, splice,
 };
 use crate::home::Home;
 use crate::peers::{DialFailure, Hints, OpenError, Peers};
 use crate::renewal::renewal_tests::{DAY, LAPTOP, device, lapsed_laptop, node, now};
 use crate::renewal::{Fetch, FetchError, OpenRenewal};
 use crate::serve::control_codec::{
-    OpenLane, OpenRefusal, OpenRequest, PeerRefusal, Request, Response,
+    MAX_FRAME, OpenLane, OpenRefusal, OpenRequest, PeerRefusal, Request, Response,
 };
+use crate::serve::socket::splice::{DataLen, Frame, HEADER, Toward, read_frame};
 use crate::serve::{MAX_CONTROL_CONNS, Resident};
-use crate::testkit::{Script, ScriptedPeer, TestNode};
+use crate::testkit::{Script, ScriptedPeer, TestNode, TestWrite};
 
 #[tokio::test]
 async fn an_open_through_the_running_resident_attaches_and_splices() {
@@ -41,9 +44,8 @@ async fn an_open_through_the_running_resident_attaches_and_splices() {
                 Response::read_open(&mut client).await.unwrap(),
                 Response::Attached(_)
             ));
-            let mut spliced = Vec::new();
-            client.read_to_end(&mut spliced).await.unwrap();
-            // The peer's own bytes after it admitted the stream: a list naming `x`.
+            // The peer's own bytes after it admitted the stream, a list naming `x`, then its clean end.
+            let spliced = download(&mut client).await;
             assert_eq!(spliced, [0, 0, 0, 1, 0, 1, b'x', 0]);
         })
         .await;
@@ -188,15 +190,41 @@ async fn a_gone_client_releases_its_splice_from_a_silent_peer() {
 }
 
 #[tokio::test]
-async fn a_half_closed_client_keeps_its_splice() {
-    let fixture = Fixture::new("halfclose", [Script::Holds]);
+async fn a_client_that_ended_and_half_closed_keeps_its_download() {
+    let fixture = Fixture::new("halfclose", [Script::ReadsThenHolds]);
     fixture
         .run(async |socket| {
             let mut client = open(socket, request(fixture.peer, OpenLane::Bulk, None)).await;
             attached(&mut client).await;
+            client.write_all(&END).await.unwrap();
             client.shutdown().await.unwrap();
+            // The peer holds the upload's end, so Landed comes, and the download stays open.
+            let mut header = [0; HEADER];
+            client.read_exact(&mut header).await.unwrap();
+            assert_eq!(header, LANDED);
             tokio::time::sleep(HANG_GUARD).await;
             assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH - 1);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_stop_tag_after_attached_ends_the_open_and_never_stops_the_run() {
+    let fixture = Fixture::new("stop-tag", [Script::Holds]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(socket, request(fixture.peer, OpenLane::Main, None)).await;
+            attached(&mut client).await;
+            // A Stop request's frame inside the splice is malformed there, never a request.
+            client.write_all(b"SWC1\x03\x00\x00").await.unwrap();
+            released(&fixture.opener, HANG_GUARD).await;
+            // The run still answers: a Stop would have ended `run`'s serving, failing the test.
+            let mut asked = UnixStream::connect(socket).await.unwrap();
+            Request::Status.write(&mut asked).await.unwrap();
+            assert!(matches!(
+                Response::read(&mut asked).await.unwrap(),
+                Response::Status(_)
+            ));
         })
         .await;
 }
@@ -225,7 +253,8 @@ async fn an_isolated_splice_is_dropped_at_the_drain_deadline_when_the_peer_takes
             attached(&mut client).await;
             // More than the peer's stream holds, so bytes are left when the client goes.
             // Write until the path stalls, since nothing past the peer's stream drains it.
-            let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&[7; 1024 * 1024])).await;
+            let flood = framed(&[7; 1024 * 1024]);
+            let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&flood)).await;
             drop(client);
             tokio::time::sleep(HANGUP_DRAIN / 2).await;
             assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH - 1);
@@ -241,11 +270,15 @@ async fn an_isolated_close_releases_its_slot_once_the_peer_holds_what_was_sent()
         .run(async |socket| {
             let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
             attached(&mut client).await;
-            client.write_all(b"the last of an upload").await.unwrap();
+            client
+                .write_all(&ended(b"the last of an upload"))
+                .await
+                .unwrap();
             client.shutdown().await.unwrap();
-            let mut rest = Vec::new();
-            client.read_to_end(&mut rest).await.unwrap();
-            // The peer ended first and takes the bytes only after its pause, well inside the drain.
+            // The peer ended first and takes the bytes only after its pause, well inside the drain:
+            // then the upload has landed, and the connection closes.
+            let read = read_all(&mut client).await;
+            assert!(read.end && read.landed, "{read:?}");
             let taken = tokio::time::timeout(
                 HANGUP_DRAIN,
                 until_true(|| fixture.scripted.received() == b"the last of an upload"),
@@ -269,14 +302,15 @@ async fn an_isolated_peer_that_never_takes_the_end_is_released_at_the_drain() {
         .run(async |socket| {
             let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
             attached(&mut client).await;
-            client.write_all(b"never read").await.unwrap();
+            client.write_all(&ended(b"never read")).await.unwrap();
             client.shutdown().await.unwrap();
-            let mut rest = Vec::new();
-            client.read_to_end(&mut rest).await.unwrap();
             // A clean end on both sides, and a peer that holds the stream without reading it.
+            assert!(download(&mut client).await.is_empty());
             tokio::time::sleep(HANGUP_DRAIN - HANG_GUARD).await;
             assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH - 1);
             released(&fixture.opener, HANG_GUARD * 2).await;
+            // Never delivered, so no Landed: the connection closes on the client.
+            assert_eq!(read_all(&mut client).await, Read::default());
         })
         .await;
 }
@@ -289,10 +323,9 @@ async fn an_isolated_close_past_the_drain_loses_what_the_peer_did_not_take() {
         .run(async |socket| {
             let mut client = open(socket, request(fixture.peer, OpenLane::Isolated, None)).await;
             attached(&mut client).await;
-            client.write_all(b"never taken").await.unwrap();
+            client.write_all(&ended(b"never taken")).await.unwrap();
             client.shutdown().await.unwrap();
-            let mut rest = Vec::new();
-            client.read_to_end(&mut rest).await.unwrap();
+            assert!(download(&mut client).await.is_empty());
             // A peer that keeps the connection and takes nothing holds it no longer than the drain.
             released(&fixture.opener, HANGUP_DRAIN + HANG_GUARD).await;
             tokio::time::sleep(late).await;
@@ -339,7 +372,10 @@ async fn the_hangup_watch_tells_close_from_half_close() {
 #[tokio::test(start_paused = true)]
 async fn a_gone_client_with_unsent_bytes_is_dropped_at_the_drain_deadline() {
     let mut pair = Pair::new();
-    pair.client.write_all(&[7; 16 * 1024]).await.unwrap();
+    pair.client
+        .write_all(&framed(&[7; 16 * 1024]))
+        .await
+        .unwrap();
     drop(pair.client);
     let mut spliced = Box::pin(pair.splice);
     assert!(poll!(&mut spliced).is_pending());
@@ -354,7 +390,10 @@ async fn a_gone_client_with_unsent_bytes_is_dropped_at_the_drain_deadline() {
 #[tokio::test(start_paused = true)]
 async fn a_slow_peer_cannot_stretch_the_hangup_drain() {
     let mut pair = Pair::new();
-    pair.client.write_all(&[7; 16 * 1024]).await.unwrap();
+    pair.client
+        .write_all(&framed(&[7; 16 * 1024]))
+        .await
+        .unwrap();
     drop(pair.client);
     let mut spliced = Box::pin(pair.splice);
     assert!(poll!(&mut spliced).is_pending());
@@ -395,7 +434,7 @@ async fn a_peer_still_sending_does_not_hold_a_gone_client() {
         BufReader::new(from_client),
         to_client,
         from_peer,
-        to_peer,
+        ToPeer::arm(TestWrite::from(to_peer)),
         async {
             let _ = hung.await;
         },
@@ -408,41 +447,116 @@ async fn a_peer_still_sending_does_not_hold_a_gone_client() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_clean_end_leaves_the_close_the_whole_drain() {
+async fn the_landed_frame_follows_only_an_upload_the_peer_holds() {
     let pair = Pair::new();
-    let (client, mut peer) = (pair.client, pair.peer);
-    // Both directions end: the client stops writing, and the peer ends its own.
-    drop(client);
+    let (mut client, mut peer, holds) = (pair.client, pair.peer, pair.holds);
+    client.write_all(&ended(b"an upload")).await.unwrap();
+    let mut spliced = Box::pin(pair.splice);
+    let mut got = Vec::new();
+    // The peer reads the upload and its end, but its transport has not said it holds them.
+    let reading = async {
+        peer.read_to_end(&mut got).await.unwrap();
+    };
+    tokio::select! {
+        () = &mut spliced => panic!("the splice ended before the peer held the upload"),
+        () = reading => {}
+    }
+    assert_eq!(got, b"an upload");
+    tokio::time::advance(HANGUP_DRAIN / 2).await;
+    assert!(poll!(&mut spliced).is_pending());
+    let mut header = [0; HEADER];
+    assert!(
+        poll!(Box::pin(client.read_exact(&mut header))).is_pending(),
+        "no Landed before the peer holds the upload"
+    );
+    holds.send(()).unwrap();
+    assert!(
+        poll!(&mut spliced).is_pending(),
+        "the download is still open"
+    );
+    client.read_exact(&mut header).await.unwrap();
+    assert_eq!(header, LANDED);
+    // The peer ends its own side: End, then the close.
     peer.shutdown().await.unwrap();
-    let ended = tokio::time::Instant::now();
-    let mut sent = Vec::new();
-    let (close_by, read) = tokio::join!(pair.splice, peer.read_to_end(&mut sent));
-    read.unwrap();
-    assert_eq!(close_by, ended + HANGUP_DRAIN);
+    let ((), read) = tokio::join!(spliced, read_all(&mut client));
+    assert_eq!(
+        read,
+        Read {
+            end: true,
+            ..Read::default()
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upload_not_delivered_by_the_deadline_closes_without_landed() {
+    let pair = Pair::new();
+    let (mut client, mut peer, _holds) = (pair.client, pair.peer, pair.holds);
+    client.write_all(&ended(b"an upload")).await.unwrap();
+    let mut spliced = Box::pin(pair.splice);
+    let mut got = Vec::new();
+    let reading = async {
+        peer.read_to_end(&mut got).await.unwrap();
+    };
+    tokio::select! {
+        () = &mut spliced => panic!("the splice ended before its deadline"),
+        () = reading => {}
+    }
+    // One deadline from the End: the peer never says it holds the upload.
+    tokio::time::advance(HANGUP_DRAIN - Duration::from_millis(1)).await;
+    assert!(poll!(&mut spliced).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(poll!(&mut spliced).is_ready());
+    drop(spliced);
+    // The peer's own side never ended either, so the client reads a bare close.
+    assert_eq!(read_all(&mut client).await, Read::default());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_that_stops_reading_releases_the_splice_by_the_final_write_deadline() {
+    // Room for one small Data frame and nothing more.
+    let pair = Pair::sized(HEADER + 4);
+    let (mut client, mut peer, holds) = (pair.client, pair.peer, pair.holds);
+    client.write_all(&END).await.unwrap();
+    peer.write_all(b"full").await.unwrap();
+    peer.shutdown().await.unwrap();
+    let mut spliced = Box::pin(pair.splice);
+    // The Data frame fills the room; the End after it waits on a client that reads nothing.
+    assert!(poll!(&mut spliced).is_pending());
+    holds.send(()).unwrap();
+    assert!(poll!(&mut spliced).is_pending());
+    tokio::time::advance(REPLY_TIMEOUT - Duration::from_millis(1)).await;
+    assert!(poll!(&mut spliced).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(poll!(&mut spliced).is_ready());
+    drop(client);
 }
 
 #[tokio::test]
-async fn bytes_a_client_wrote_before_closing_reach_a_live_peer() {
+async fn bytes_and_end_a_client_wrote_before_closing_reach_a_live_peer() {
     let mut pair = Pair::new();
     let sent: Vec<u8> = (0..64 * 1024).map(|at| (at % 251) as u8).collect();
-    pair.client.write_all(&sent[..32]).await.unwrap();
-    let (hang_up, mut peer, splice) = (pair.hang_up, pair.peer, pair.splice);
+    let wire = ended(&sent);
+    pair.client.write_all(&wire[..32]).await.unwrap();
+    let (hang_up, mut peer, holds, splice) = (pair.hang_up, pair.peer, pair.holds, pair.splice);
     let mut client = pair.client;
     let writer = async {
-        client.write_all(&sent[32..]).await.unwrap();
+        client.write_all(&wire[32..]).await.unwrap();
         drop(client);
         hang_up.send(()).unwrap();
     };
     let reader = async {
         let mut got = Vec::new();
+        // A clean end: the client's End reached the peer within the drain.
         peer.read_to_end(&mut got).await.unwrap();
+        holds.send(()).unwrap();
         got
     };
     let joined = tokio::time::timeout(HANG_GUARD * 5, async {
         tokio::join!(writer, reader, splice)
     })
     .await;
-    let ((), got, _) = joined.expect("the splice ended");
+    let ((), got, ()) = joined.expect("the splice ended");
     assert_eq!(got, sent);
 }
 
@@ -450,7 +564,7 @@ async fn bytes_a_client_wrote_before_closing_reach_a_live_peer() {
 async fn an_open_dropped_mid_splice_resets_the_peers_stream() {
     let mut stream = MemStream::new().await;
     let mut client = stream.client.take().unwrap();
-    client.write_all(b"half an upload").await.unwrap();
+    client.write_all(&framed(b"half an upload")).await.unwrap();
     // Dropped while it splices, as `Stop` or a panic drops the Open; a gone client drains instead.
     let spliced = tokio::time::timeout(HANG_GUARD / 4, stream.attach()).await;
     assert!(spliced.is_err(), "the splice ended on its own");
@@ -463,12 +577,12 @@ async fn a_splice_cut_at_the_drain_deadline_resets_the_peers_stream() {
     let mut stream = MemStream::new().await;
     let mut client = stream.client.take().unwrap();
     // More than the peer's stream holds, which the peer never reads, then gone.
+    let flood = framed(&[7; 1024 * 1024]);
     let goes = async {
-        let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&[7; 1024 * 1024])).await;
+        let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&flood)).await;
         drop(client);
     };
-    let (close_by, ()) = tokio::join!(stream.attach(), goes);
-    assert!(close_by <= tokio::time::Instant::now());
+    let ((), ()) = tokio::join!(stream.attach(), goes);
     assert_eq!(stream.peer_reads().await, Ended::Reset);
 }
 
@@ -480,7 +594,7 @@ async fn an_attached_reply_that_cannot_be_written_resets_the_peers_stream() {
         BufReader::new(from_client),
         Gone,
         stream.from_peer.take().unwrap(),
-        &mut stream.to_peer,
+        stream.to_peer.take().unwrap(),
         stream.sessions[0].conn_info(),
         &stream.gone,
     )
@@ -490,19 +604,303 @@ async fn an_attached_reply_that_cannot_be_written_resets_the_peers_stream() {
 
 #[tokio::test]
 async fn a_clean_end_after_shutdown_stays_clean() {
+    let MemStream {
+        sessions,
+        client,
+        server,
+        gone,
+        to_peer,
+        from_peer,
+        peer: (mut peer_write, mut peer_read),
+    } = MemStream::new().await;
+    let mut client = client.unwrap();
+    let to_peer = to_peer.unwrap();
+    let aborts = Rc::clone(&to_peer.aborts);
+    client.write_all(&ended(b"a whole upload")).await.unwrap();
+    client.shutdown().await.unwrap();
+    peer_write.shutdown().await.unwrap();
+    let mut got = Vec::new();
+    let ((), read, taken) = tokio::join!(
+        splice_mem(
+            server.unwrap(),
+            from_peer.unwrap(),
+            to_peer,
+            &sessions[0],
+            &gone
+        ),
+        async {
+            attached(&mut client).await;
+            read_all(&mut client).await
+        },
+        peer_read.read_to_end(&mut got)
+    );
+    taken.unwrap();
+    assert_eq!(got, b"a whole upload");
+    // The peer read it all and its end, so the upload landed, beside the download's own End.
+    assert!(read.end && read.landed, "{read:?}");
+    // mem ignores an abort after a clean end, so only the count tells one was never sent.
+    assert_eq!(aborts.get(), 0);
+}
+
+/// An attached mem splice whose client, once it has read Attached, writes `wire` and then does `then` to
+/// its socket, run while the peer reads its stream: how the peer's read ended.
+async fn upload_ends(wire: &[u8], then: impl FnOnce(UnixStream) -> Option<UnixStream>) -> Ended {
+    let MemStream {
+        sessions,
+        client,
+        server,
+        gone,
+        to_peer,
+        from_peer,
+        peer: (_peer_write, mut peer_read),
+    } = MemStream::new().await;
+    let mut client = client.unwrap();
+    let splicing = splice_mem(
+        server.unwrap(),
+        from_peer.unwrap(),
+        to_peer.unwrap(),
+        &sessions[0],
+        &gone,
+    );
+    let near_and_far = async {
+        attached(&mut client).await;
+        client.write_all(wire).await.unwrap();
+        let _kept = then(client);
+        reads(&mut peer_read).await
+    };
+    tokio::pin!(splicing, near_and_far);
+    tokio::select! {
+        ended = &mut near_and_far => ended,
+        () = &mut splicing => near_and_far.await,
+    }
+}
+
+#[tokio::test]
+async fn a_client_closing_without_end_resets_the_peers_stream() {
+    // A crash: data frames, then the socket closed both ways, with no End.
+    let ended = upload_ends(&framed(b"half an upload"), |client| {
+        drop(client);
+        None
+    })
+    .await;
+    assert_eq!(ended, Ended::Reset);
+}
+
+#[tokio::test]
+async fn a_frame_cut_off_mid_body_resets_the_peers_stream() {
+    let mut wire = framed(b"a whole frame");
+    wire.truncate(wire.len() - 4);
+    let ended = upload_ends(&wire, |client| {
+        drop(client);
+        None
+    })
+    .await;
+    assert_eq!(ended, Ended::Reset);
+}
+
+#[tokio::test]
+async fn a_malformed_frame_after_attached_resets_the_peer_and_ends_the_open() {
+    // An empty Data, an unknown tag, a Stop request, Landed from the client, a declared 8193 bytes
+    // and a foreign magic. The client stays connected, so only the frame ends the Open.
+    for bad in [
+        *b"SWC1\x0a\x00\x00",
+        *b"SWC1\x0d\x00\x00",
+        *b"SWC1\x03\x00\x00",
+        *b"SWC1\x0c\x00\x00",
+        *b"SWC1\x0a\x20\x01",
+        *b"SWC2\x0a\x00\x01",
+    ] {
+        let mut wire = framed(b"before");
+        wire.extend(bad);
+        wire.extend([7; 16]);
+        let MemStream {
+            sessions,
+            client,
+            server,
+            gone,
+            to_peer,
+            from_peer,
+            peer: (_peer_write, mut peer_read),
+        } = MemStream::new().await;
+        let mut client = client.unwrap();
+        client.write_all(&wire).await.unwrap();
+        tokio::time::timeout(
+            HANG_GUARD,
+            splice_mem(
+                server.unwrap(),
+                from_peer.unwrap(),
+                to_peer.unwrap(),
+                &sessions[0],
+                &gone,
+            ),
+        )
+        .await
+        .expect("a malformed frame ends the open");
+        // mem's abort drops what the peer had not read, so only the reset is left to read.
+        assert_eq!(reads(&mut peer_read).await, Ended::Reset, "{bad:?}");
+        // The resident closed the connection with no End and no Landed.
+        attached(&mut client).await;
+        assert_eq!(read_all(&mut client).await, Read::default());
+    }
+}
+
+#[tokio::test]
+async fn a_client_half_closing_without_end_resets_the_upload_and_keeps_the_download() {
+    let MemStream {
+        sessions,
+        client,
+        server,
+        gone,
+        to_peer,
+        from_peer,
+        peer: (mut peer_write, mut peer_read),
+    } = MemStream::new().await;
+    let mut client = client.unwrap();
+    client.write_all(&framed(b"half")).await.unwrap();
+    client.shutdown().await.unwrap();
+    let far = async {
+        assert_eq!(reads(&mut peer_read).await, Ended::Reset);
+        // The download still flows after the upload was cut.
+        peer_write.write_all(b"reply").await.unwrap();
+        peer_write.shutdown().await.unwrap();
+    };
+    let ((), (), read) = tokio::join!(
+        splice_mem(
+            server.unwrap(),
+            from_peer.unwrap(),
+            to_peer.unwrap(),
+            &sessions[0],
+            &gone
+        ),
+        far,
+        async {
+            attached(&mut client).await;
+            read_all(&mut client).await
+        }
+    );
+    assert_eq!(
+        read,
+        Read {
+            data: b"reply".to_vec(),
+            end: true,
+            landed: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_client_crash_after_the_peer_ended_resets_the_peers_stream() {
+    let MemStream {
+        sessions,
+        client,
+        server,
+        gone,
+        to_peer,
+        from_peer,
+        peer: (mut peer_write, mut peer_read),
+    } = MemStream::new().await;
+    let mut client = client.unwrap();
+    // The far service answers and ends first; then the client dies mid-upload.
+    peer_write.shutdown().await.unwrap();
+    let near = async {
+        attached(&mut client).await;
+        assert!(download(&mut client).await.is_empty());
+        client.write_all(&framed(b"half an upload")).await.unwrap();
+        drop(client);
+    };
+    let far = reads(&mut peer_read);
+    let ((), (), ended) = tokio::join!(
+        splice_mem(
+            server.unwrap(),
+            from_peer.unwrap(),
+            to_peer.unwrap(),
+            &sessions[0],
+            &gone
+        ),
+        near,
+        far
+    );
+    assert_eq!(ended, Ended::Reset);
+}
+
+#[tokio::test]
+async fn a_peer_reset_reaches_the_client_without_an_end() {
+    let MemStream {
+        sessions,
+        client,
+        server,
+        gone,
+        to_peer,
+        from_peer,
+        peer: (mut peer_write, mut peer_read),
+    } = MemStream::new().await;
+    let mut client = client.unwrap();
+    client.write_all(&END).await.unwrap();
+    peer_write.write_all(b"part").await.unwrap();
+    let far = async {
+        // The far side holds the upload's end, then cuts its own stream.
+        let mut got = Vec::new();
+        peer_read.read_to_end(&mut got).await.unwrap();
+        peer_write.abort();
+    };
+    let ((), (), read) = tokio::join!(
+        splice_mem(
+            server.unwrap(),
+            from_peer.unwrap(),
+            to_peer.unwrap(),
+            &sessions[0],
+            &gone
+        ),
+        far,
+        async {
+            attached(&mut client).await;
+            read_all(&mut client).await
+        }
+    );
+    assert_eq!(read.data, b"part");
+    assert!(!read.end, "a cut-off download never reads as finished");
+}
+
+#[tokio::test]
+async fn a_peer_clean_end_reaches_the_client_as_end() {
     let mut stream = MemStream::new().await;
     let mut client = stream.client.take().unwrap();
-    client.write_all(b"a whole upload").await.unwrap();
-    client.shutdown().await.unwrap();
+    stream.peer.0.write_all(b"whole").await.unwrap();
     stream.peer.0.shutdown().await.unwrap();
-    let mut back = Vec::new();
-    let (_, read) = tokio::join!(stream.attach(), client.read_to_end(&mut back));
-    read.unwrap();
-    let mut got = Vec::new();
-    stream.peer.1.read_to_end(&mut got).await.unwrap();
-    assert_eq!(got, b"a whole upload");
-    // mem ignores an abort after a clean end, so only the count tells one was never sent.
-    assert_eq!(stream.to_peer.aborts, 0);
+    let splicing = stream.attach();
+    tokio::pin!(splicing);
+    let got = tokio::select! {
+        () = &mut splicing => panic!("the open ended with its upload open"),
+        got = async {
+            attached(&mut client).await;
+            download(&mut client).await
+        } => got,
+    };
+    assert_eq!(got, b"whole");
+}
+
+#[tokio::test]
+async fn a_stop_mid_download_reaches_the_client_without_an_end() {
+    let mut stream = MemStream::new().await;
+    let mut client = stream.client.take().unwrap();
+    stream.peer.0.write_all(b"part").await.unwrap();
+    {
+        let splicing = stream.attach();
+        tokio::pin!(splicing);
+        let mut header = [0; HEADER];
+        tokio::select! {
+            () = &mut splicing => panic!("the open ended on its own"),
+            () = async {
+                attached(&mut client).await;
+                client.read_exact(&mut header).await.unwrap();
+            } => {}
+        }
+        let mut body = [0; 4];
+        client.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"part");
+        // Dropped here, as `Stop` drops the Open.
+    }
+    assert_eq!(read_all(&mut client).await, Read::default());
 }
 
 #[tokio::test]
@@ -538,7 +936,7 @@ async fn a_whole_open_dropped_mid_splice_resets_the_peers_stream() {
             .await
             .unwrap();
         attached(&mut client).await;
-        client.write_all(b"half an upload").await.unwrap();
+        client.write_all(&framed(b"half an upload")).await.unwrap();
         let mut got = [0; 14];
         from.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"half an upload");
@@ -559,12 +957,12 @@ async fn a_whole_open_dropped_mid_splice_resets_the_peers_stream() {
 
 #[tokio::test]
 async fn a_guard_dropped_with_its_shutdown_pending_aborts() {
-    let mut half = Unshut::default();
-    let mut guard = ToPeer::arm(&mut half);
-    assert!(poll!(Box::pin(guard.shutdown())).is_pending());
-    drop(guard);
-    assert_eq!(half.shutdowns, 1, "the shutdown was never asked");
-    assert_eq!(half.aborts, 1);
+    let half = Unshut::default();
+    let (shutdowns, aborts) = (Rc::clone(&half.shutdowns), Rc::clone(&half.aborts));
+    let finishing = ToPeer::arm(half).finish();
+    assert!(poll!(Box::pin(finishing)).is_pending());
+    assert_eq!(shutdowns.get(), 1, "the shutdown was never asked");
+    assert_eq!(aborts.get(), 1);
 }
 
 #[test]
@@ -729,10 +1127,9 @@ async fn an_isolated_open_times_out_at_bulks_ten_seconds() {
 async fn stalled_after_the_peer_ended(socket: &std::path::Path, peer: NodeId) -> UnixStream {
     let mut client = open(socket, request(peer, OpenLane::Bulk, None)).await;
     attached(&mut client).await;
-    let mut rest = Vec::new();
-    client.read_to_end(&mut rest).await.unwrap();
-    assert!(rest.is_empty());
-    let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&[7; 1024 * 1024])).await;
+    assert!(download(&mut client).await.is_empty());
+    let flood = framed(&[7; 1024 * 1024]);
+    let _ = tokio::time::timeout(HANG_GUARD, client.write_all(&flood)).await;
     client
 }
 
@@ -779,13 +1176,14 @@ async fn a_failed_write_to_the_client_still_sends_its_bytes_to_the_peer() {
     let (mut client, from_client) = tokio::io::duplex(1024);
     let (mut peer, peer_end) = tokio::io::duplex(1024);
     let (from_peer, to_peer) = tokio::io::split(peer_end);
+    let (holds, held) = tokio::sync::oneshot::channel();
     // The peer has a byte for the client, and the client's socket refuses it.
     peer.write_all(&[1]).await.unwrap();
     let mut spliced = Box::pin(splice(
         BufReader::new(from_client),
         Gone,
         from_peer,
-        to_peer,
+        ToPeer::arm(TestWrite::read_by(to_peer, held)),
         core::future::pending(),
         core::future::pending(),
     ));
@@ -793,10 +1191,16 @@ async fn a_failed_write_to_the_client_still_sends_its_bytes_to_the_peer() {
         poll!(&mut spliced).is_pending(),
         "a failed write ended the splice"
     );
-    client.write_all(b"last words").await.unwrap();
+    client.write_all(&ended(b"last words")).await.unwrap();
     drop(client);
     let mut got = Vec::new();
-    let (_, read) = tokio::join!(spliced, peer.read_to_end(&mut got));
+    let reader = async {
+        // A clean end, never the reset of a cut-off: only the way to the client failed.
+        let read = peer.read_to_end(&mut got).await;
+        holds.send(()).unwrap();
+        read
+    };
+    let ((), read) = tokio::join!(spliced, reader);
     read.unwrap();
     assert_eq!(got, b"last words");
 }
@@ -811,7 +1215,7 @@ async fn a_payload_in_the_requests_write_reaches_the_peer() {
                 .write(&mut bytes)
                 .await
                 .unwrap();
-            bytes.extend_from_slice(b"sent with the request");
+            bytes.extend_from_slice(&ended(b"sent with the request"));
             let mut client = UnixStream::connect(socket).await.unwrap();
             client.write_all(&bytes).await.unwrap();
             client.shutdown().await.unwrap();
@@ -1151,36 +1555,123 @@ async fn refusal(client: &mut UnixStream) -> OpenRefusal {
 const HANG_GUARD: Duration = Duration::from_secs(1);
 
 /// The client's and the peer's ends of a splice over in-process streams, the peer's holding 64 bytes so
-/// it fills, and the hang-up the test fires.
+/// it fills, the hang-up the test fires, and the word that the peer holds the upload, which the test
+/// sends as a transport's delivery would.
 struct Pair<F> {
     client: DuplexStream,
     peer: DuplexStream,
     hang_up: tokio::sync::oneshot::Sender<()>,
+    holds: tokio::sync::oneshot::Sender<()>,
     splice: F,
 }
 
 impl Pair<()> {
     #[allow(clippy::new_ret_no_self)]
-    fn new() -> Pair<impl Future<Output = tokio::time::Instant>> {
-        let (client, server) = tokio::io::duplex(64 * 1024);
+    fn new() -> Pair<impl Future<Output = ()>> {
+        Self::sized(64 * 1024)
+    }
+
+    /// With room for `room` bytes toward the client.
+    fn sized(room: usize) -> Pair<impl Future<Output = ()>> {
+        let (client, server) = tokio::io::duplex(room);
         let (from_client, to_client) = tokio::io::split(server);
         let (peer, peer_end) = tokio::io::duplex(64);
         let (from_peer, to_peer) = tokio::io::split(peer_end);
         let (hang_up, hung) = tokio::sync::oneshot::channel::<()>();
+        let (holds, held) = tokio::sync::oneshot::channel::<()>();
         Pair {
             client,
             peer,
             hang_up,
+            holds,
             splice: splice(
                 BufReader::new(from_client),
                 to_client,
                 from_peer,
-                to_peer,
+                ToPeer::arm(TestWrite::read_by(to_peer, held)),
                 async {
                     let _ = hung.await;
                 },
                 core::future::pending(),
             ),
+        }
+    }
+}
+
+/// A Data frame's header and body for each piece of `data`, at most the frame ceiling each.
+fn framed(data: &[u8]) -> Vec<u8> {
+    let mut wire = Vec::new();
+    for piece in data.chunks(MAX_FRAME) {
+        wire.extend(Frame::Data(DataLen::new(piece.len()).unwrap()).header());
+        wire.extend(piece);
+    }
+    wire
+}
+
+/// `data` framed, then End: a whole upload.
+fn ended(data: &[u8]) -> Vec<u8> {
+    let mut wire = framed(data);
+    wire.extend(END);
+    wire
+}
+
+/// The End frame's bytes.
+const END: [u8; HEADER] = *b"SWC1\x0b\x00\x00";
+/// The Landed frame's bytes.
+const LANDED: [u8; HEADER] = *b"SWC1\x0c\x00\x00";
+
+/// What a client read until the resident closed the connection: the download, whether its End came,
+/// and whether Landed came.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Read {
+    data: Vec<u8>,
+    end: bool,
+    landed: bool,
+}
+
+/// Read frames until the connection closes. Data after the download's End, a second End or Landed,
+/// or a malformed frame fails the test.
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn read_all<R: tokio::io::AsyncRead + Unpin>(client: &mut R) -> Read {
+    let mut read = Read::default();
+    loop {
+        let frame = match read_frame(client, Toward::Client).await {
+            Ok(frame) => frame,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return read,
+            Err(error) => panic!("a malformed frame from the resident: {error}"),
+        };
+        match frame {
+            Frame::Data(len) => {
+                assert!(!read.end, "data after the download's end");
+                let mut body = vec![0; len.get()];
+                client.read_exact(&mut body).await.unwrap();
+                read.data.extend(body);
+            }
+            Frame::End => {
+                assert!(!read.end, "a second end");
+                read.end = true;
+            }
+            Frame::Landed => {
+                assert!(!read.landed, "a second landed");
+                read.landed = true;
+            }
+        }
+    }
+}
+
+/// Read the download up to its End, never past it.
+async fn download<R: tokio::io::AsyncRead + Unpin>(client: &mut R) -> Vec<u8> {
+    let mut got = Vec::new();
+    loop {
+        match read_frame(client, Toward::Client).await.unwrap() {
+            Frame::Data(len) => {
+                let mut body = vec![0; len.get()];
+                client.read_exact(&mut body).await.unwrap();
+                got.extend(body);
+            }
+            Frame::End => return got,
+            Frame::Landed => {}
         }
     }
 }
@@ -1218,7 +1709,7 @@ struct MemStream {
     client: Option<UnixStream>,
     server: Option<UnixStream>,
     gone: ClientGone,
-    to_peer: Counted<MemWrite>,
+    to_peer: Option<Counted<MemWrite>>,
     from_peer: Option<MemRead>,
     peer: (MemWrite, MemRead),
 }
@@ -1237,40 +1728,66 @@ impl MemStream {
             client: Some(client),
             server: Some(server),
             gone,
-            to_peer: Counted {
+            to_peer: Some(Counted {
                 half: to_peer,
-                aborts: 0,
-            },
+                aborts: Rc::default(),
+            }),
             from_peer: Some(from_peer),
             peer,
         }
     }
 
     /// Attach the client to the peer, as an Open does once its stream opened.
-    async fn attach(&mut self) -> tokio::time::Instant {
+    async fn attach(&mut self) {
         let (from_client, to_client) = self.server.take().unwrap().into_split();
         attach(
             BufReader::new(from_client),
             to_client,
             self.from_peer.take().unwrap(),
-            &mut self.to_peer,
+            self.to_peer.take().unwrap(),
             self.sessions[0].conn_info(),
             &self.gone,
         )
-        .await
+        .await;
     }
 
     /// How the peer's read of the stream ends.
-    // `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
-    #[allow(clippy::std_instead_of_core)]
     async fn peer_reads(&mut self) -> Ended {
-        let mut got = Vec::new();
-        let read = tokio::time::timeout(HANG_GUARD, self.peer.1.read_to_end(&mut got)).await;
-        match read.expect("the peer's read hung") {
-            Ok(_) => Ended::Clean,
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ended::Reset,
-            Err(error) => Ended::Failed(error.to_string()),
-        }
+        reads(&mut self.peer.1).await
+    }
+}
+
+/// Attach an Open's parts: what [`MemStream::attach`] does, borrowing only the watch, so a test can
+/// read the peer's end while it runs.
+async fn splice_mem(
+    server: UnixStream,
+    from_peer: MemRead,
+    to_peer: Counted<MemWrite>,
+    session: &MemSession,
+    gone: &ClientGone,
+) {
+    let (from_client, to_client) = server.into_split();
+    attach(
+        BufReader::new(from_client),
+        to_client,
+        from_peer,
+        to_peer,
+        session.conn_info(),
+        gone,
+    )
+    .await;
+}
+
+/// How a peer's read of a stream ends, within the hang guard.
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn reads(peer: &mut MemRead) -> Ended {
+    let mut got = Vec::new();
+    let read = tokio::time::timeout(HANG_GUARD, peer.read_to_end(&mut got)).await;
+    match read.expect("the peer's read hung") {
+        Ok(_) => Ended::Clean,
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ended::Reset,
+        Err(error) => Ended::Failed(error.to_string()),
     }
 }
 
@@ -1288,7 +1805,7 @@ enum Ended {
 /// A write half that counts its aborts: mem ignores one after a clean end, so the peer cannot tell.
 struct Counted<W> {
     half: W,
-    aborts: u32,
+    aborts: Rc<Cell<u32>>,
 }
 
 impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Counted<W> {
@@ -1317,7 +1834,7 @@ impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Counted<W> {
 
 impl<W: WriteEnd> WriteEnd for Counted<W> {
     fn abort(&mut self) {
-        self.aborts += 1;
+        self.aborts.set(self.aborts.get() + 1);
         self.half.abort();
     }
 
@@ -1329,8 +1846,8 @@ impl<W: WriteEnd> WriteEnd for Counted<W> {
 /// A write half whose shutdown never completes; it counts the shutdowns asked and the aborts.
 #[derive(Default)]
 struct Unshut {
-    shutdowns: u32,
-    aborts: u32,
+    shutdowns: Rc<Cell<u32>>,
+    aborts: Rc<Cell<u32>>,
 }
 
 impl tokio::io::AsyncWrite for Unshut {
@@ -1353,14 +1870,15 @@ impl tokio::io::AsyncWrite for Unshut {
         self: core::pin::Pin<&mut Self>,
         _cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<std::io::Result<()>> {
-        self.get_mut().shutdowns += 1;
+        let shutdowns = &self.get_mut().shutdowns;
+        shutdowns.set(shutdowns.get() + 1);
         core::task::Poll::Pending
     }
 }
 
 impl WriteEnd for Unshut {
     fn abort(&mut self) {
-        self.aborts += 1;
+        self.aborts.set(self.aborts.get() + 1);
     }
 
     fn delivered(self) -> impl Future<Output = std::io::Result<()>> + Send + 'static {

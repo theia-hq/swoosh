@@ -1551,6 +1551,166 @@ async fn window_stall_recovers_new_opens() {
     std::fs::remove_dir_all(home.dir()).unwrap();
 }
 
+/// A stream on a held iroh lane is delivered only once the far side holds every byte and the end, and
+/// that holding survives the session: here the dialing node closes the moment `delivered` resolves, and
+/// the far handler starts reading only after its session has seen the close, yet reads every byte and a
+/// clean end. iroh resolves `delivered` when the peer's transport acknowledges the stream, not when its
+/// handler reads it, so this is what an answer sent after `delivered` may claim: the peer holds the bytes
+/// even if the session dies next. Real iroh on loopback, since mem resolves only at the reader's end.
+#[tokio::test]
+async fn a_held_iroh_stream_is_delivered_once_the_far_side_holds_it_past_a_close() {
+    let (host, node, badge, store, home) = loopback_pair("held-delivered").await;
+    let sink = Sink::default();
+    let exposer = tightbeam::tunnel::Router::new(nauthy::Gate::rooted(
+        TestRoot::seeded(1).verify_key(),
+        store,
+    ))
+    .service(service(), sink.clone())
+    .unwrap()
+    .expose()
+    .unwrap();
+    let cancel = tightbeam::tunnel::CancellationToken::new();
+    // Under a stream's window, so the far transport can hold it all while its handler reads nothing.
+    let sent: Vec<u8> = (0..=u8::MAX).cycle().take(1024 * 1024).collect();
+    let exercise = async {
+        let peers = Peers::new(&node);
+        let place = peers.place(host.node_id(), Main).unwrap();
+        let (_, mut writer, _reader) = peers
+            .open_placed(place, Hints::NONE, service(), Standing(Some(badge.clone())))
+            .await
+            .unwrap();
+        writer.write_all(&sent).await.unwrap();
+        writer.shutdown().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            bifrost::WriteEnd::delivered(writer),
+        )
+        .await
+        .expect("a far side that holds the stream lets delivered resolve")
+        .expect("a finished stream the far side holds is delivered");
+        // At once: nothing between the delivery and the close lets more bytes arrive.
+        node.close().await;
+        sink.go.notify_one();
+        let read = tokio::time::timeout(Duration::from_secs(10), sink.done.notified()).await;
+        read.expect("the far handler read to its end");
+        cancel.cancel();
+    };
+    let ((), ()) = tokio::join!(exposer.run(&host, cancel.clone()), exercise);
+    let (got, clean) = sink.taken();
+    assert!(
+        clean,
+        "a delivered stream reads to a clean end after the close"
+    );
+    assert!(
+        got == sent,
+        "the far side read {} of {}",
+        got.len(),
+        sent.len()
+    );
+    host.close().await;
+    std::fs::remove_dir_all(home.dir()).unwrap();
+}
+
+/// A stream on a held iroh lane whose far handler drops its read half unread is never delivered: the
+/// answer is an error, so nothing sent after `delivered` can claim the bytes landed.
+#[tokio::test]
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn a_held_iroh_stream_whose_far_side_stops_reading_is_never_delivered() {
+    let (host, node, badge, store, home) = loopback_pair("held-stopped").await;
+    let exposer = tightbeam::tunnel::Router::new(nauthy::Gate::rooted(
+        TestRoot::seeded(1).verify_key(),
+        store,
+    ))
+    .service(service(), Stops)
+    .unwrap()
+    .expose()
+    .unwrap();
+    let cancel = tightbeam::tunnel::CancellationToken::new();
+    let exercise = async {
+        let peers = Peers::new(&node);
+        let place = peers.place(host.node_id(), Main).unwrap();
+        let (_, mut writer, mut reader) = peers
+            .open_placed(place, Hints::NONE, service(), Standing(Some(badge.clone())))
+            .await
+            .unwrap();
+        // The handler has dropped its read half once its own end arrives.
+        let mut back = Vec::new();
+        reader.read_to_end(&mut back).await.unwrap();
+        // Past what the far side could hold, so the stop reaches the writer before any acknowledgement.
+        let _ = writer.write_all(&vec![7; 4 * 1024 * 1024]).await;
+        let _ = writer.shutdown().await;
+        let delivered = tokio::time::timeout(
+            Duration::from_secs(10),
+            bifrost::WriteEnd::delivered(writer),
+        )
+        .await
+        .expect("delivered to a stopped reader must end, not hang");
+        assert_eq!(
+            delivered.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::BrokenPipe),
+            "a stream its far side stopped reading is never delivered"
+        );
+        cancel.cancel();
+    };
+    let ((), ()) = tokio::join!(exposer.run(&host, cancel.clone()), exercise);
+    node.close().await;
+    host.close().await;
+    std::fs::remove_dir_all(home.dir()).unwrap();
+}
+
+/// A handler that reads nothing until told to, then reads its stream to the end and keeps what it read.
+#[derive(Clone, Default)]
+struct Sink {
+    go: std::sync::Arc<tokio::sync::Notify>,
+    done: std::sync::Arc<tokio::sync::Notify>,
+    taken: std::sync::Arc<std::sync::Mutex<(Vec<u8>, bool)>>,
+}
+
+impl Sink {
+    /// What the handler read, and whether its read ended cleanly.
+    fn taken(&self) -> (Vec<u8>, bool) {
+        self.taken.lock().unwrap().clone()
+    }
+}
+
+impl tightbeam::tunnel::Handler for Sink {
+    type Exposure = tightbeam::open_policy::Never;
+
+    async fn serve(
+        &self,
+        _served: tightbeam::tunnel::Served<Self>,
+        mut writer: tightbeam::tunnel::BoxWrite,
+        mut reader: tightbeam::tunnel::BoxRead,
+    ) -> Result<(), tightbeam::tunnel::ServeError> {
+        self.go.notified().await;
+        let mut got = Vec::new();
+        let clean = reader.read_to_end(&mut got).await.is_ok();
+        *self.taken.lock().unwrap() = (got, clean);
+        self.done.notify_one();
+        let _ = writer.shutdown().await;
+        Ok(())
+    }
+}
+
+/// A handler that drops its read half unread and ends its own direction.
+struct Stops;
+
+impl tightbeam::tunnel::Handler for Stops {
+    type Exposure = tightbeam::open_policy::Never;
+
+    async fn serve(
+        &self,
+        _served: tightbeam::tunnel::Served<Self>,
+        mut writer: tightbeam::tunnel::BoxWrite,
+        reader: tightbeam::tunnel::BoxRead,
+    ) -> Result<(), tightbeam::tunnel::ServeError> {
+        drop(reader);
+        writer.shutdown().await?;
+        Ok(())
+    }
+}
+
 #[test]
 fn seventeen_hints_do_not_type() {
     assert_eq!(Hints::new([]), Ok(Hints::NONE));
