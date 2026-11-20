@@ -87,7 +87,8 @@ pub(crate) struct Unobservable;
 
 impl<C: Clone> Observations<C> {
     /// The set for a run whose epoch is `epoch`, with room for `capacity` records, the run's reach
-    /// slots. The room is taken now, so recording an Open never allocates.
+    /// slots. The room is taken now, so recording an Open never grows the records; each reservation
+    /// allocates only its own wakeup.
     ///
     /// # Errors
     ///
@@ -116,7 +117,8 @@ impl<C: Clone> Observations<C> {
         let ticket = self.next.get().ok_or(Unobservable)?;
         self.next.set(ticket.next());
         let mut records = self.records.borrow_mut();
-        // Within the room taken at the start, so the push below never allocates.
+        // Within the room taken at the start, so the push below never grows the records. The record's
+        // wakeup is the one allocation a reservation makes, after the room is checked.
         if records.len() == records.capacity() {
             return Err(Unobservable);
         }

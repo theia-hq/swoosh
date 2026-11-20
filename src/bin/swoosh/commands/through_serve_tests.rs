@@ -11,7 +11,7 @@ use swoosh::serve::control_codec::{
 };
 use swoosh::transport::ReachArgs;
 
-use super::{Busy, Dial, Moot, Skew, StandingEnded, ThisMachine, after_a_cut};
+use super::{Busy, Dial, Moot, OneStream, Skew, StandingEnded, Stream, ThisMachine, after_a_cut};
 use crate::commands::connect::{ConnectionLost, Machine};
 
 /// The key of `me/nas`.
@@ -228,4 +228,258 @@ async fn a_refusal_through_serve_prints_the_own_binds_line() {
             .await,
     );
     assert!(!line.contains('\u{1b}'), "{line}");
+}
+
+/// A home with this process recorded as its `serve` and the control socket bound, as `serve` binds it:
+/// a verb run here finds a resident, and the test answers as that resident.
+struct Served {
+    home: swoosh::home::Home,
+    dir: std::path::PathBuf,
+    listener: Option<std::os::unix::net::UnixListener>,
+    _lock: swoosh::serve::InstanceLock,
+}
+
+impl Served {
+    async fn new(tag: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("swoosh-ts-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = swoosh::home::Home::resolve(Some(dir.clone())).unwrap();
+        let root = swoosh::home::runtime_root().unwrap();
+        // Other tests in this binary build their socket's leaf with `create_dir_all`, which leaves a fresh
+        // shared root at the umask's mode; `acquire_single` rightly refuses a loosened root it did not make.
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (lock, listener) = swoosh::serve::acquire_single(&home, &root).await.unwrap();
+        Self {
+            home,
+            dir,
+            listener: Some(listener),
+            _lock: lock,
+        }
+    }
+
+    /// The bound socket, as the resident takes it.
+    fn listener(&mut self) -> std::os::unix::net::UnixListener {
+        self.listener.take().unwrap()
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Open `me/nas`'s `ssh` through the `serve` at `served`, the test answering as the resident with an
+/// Attached reading `info`. Returns the stream and the resident's end of its connection.
+async fn attached(
+    served: &mut Served,
+    info: bifrost::ConnInfo,
+) -> (Stream, tokio::net::UnixStream) {
+    use swoosh::serve::control_codec::{Attached, Observation, OpenLane, Request, Response};
+
+    let listener = served.listener();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let service = "ssh".parse().unwrap();
+    let reach = reach(&["forward"]);
+    let mut pipe = Dial {
+        machine: &peer,
+        service: &service,
+        slip: None,
+        reach: &reach,
+        contacts: &contacts,
+    };
+    let (socket, connected) = super::serve(&served.home).await.unwrap().unwrap();
+    let resident = async {
+        let (mut conn, _) = listener.accept().await.unwrap();
+        Request::read(&mut conn).await.unwrap();
+        Response::Attached(Attached::from(info))
+            .write(&mut conn)
+            .await
+            .unwrap();
+        conn
+    };
+    let (stream, conn) = tokio::join!(
+        pipe.open(&socket, connected, OpenLane::Main, Observation::Unobserved),
+        resident
+    );
+    (stream.unwrap(), conn)
+}
+
+fn direct() -> bifrost::ConnInfo {
+    bifrost::ConnInfo {
+        path: bifrost::Path::Direct,
+        rtt: None,
+        remote: None,
+    }
+}
+
+/// Through `serve`, `delivered` writes no End and never resolves: the word that the peer holds the upload
+/// is Landed, on the read half. It holds the half while it waits, so the direction closes, without End,
+/// only once the caller drops the wait.
+#[tokio::test]
+async fn delivered_through_serve_writes_no_end_and_waits_for_its_caller() {
+    use bifrost::{Session as _, WriteEnd as _};
+    use tokio::io::AsyncReadExt as _;
+
+    let mut served = Served::new("delivered").await;
+    let (stream, mut conn) = attached(&mut served, direct()).await;
+    let session = OneStream::new(nas(), stream.info, stream.read, stream.write);
+    let (upload, _download) = session.open_bi().await.unwrap();
+    let mut delivered = Box::pin(upload.delivered());
+    assert!(futures::poll!(delivered.as_mut()).is_pending());
+    tokio::task::yield_now().await;
+    let mut buf = [0; 16];
+    assert!(
+        matches!(conn.try_read(&mut buf), Err(error) if error.kind() == tokio::io::ErrorKind::WouldBlock),
+        "the resident heard something"
+    );
+    drop(delivered);
+    let mut rest = Vec::new();
+    conn.read_to_end(&mut rest).await.unwrap();
+    assert!(
+        rest.is_empty(),
+        "an End or Data reached the resident: {rest:?}"
+    );
+}
+
+/// `serve` gave one stream: `OneStream` hands it out once and refuses every other, and reports the
+/// machine asked for and the path as the stream attached.
+#[tokio::test]
+async fn one_stream_hands_out_its_stream_once() {
+    use bifrost::Session as _;
+
+    let mut served = Served::new("onestream").await;
+    let (stream, _conn) = attached(&mut served, direct()).await;
+    let session = OneStream::new(nas(), stream.info, stream.read, stream.write);
+    assert_eq!(session.peer(), nas());
+    assert_eq!(session.conn_info(), direct());
+    assert!(matches!(
+        session.accept_bi().await,
+        Err(bifrost::Error::Closed)
+    ));
+    assert!(session.open_bi().await.is_ok());
+    assert!(matches!(
+        session.open_bi().await,
+        Err(bifrost::Error::Closed)
+    ));
+}
+
+/// A pick-up that finds no renewal: this home has no standing to renew.
+struct NoRenewal;
+
+impl swoosh::renewal::Fetch for NoRenewal {
+    async fn fetch(
+        &self,
+        _peer: NodeId,
+    ) -> Result<Option<nauthy::Link>, swoosh::renewal::FetchError> {
+        Ok(None)
+    }
+}
+
+/// `speed` through a running `serve`, end to end: the verb's Open reaches the real resident on this
+/// home's socket, the resident dials the machine on a connection of its own, measure's responder there
+/// answers each mode, and the run's Finish reads the path through the same socket. Driven on an 8 MiB
+/// thread as the gated measure proof is: over mem both ends' transfer buffers share one thread's stack.
+#[test]
+fn speed_runs_through_the_resident_against_measures_responder() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(speed_through_serve()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn speed_through_serve() {
+    use bifrost::{NoDiscovery, Node};
+    use bifrost_mem::MemTransport;
+    use clap::Parser as _;
+    use tightbeam::tunnel::{self, CancellationToken, Router};
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        speed: crate::commands::speed::SpeedCmd,
+    }
+
+    // The machine: `speed` opened to anyone, so a dial presenting nothing is admitted.
+    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    let host_id = host.node_id();
+    let denylist = std::env::temp_dir().join(format!("swoosh-ts-deny-{}", std::process::id()));
+    let _ = std::fs::remove_file(&denylist);
+    let denylist = nauthy::Denylist::load(denylist).unwrap();
+    tokio::task::spawn_local(async move {
+        let public: Vec<nauthy::Service> = vec!["speed".parse().unwrap()];
+        let gate = tunnel::resolve_gate(Some(host_id), denylist).unwrap();
+        swoosh::serve::diagnostics(Router::new(gate), &public)
+            .unwrap()
+            .expose()
+            .unwrap()
+            .run(&host, CancellationToken::new())
+            .await;
+    });
+
+    // This machine's `serve`, on this home's socket.
+    let mut served = Served::new("speed").await;
+    let listener = served.listener();
+    let node = Node::new(MemTransport::bind(), NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
+    let renewal = swoosh::renewal::OpenRenewal::new(&served.home, &NoRenewal);
+    let opener =
+        swoosh::serve::Opener::new(&peers, &renewal, &served.home, node.node_id()).unwrap();
+    let resident = std::sync::Arc::new(swoosh::serve::Resident::new(
+        node.node_id(),
+        None,
+        tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),
+        swoosh::serve_toml::LiveServeToml::load(&served.home).unwrap(),
+        CancellationToken::new(),
+        std::sync::Arc::default(),
+    ));
+
+    let mut contacts = Contacts::default();
+    contacts.save(&"me/nas".parse().unwrap(), host_id).unwrap();
+    // Byte-bounded runs end on the count, so only a time-bounded upload waits on the verb's End for its
+    // reply: that leg runs a real 50 ms window, since measure reads the wall clock.
+    let runs = async {
+        for argv in [
+            ["--down", "-n", "262144"],
+            ["--up", "-n", "262144"],
+            ["--bidir", "-n", "262144"],
+            ["--up", "-t", "0.05"],
+        ] {
+            let cmd = Wrap::try_parse_from(["x", "me/nas"].into_iter().chain(argv))
+                .unwrap()
+                .speed;
+            let machine = cmd.peer.machine(&contacts).unwrap();
+            let routed = tokio::time::timeout(
+                core::time::Duration::from_secs(10),
+                cmd.through_serve(&served.home, &machine, None, &contacts),
+            )
+            .await
+            .expect("the run never ended")
+            .unwrap();
+            assert!(
+                matches!(routed, super::Routed::Ran(Ok(()))),
+                "not a run through serve that measured"
+            );
+        }
+    };
+    tokio::select! {
+        ended = resident.serve(listener, &opener) => panic!("the resident stopped: {ended:?}"),
+        () = runs => {}
+    }
 }

@@ -78,7 +78,7 @@ ed01f62wtyapessv via iroh: mixed (direct to 143.105.x.x:41125 and relayed)
   5 sent, 5 received, 0% loss
   rtt min/avg/max/mdev = 193.685/233.854/306.825/45.510 ms
 $ swoosh speed $SERVER --down -t 3
-speed test to ed01f62wtyapessv via iroh (down)
+speed test to ed01f62wtyapessv (down)
     1.0s  0.01 MiB/s
     2.0s  0.17 MiB/s
     3.0s  0.61 MiB/s

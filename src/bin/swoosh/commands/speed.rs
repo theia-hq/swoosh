@@ -15,10 +15,11 @@
 
 use core::convert::Infallible;
 use core::time::Duration;
+use std::io::{self, Write};
 use std::rc::Rc;
 use std::time::Instant;
 
-use bifrost::{Discovery, Node, Session, Transport};
+use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::{ArgGroup, Args};
 use measure::{
     Limit, MethodRefusal, Mode, Progress, ProtocolError, Refusal, SpeedReport, Speedtest,
@@ -29,7 +30,7 @@ use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
 use swoosh::learn::Admitted;
-use swoosh::observation::{Observer, Receipt};
+use swoosh::observation::{Observed, Observer, PathSource, Receipt};
 use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
 use swoosh::serve::control_codec::{Observation, OpenLane};
@@ -168,7 +169,7 @@ impl SpeedCmd {
         // Its first admitted stream tells the composition root it may ask which root vouches for the machine.
         let session = admitted.watch(session, connector);
         let label = machine.label();
-        println!("speed test to {label} ({})", mode.label());
+        println!("{}", title(&label, mode));
         let outcome = transfer(mode, limit, &session, core::future::pending()).await;
         // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but refused the
         // run, so name what refused it (a missing method, a rate limit, a busy service) rather than
@@ -195,8 +196,7 @@ impl SpeedCmd {
 
         // Read the settled path now: the transfer gave hole-punching time to land. The composition root
         // closes the node once anything still running beside the verb has ended.
-        let path = reach::conn_path(&session.conn_info()).to_string();
-        println!("path: {path}");
+        println!("{}", path_line(&session.conn_info()));
         print_totals(&report);
         Ok(())
     }
@@ -245,34 +245,31 @@ impl SpeedCmd {
             eyre::bail!("internal: an observed open through serve came back without its reference");
         };
         let (mode, label) = (self.mode(), machine.label());
-        println!("speed test to {label} ({})", mode.label());
+        println!("{}", title(&label, mode));
         let socket = Rc::new(socket);
-        let mut observer = Observer::new(
+        let observer = Observer::new(
             Receipt::new(reference, Rc::clone(&socket)),
             stream.info.clone(),
         );
         let session = OneStream::new(machine.key(), stream.info, stream.read, stream.write);
-        let outcome = transfer(mode, self.limit(), &session, observer.watch()).await;
+        let (outcome, observed) = observed_run(mode, self.limit(), &session, observer).await;
         let report = match outcome {
             Ok(report) => report,
             Err(ProtocolError::Refused(refusal)) => {
+                log_path(observed);
                 let line = refusal_line(&label, &refusal);
                 return Ok(Routed::Ran(Err(eyre::eyre!("{line}"))));
             }
             Err(error) => {
+                log_path(observed);
                 let own = eyre::eyre!("{}", failed_line(&error));
                 return Ok(Routed::Ran(Err(dial.cut_or(&socket, own).await)));
             }
         };
-        // The run is over: the Finish reads its connection's path now. A path that cannot be read leaves
-        // the measured run as it is, and is never stood in for by an earlier sample.
-        let observed = observer.finish().await;
-        if let Some(earlier) = &observed.earlier {
-            tracing::debug!(%earlier, "a sample of the run's path failed");
-        }
-        match observed.last {
-            Ok(info) => println!("path: {}", reach::conn_path(&info)),
-            Err(error) => tracing::warn!(%error, "the run's final path could not be read"),
+        // A path that cannot be read leaves the measured run as it is: the exit stays the run's.
+        if let Err(error) = print_path(observed, &mut io::stdout().lock(), &mut io::stderr().lock())
+        {
+            return Ok(Routed::Ran(Err(error.into())));
         }
         print_totals(&report);
         Ok(Routed::Ran(Ok(())))
@@ -296,6 +293,57 @@ impl SpeedCmd {
             (None, Some(secs)) => Limit::ByTime(Duration::from_secs_f64(secs)),
             (None, None) => Limit::ByTime(Duration::from_secs(5)),
         }
+    }
+}
+
+/// The line a run prints first, on both paths: the machine and the mode, never the transport, since
+/// through `serve` the verb does not know which one carried the run.
+fn title(label: &str, mode: Mode) -> String {
+    format!("speed test to {label} ({})", mode.label())
+}
+
+/// The path row, from a reading of the run's own connection, on both paths.
+fn path_line(info: &ConnInfo) -> String {
+    format!("path: {}", reach::conn_path(info))
+}
+
+/// Run the transfer over `session` beside `observer`, then Finish the observer's receipt whatever the
+/// run's outcome, so the resident lets the reference go now rather than at the end of its retention. The
+/// Finish is bounded as the observer bounds it: what is left of its spacing, then one query's deadline.
+async fn observed_run<P: PathSource, S: Session>(
+    mode: Mode,
+    limit: Limit,
+    session: &S,
+    mut observer: Observer<P>,
+) -> (Result<SpeedReport, ProtocolError>, Observed) {
+    let outcome = transfer(mode, limit, session, observer.watch()).await;
+    (outcome, observer.finish().await)
+}
+
+/// Print the path row of a run through `serve` from its final observation, the Finish's, to `out`. When
+/// that failed there is no row; `err` carries a warning, and the run's own result and exit stay as they
+/// are. A sample that failed earlier is never shown: it goes to the log, at debug.
+fn print_path(observed: Observed, out: &mut impl Write, err: &mut impl Write) -> io::Result<()> {
+    if let Some(earlier) = &observed.earlier {
+        tracing::debug!(%earlier, "a sample of the run's path failed");
+    }
+    match observed.last {
+        Ok(info) => writeln!(out, "{}", path_line(&info)),
+        Err(error) => {
+            tracing::debug!(%error, "the run's final path could not be read");
+            writeln!(err, "warning: could not read the path of this run")
+        }
+    }
+}
+
+/// Log the observation of a run through `serve` that failed: the run's own error is the one line it
+/// prints.
+fn log_path(observed: Observed) {
+    if let Some(earlier) = &observed.earlier {
+        tracing::debug!(%earlier, "a sample of the failed run's path failed");
+    }
+    if let Err(error) = &observed.last {
+        tracing::debug!(%error, "the failed run's final path could not be read");
     }
 }
 

@@ -291,8 +291,9 @@ impl bifrost::Session for OneStream {
     }
 }
 
-/// The write half of a [`OneStream`]'s stream: Data frames, and End at its `shutdown`. Aborted, it
-/// closes the direction with no End, which `serve` passes on to the peer as a reset.
+/// The write half of a [`OneStream`]'s stream: Data frames, and End at its `shutdown`. Aborted, or
+/// dropped before `shutdown`, it closes the direction with no End, which `serve` passes on to the peer as
+/// a reset. Its `delivered` never resolves: the word that the peer holds the upload is the read half's.
 pub struct Upload(Option<OpenWrite>);
 
 impl Upload {
@@ -338,17 +339,15 @@ impl WriteEnd for Upload {
         }
     }
 
-    /// Ends the upload with End, then fails: through `serve` the word that the peer holds the upload is
-    /// Landed, which arrives on the read half ([`OpenRead::landed`]), out of this half's reach.
+    /// Never resolves: through `serve` the word that the peer holds the upload is Landed, which arrives
+    /// on the read half ([`OpenRead::landed`]), out of this half's reach. Pending forever is the answer
+    /// the transport contract gives for a peer that never takes the bytes, so a caller's own bound ends
+    /// the wait; any error here would claim a reset, a stopped reader or a lost session that did not
+    /// happen. It writes no End, and it holds the half until the wait is dropped, so the direction ends
+    /// as the caller left it: cleanly after its `shutdown`, else as a cut once the caller gives up.
     async fn delivered(self) -> io::Result<()> {
-        let Some(mut write) = self.0 else {
-            return Err(io::ErrorKind::ConnectionReset.into());
-        };
-        tokio::io::AsyncWriteExt::shutdown(&mut write).await?;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the upload's delivery through swoosh serve is heard on the read half",
-        ))
+        let _held = self;
+        core::future::pending().await
     }
 }
 

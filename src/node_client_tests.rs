@@ -1225,3 +1225,101 @@ async fn an_attached_reference_must_match_what_the_open_asked_for() {
         }
     }
 }
+
+/// A resident's Path answers for one reference: a direct sample for it, Unavailable for any other. It
+/// keeps every request it was asked, to show the request crossed the socket as sent.
+struct OneReference {
+    known: crate::serve::control_codec::PathRef,
+    asked: std::sync::Mutex<Vec<crate::serve::control_codec::PathRequest>>,
+}
+
+impl crate::serve::Opens for OneReference {
+    async fn open<R, W>(
+        &self,
+        _open: crate::serve::control_codec::OpenRequest,
+        _from_client: R,
+        _to_client: W,
+        _gone: crate::serve::ClientGone,
+        _control: tokio::sync::SemaphorePermit<'_>,
+    ) where
+        R: tokio::io::AsyncBufRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+    }
+
+    fn path(
+        &self,
+        request: crate::serve::control_codec::PathRequest,
+    ) -> crate::serve::control_codec::PathReply {
+        use crate::serve::control_codec::PathReply;
+
+        self.asked.lock().unwrap().push(request);
+        if request.reference == self.known {
+            PathReply::Sample(direct())
+        } else {
+            PathReply::Unavailable
+        }
+    }
+
+    async fn drive(&self) -> core::convert::Infallible {
+        core::future::pending().await
+    }
+}
+
+fn direct() -> bifrost::ConnInfo {
+    bifrost::ConnInfo {
+        path: bifrost::Path::Direct,
+        rtt: Some(core::time::Duration::from_micros(1500)),
+        remote: Some("192.0.2.7:4433".parse().unwrap()),
+    }
+}
+
+/// `path` over a real, attributed socket: the request reaches the resident as it was sent, each action
+/// and reference intact, and the resident's Sample and Unavailable come back as answers, not errors.
+#[tokio::test]
+async fn path_crosses_the_socket_and_reads_the_residents_answer() {
+    use crate::serve::control_codec::{Epoch, PathAction, PathRef, PathReply, PathRequest, Ticket};
+
+    let leaf = scratch("path", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let epoch = Epoch::draw(&mut rand::rngs::OsRng).unwrap();
+    let known = PathRef::new(epoch, Ticket::FIRST);
+    let other = PathRef::new(epoch, Ticket::FIRST.next().unwrap());
+    let answers: &'static OneReference = Box::leak(Box::new(OneReference {
+        known,
+        asked: std::sync::Mutex::default(),
+    }));
+    let resident = Arc::new(test_resident(CancellationToken::new(), &leaf));
+    let serving = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move { this.serve(listener, answers).await }
+    });
+    let client = resolve_socket(socket).expect("the bound socket resolves");
+
+    let ask = |reference, action| PathRequest { reference, action };
+    assert_eq!(
+        client.path(ask(known, PathAction::Sample)).await.unwrap(),
+        PathReply::Sample(direct())
+    );
+    assert_eq!(
+        client.path(ask(known, PathAction::Finish)).await.unwrap(),
+        PathReply::Sample(direct())
+    );
+    assert_eq!(
+        client.path(ask(other, PathAction::Sample)).await.unwrap(),
+        PathReply::Unavailable
+    );
+    assert_eq!(
+        *answers.asked.lock().unwrap(),
+        [
+            ask(known, PathAction::Sample),
+            ask(known, PathAction::Finish),
+            ask(other, PathAction::Sample),
+        ]
+    );
+
+    serving.abort();
+    let _ = std::fs::remove_dir_all(&leaf);
+}
