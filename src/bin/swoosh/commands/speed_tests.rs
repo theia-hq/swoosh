@@ -4,8 +4,9 @@
 
 use bifrost::RefusalDetail;
 use measure::{MethodRefusal, Refusal};
+use swoosh::serve::control_codec::PathReply;
 
-use super::{failed_line, log_path, observed_run, path_line, print_path, refusal_line, title};
+use super::{failed_line, observed, path_line, print_path, refusal_line, title};
 
 /// A method refusal carrying `detail`.
 fn method(code: MethodRefusal, detail: &str) -> Refusal {
@@ -291,46 +292,6 @@ fn the_path_row_through_serve_is_the_finishs_or_a_warning() {
             String::new()
         )
     );
-    // A failed run prints only its own error: its observation goes to the log.
-    log_path(Observed {
-        last: Err(ObservationError::Unavailable),
-        earlier: Some(ObservationError::Unavailable),
-    });
-}
-
-/// A resident that answers every query with a sample and keeps the actions it was asked.
-#[derive(Default)]
-struct Recorded(core::cell::RefCell<Vec<swoosh::serve::control_codec::PathAction>>);
-
-impl swoosh::observation::PathSource for Recorded {
-    fn path(
-        &self,
-        request: swoosh::serve::control_codec::PathRequest,
-    ) -> impl Future<
-        Output = Result<
-            swoosh::serve::control_codec::PathReply,
-            swoosh::serve::control_codec::ControlError,
-        >,
-    > {
-        self.0.borrow_mut().push(request.action);
-        core::future::ready(Ok(
-            swoosh::serve::control_codec::PathReply::Sample(direct()),
-        ))
-    }
-}
-
-/// An observed Open's reference, read from an Attached as the client reads one.
-async fn reference() -> swoosh::serve::control_codec::PathRef {
-    use swoosh::serve::control_codec::Response;
-
-    let mut frame = b"SWC1\x06\x00\x1c\x01".to_vec();
-    frame.extend_from_slice(&[7; 16]);
-    frame.extend_from_slice(&1_u64.to_be_bytes());
-    frame.extend_from_slice(&[0, 0, 0]);
-    match Response::read_open(&mut frame.as_slice()).await.unwrap() {
-        Response::Attached(attached) => attached.reference.unwrap(),
-        other => panic!("not attached: {other:?}"),
-    }
 }
 
 /// A session whose one stream open fails with `error`, the way a refused or broken run ends.
@@ -363,36 +324,68 @@ impl bifrost::Session for Failing {
     }
 }
 
-/// A run through `serve` that is refused, or that breaks, still Finishes its receipt, so the resident
-/// lets the reference go at once rather than at the end of its retention.
+/// A run through `serve` that is refused, or that breaks, prints its error first and Finishes its
+/// receipt after, in the run's own task: the error never waits on a reading it does not show, and the
+/// resident lets the reference go at once rather than at the end of its retention.
 #[tokio::test(start_paused = true)]
-async fn a_refused_or_broken_run_still_finishes_its_receipt() {
-    use swoosh::observation::{Observer, Receipt};
-    use swoosh::serve::control_codec::PathAction;
+async fn a_failed_run_prints_its_error_then_finishes_its_receipt() {
+    use crate::commands::through_serve::Reported;
+    use crate::commands::through_serve::tests::Events;
 
-    for (error, refused) in [
-        (bifrost::Error::Refused(bifrost::Refusal::NotAdmitted), true),
-        (bifrost::Error::Closed, false),
+    for (error, line) in [
+        (
+            bifrost::Error::Refused(bifrost::Refusal::Unavailable {
+                detail: RefusalDetail::bounded("busy"),
+            }),
+            "stderr: error: me/nas: reached, but refused: unavailable: busy",
+        ),
+        (bifrost::Error::Closed, "stderr: error: cut"),
     ] {
-        let source = std::rc::Rc::new(Recorded::default());
-        let observer = Observer::new(
-            Receipt::new(reference().await, std::rc::Rc::clone(&source)),
-            bifrost::ConnInfo::default(),
-        );
+        let events = Events::answering([PathReply::Sample(direct())]);
         let session = Failing(core::cell::RefCell::new(Some(error)));
-        let (outcome, observed) = observed_run(
+        let ended = observed(
             measure::Mode::Down,
             measure::Limit::ByBytes(1),
             &session,
-            observer,
+            events.observer(direct()).await,
+            "me/nas",
+            async |_own| eyre::eyre!("cut"),
+            &mut Vec::new(),
+            &mut events.clone(),
         )
         .await;
-        assert_eq!(
-            matches!(outcome, Err(measure::ProtocolError::Refused(_))),
-            refused
-        );
-        assert!(outcome.is_err());
-        assert_eq!(observed.last.unwrap(), direct());
-        assert_eq!(*source.0.borrow(), [PathAction::Finish]);
+        assert!(ended.unwrap_err().is::<Reported>());
+        assert_eq!(events.log(), [line, "Finish"]);
     }
+}
+
+/// A failed run gives its Finish what is left of the spacing plus one second, and no more: a resident
+/// that takes the query and stalls holds the exit no longer. A successful run keeps the full bound.
+#[tokio::test(start_paused = true)]
+async fn a_failed_run_exits_within_a_second_of_a_stalled_finish() {
+    use crate::commands::through_serve::Reported;
+    use crate::commands::through_serve::tests::Events;
+
+    let events = Events::stalling();
+    let session = Failing(core::cell::RefCell::new(Some(bifrost::Error::Closed)));
+    let started = tokio::time::Instant::now();
+    // Boxed: a speed run's transfer buffers overflow a test thread's stack.
+    let ended = tokio::time::timeout(
+        core::time::Duration::from_secs(60),
+        Box::pin(observed(
+            measure::Mode::Down,
+            measure::Limit::ByBytes(1),
+            &session,
+            events.observer(direct()).await,
+            "me/nas",
+            async |own| own,
+            &mut Vec::new(),
+            &mut events.clone(),
+        )),
+    )
+    .await
+    .expect("the failed run exits");
+    assert!(ended.unwrap_err().is::<Reported>());
+    assert_eq!(started.elapsed(), core::time::Duration::from_secs(1));
+    assert_eq!(events.log().last().map(String::as_str), Some("Finish"));
 }

@@ -30,14 +30,14 @@ use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
 use swoosh::learn::Admitted;
-use swoosh::observation::{Observed, Observer, PathSource, Receipt};
+use swoosh::observation::{Observed, Observer, PathSource};
 use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
-use swoosh::serve::control_codec::{Observation, OpenLane};
+use swoosh::serve::control_codec::OpenLane;
 use swoosh::transport::{self, ReachArgs};
 
 use crate::commands::machine;
-use crate::commands::through_serve::{self, Dial, OneStream, Routed};
+use crate::commands::through_serve::{self, Dial, Routed};
 
 /// How often a running speed test prints its current rate. One second matches iperf's default report
 /// interval and reads as a live, once-a-second heartbeat without flooding the terminal.
@@ -229,50 +229,30 @@ impl SpeedCmd {
         };
         // Isolated, as by own bind, and observed: the rate and the path it prints belong to this run's
         // own connection, and the path is read there, through `serve`, after the run.
-        let stream = match dial
-            .open(
-                &socket,
-                connected,
-                OpenLane::Isolated,
-                Observation::Observed,
-            )
-            .await
+        let socket = Rc::new(socket);
+        let (session, observer) = match dial.observed(&socket, connected, OpenLane::Isolated).await
         {
-            Ok(stream) => stream,
-            Err(report) => return Ok(Routed::Ran(Err(report))),
-        };
-        let Some(reference) = stream.reference else {
-            eyre::bail!("internal: an observed open through serve came back without its reference");
+            Ok(opened) => opened,
+            Err(unattached) => {
+                return Ok(Routed::Ran(Err(dial
+                    .unattached(unattached, &*socket)
+                    .await)));
+            }
         };
         let (mode, label) = (self.mode(), machine.label());
         println!("{}", title(&label, mode));
-        let socket = Rc::new(socket);
-        let observer = Observer::new(
-            Receipt::new(reference, Rc::clone(&socket)),
-            stream.info.clone(),
-        );
-        let session = OneStream::new(machine.key(), stream.info, stream.read, stream.write);
-        let (outcome, observed) = observed_run(mode, self.limit(), &session, observer).await;
-        let report = match outcome {
-            Ok(report) => report,
-            Err(ProtocolError::Refused(refusal)) => {
-                log_path(observed);
-                let line = refusal_line(&label, &refusal);
-                return Ok(Routed::Ran(Err(eyre::eyre!("{line}"))));
-            }
-            Err(error) => {
-                log_path(observed);
-                let own = eyre::eyre!("{}", failed_line(&error));
-                return Ok(Routed::Ran(Err(dial.cut_or(&socket, own).await)));
-            }
-        };
-        // A path that cannot be read leaves the measured run as it is: the exit stays the run's.
-        if let Err(error) = print_path(observed, &mut io::stdout().lock(), &mut io::stderr().lock())
-        {
-            return Ok(Routed::Ran(Err(error.into())));
-        }
-        print_totals(&report);
-        Ok(Routed::Ran(Ok(())))
+        let ended = observed(
+            mode,
+            self.limit(),
+            &session,
+            observer,
+            &label,
+            async |own| dial.cut_or(&socket, own).await,
+            &mut io::stdout(),
+            &mut io::stderr(),
+        )
+        .await;
+        Ok(Routed::Ran(ended))
     }
 
     /// What to measure: `--up`, `--bidir`, or download (the group makes more than one impossible).
@@ -307,43 +287,48 @@ fn path_line(info: &ConnInfo) -> String {
     format!("path: {}", reach::conn_path(info))
 }
 
-/// Run the transfer over `session` beside `observer`, then Finish the observer's receipt whatever the
-/// run's outcome, so the resident lets the reference go now rather than at the end of its retention. The
-/// Finish is bounded as the observer bounds it: what is left of its spacing, then one query's deadline.
-async fn observed_run<P: PathSource, S: Session>(
+/// The transfer over `session`, one stream through `serve`, beside `observer`, printing on `out` and
+/// `err`. A measured run is Finished and then prints its path row and totals; a failed run prints its
+/// error first and is Finished after. `cut` turns a broken run's own line into the one it prints, asking
+/// `serve` whether it stopped.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the run, its observer and the lines it prints to"
+)]
+async fn observed<P: PathSource, S: Session>(
     mode: Mode,
     limit: Limit,
     session: &S,
     mut observer: Observer<P>,
-) -> (Result<SpeedReport, ProtocolError>, Observed) {
-    let outcome = transfer(mode, limit, session, observer.watch()).await;
-    (outcome, observer.finish().await)
+    label: &str,
+    cut: impl AsyncFnOnce(eyre::Report) -> eyre::Report,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> eyre::Result<()> {
+    let report = match transfer(mode, limit, session, observer.watch()).await {
+        Ok(report) => report,
+        Err(ProtocolError::Refused(refusal)) => {
+            let line = eyre::eyre!("{}", refusal_line(label, &refusal));
+            return Err(through_serve::failed(line, observer, err).await);
+        }
+        Err(error) => {
+            let line = cut(eyre::eyre!("{}", failed_line(&error))).await;
+            return Err(through_serve::failed(line, observer, err).await);
+        }
+    };
+    // A path that cannot be read leaves the measured run as it is: the exit stays the run's.
+    print_path(observer.finish().await, out, err)?;
+    print_totals(&report);
+    Ok(())
 }
 
 /// Print the path row of a run through `serve` from its final observation, the Finish's, to `out`. When
 /// that failed there is no row; `err` carries a warning, and the run's own result and exit stay as they
-/// are. A sample that failed earlier is never shown: it goes to the log, at debug.
+/// are.
 fn print_path(observed: Observed, out: &mut impl Write, err: &mut impl Write) -> io::Result<()> {
-    if let Some(earlier) = &observed.earlier {
-        tracing::debug!(%earlier, "a sample of the run's path failed");
-    }
-    match observed.last {
-        Ok(info) => writeln!(out, "{}", path_line(&info)),
-        Err(error) => {
-            tracing::debug!(%error, "the run's final path could not be read");
-            writeln!(err, "warning: could not read the path of this run")
-        }
-    }
-}
-
-/// Log the observation of a run through `serve` that failed: the run's own error is the one line it
-/// prints.
-fn log_path(observed: Observed) {
-    if let Some(earlier) = &observed.earlier {
-        tracing::debug!(%earlier, "a sample of the failed run's path failed");
-    }
-    if let Err(error) = &observed.last {
-        tracing::debug!(%error, "the failed run's final path could not be read");
+    match through_serve::final_path(observed, err)? {
+        Some(info) => writeln!(out, "{}", path_line(&info)),
+        None => Ok(()),
     }
 }
 

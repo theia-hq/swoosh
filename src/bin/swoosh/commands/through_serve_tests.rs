@@ -1,17 +1,23 @@
 //! The lines `forward <machine> <service> -` prints when it runs through `serve`, pinned to their ruled
-//! words.
+//! words, and the stand-ins the observed verbs' tests run against.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use bifrost::{NodeId, RefusalDetail};
+use core::cell::RefCell;
+use std::collections::VecDeque;
+use std::rc::Rc;
+
+use bifrost::{ConnInfo, NodeId, RefusalDetail};
 use swoosh::contacts::Contacts;
 use swoosh::node_client::NodeClient;
+use swoosh::observation::{Observer, PathSource, Receipt};
 use swoosh::peer::{Machine as PeerMachine, Peer};
 use swoosh::serve::control_codec::{
-    ControlError, DisabledList, OpenRefusal, PeerRefusal, ServiceMenu, StatusReply,
+    ControlError, DisabledList, OpenRefusal, PathRef, PathReply, PathRequest, PeerRefusal,
+    ServiceMenu, StatusReply,
 };
 use swoosh::transport::ReachArgs;
 
-use super::{Busy, Dial, Moot, OneStream, Skew, StandingEnded, Stream, ThisMachine, after_a_cut};
+use super::{Busy, Dial, Moot, OneStream, Skew, StandingEnded, Stream, ThisMachine, serve_gone};
 use crate::commands::connect::{ConnectionLost, Machine};
 
 /// The key of `me/nas`.
@@ -27,6 +33,93 @@ fn book() -> Contacts {
 
 fn machine(contacts: &Contacts, typed: &str) -> PeerMachine {
     typed.parse::<Peer>().unwrap().machine(contacts).unwrap()
+}
+
+/// What a run through `serve` did, in order: each line it wrote to stderr, as `stderr: <line>`, and each
+/// query on its receipt, as `Sample` or `Finish`. A query reads the next of the replies it was given, or
+/// `Unavailable` once they run out.
+#[derive(Clone, Default)]
+pub(crate) struct Events {
+    log: Rc<RefCell<Vec<String>>>,
+    replies: Rc<RefCell<VecDeque<PathReply>>>,
+    /// Stderr written and not yet ended by a newline.
+    pending: Rc<RefCell<String>>,
+    /// Whether the resident takes every query and never answers it.
+    stall: bool,
+}
+
+impl Events {
+    /// A resident that answers the queries with `replies`, in order.
+    pub(crate) fn answering(replies: impl IntoIterator<Item = PathReply>) -> Self {
+        Self {
+            replies: Rc::new(RefCell::new(replies.into_iter().collect())),
+            ..Self::default()
+        }
+    }
+
+    /// A resident that takes every query and never answers it.
+    pub(crate) fn stalling() -> Self {
+        Self {
+            stall: true,
+            ..Self::default()
+        }
+    }
+
+    /// An observer of an Open that attached reading `attached`, its queries answered here.
+    pub(crate) async fn observer(&self, attached: ConnInfo) -> Observer<Self> {
+        Observer::new(
+            Receipt::new(reference().await, Rc::new(self.clone())),
+            attached,
+        )
+    }
+
+    /// What happened so far.
+    pub(crate) fn log(&self) -> Vec<String> {
+        self.log.borrow().clone()
+    }
+}
+
+impl PathSource for Events {
+    async fn path(&self, request: PathRequest) -> Result<PathReply, ControlError> {
+        self.log.borrow_mut().push(format!("{:?}", request.action));
+        if self.stall {
+            return core::future::pending().await;
+        }
+        let reply = self.replies.borrow_mut().pop_front();
+        Ok(reply.unwrap_or(PathReply::Unavailable))
+    }
+}
+
+impl std::io::Write for Events {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut pending = self.pending.borrow_mut();
+        pending.push_str(&String::from_utf8_lossy(buf));
+        while let Some(end) = pending.find('\n') {
+            let line: String = pending.drain(..=end).collect();
+            self.log
+                .borrow_mut()
+                .push(format!("stderr: {}", line.trim_end()));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An observed Open's reference, read from an Attached as the client reads one.
+async fn reference() -> PathRef {
+    use swoosh::serve::control_codec::Response;
+
+    let mut frame = b"SWC1\x06\x00\x1c\x01".to_vec();
+    frame.extend_from_slice(&[7; 16]);
+    frame.extend_from_slice(&1_u64.to_be_bytes());
+    frame.extend_from_slice(&[0, 0, 0]);
+    match Response::read_open(&mut frame.as_slice()).await.unwrap() {
+        Response::Attached(attached) => attached.reference.unwrap(),
+        other => panic!("not attached: {other:?}"),
+    }
 }
 
 /// How `report` prints at the composition root.
@@ -91,6 +184,9 @@ fn serve_lines_keep_their_ruled_words() {
 fn a_cut_with_nothing_answering_names_serve_and_otherwise_is_connection_lost() {
     let contacts = book();
     let named = Machine::of(&contacts, nas());
+    // The line a cut prints: `serve`'s own when it is gone, else the own bind's.
+    let after_a_cut =
+        |asked, named, own: eyre::Report| serve_gone(asked, named).map_or(own, eyre::Report::new);
     let stopped = after_a_cut(Err(ControlError::NoResident), &named, ConnectionLost.into());
     assert_eq!(
         printed(&stopped),
@@ -383,12 +479,9 @@ impl swoosh::renewal::Fetch for NoRenewal {
     }
 }
 
-/// `speed` through a running `serve`, end to end: the verb's Open reaches the real resident on this
-/// home's socket, the resident dials the machine on a connection of its own, measure's responder there
-/// answers each mode, and the run's Finish reads the path through the same socket. Driven on an 8 MiB
-/// thread as the gated measure proof is: over mem both ends' transfer buffers share one thread's stack.
-#[test]
-fn speed_runs_through_the_resident_against_measures_responder() {
+/// Drive `runs` on an 8 MiB thread, as the gated measure proof is: over mem both ends' transfer buffers
+/// share one thread's stack.
+fn on_a_big_stack(runs: impl AsyncFnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -397,33 +490,37 @@ fn speed_runs_through_the_resident_against_measures_responder() {
                 .build()
                 .unwrap();
             let local = tokio::task::LocalSet::new();
-            runtime.block_on(local.run_until(speed_through_serve()));
+            runtime.block_on(local.run_until(runs()));
         })
         .unwrap()
         .join()
         .unwrap();
 }
 
-async fn speed_through_serve() {
+/// A machine serving `public` to anyone, so a dial presenting nothing is admitted, and this machine's
+/// `serve` on a fresh home's socket: `runs` gets the home and a book naming the machine `name`, and the
+/// resident answers while it runs.
+async fn through_the_resident(
+    tag: &str,
+    public: &'static [&'static str],
+    name: &str,
+    runs: impl AsyncFnOnce(&swoosh::home::Home, &Contacts),
+) {
     use bifrost::{NoDiscovery, Node};
     use bifrost_mem::MemTransport;
-    use clap::Parser as _;
     use tightbeam::tunnel::{self, CancellationToken, Router};
 
-    #[derive(clap::Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        speed: crate::commands::speed::SpeedCmd,
-    }
-
-    // The machine: `speed` opened to anyone, so a dial presenting nothing is admitted.
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
-    let denylist = std::env::temp_dir().join(format!("swoosh-ts-deny-{}", std::process::id()));
+    let denylist =
+        std::env::temp_dir().join(format!("swoosh-ts-deny-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&denylist);
     let denylist = nauthy::Denylist::load(denylist).unwrap();
     tokio::task::spawn_local(async move {
-        let public: Vec<nauthy::Service> = vec!["speed".parse().unwrap()];
+        let public: Vec<nauthy::Service> = public
+            .iter()
+            .map(|service| service.parse().unwrap())
+            .collect();
         let gate = tunnel::resolve_gate(Some(host_id), denylist).unwrap();
         swoosh::serve::diagnostics(Router::new(gate), &public)
             .unwrap()
@@ -433,8 +530,7 @@ async fn speed_through_serve() {
             .await;
     });
 
-    // This machine's `serve`, on this home's socket.
-    let mut served = Served::new("speed").await;
+    let mut served = Served::new(tag).await;
     let listener = served.listener();
     let node = Node::new(MemTransport::bind(), NoDiscovery);
     let peers = swoosh::peers::Peers::new(&node);
@@ -451,35 +547,53 @@ async fn speed_through_serve() {
     ));
 
     let mut contacts = Contacts::default();
-    contacts.save(&"me/nas".parse().unwrap(), host_id).unwrap();
-    // Byte-bounded runs end on the count, so only a time-bounded upload waits on the verb's End for its
-    // reply: that leg runs a real 50 ms window, since measure reads the wall clock.
-    let runs = async {
-        for argv in [
-            ["--down", "-n", "262144"],
-            ["--up", "-n", "262144"],
-            ["--bidir", "-n", "262144"],
-            ["--up", "-t", "0.05"],
-        ] {
-            let cmd = Wrap::try_parse_from(["x", "me/nas"].into_iter().chain(argv))
-                .unwrap()
-                .speed;
-            let machine = cmd.peer.machine(&contacts).unwrap();
-            let routed = tokio::time::timeout(
-                core::time::Duration::from_secs(10),
-                cmd.through_serve(&served.home, &machine, None, &contacts),
-            )
-            .await
-            .expect("the run never ended")
-            .unwrap();
-            assert!(
-                matches!(routed, super::Routed::Ran(Ok(()))),
-                "not a run through serve that measured"
-            );
-        }
-    };
+    contacts.save(&name.parse().unwrap(), host_id).unwrap();
     tokio::select! {
         ended = resident.serve(listener, &opener) => panic!("the resident stopped: {ended:?}"),
-        () = runs => {}
+        () = runs(&served.home, &contacts) => {}
     }
+}
+
+/// `speed` through a running `serve`, end to end: the verb's Open reaches the real resident on this
+/// home's socket, the resident dials the machine on a connection of its own, measure's responder there
+/// answers each mode, and the run's Finish reads the path through the same socket.
+#[test]
+fn speed_runs_through_the_resident_against_measures_responder() {
+    on_a_big_stack(async || {
+        through_the_resident("speed", &["speed"], "me/nas", async |home, contacts| {
+            use clap::Parser as _;
+
+            #[derive(clap::Parser)]
+            struct Wrap {
+                #[command(flatten)]
+                speed: crate::commands::speed::SpeedCmd,
+            }
+
+            // Byte-bounded runs end on the count, so only a time-bounded upload waits on the verb's End
+            // for its reply: that leg runs a real 50 ms window, since measure reads the wall clock.
+            for argv in [
+                ["--down", "-n", "262144"],
+                ["--up", "-n", "262144"],
+                ["--bidir", "-n", "262144"],
+                ["--up", "-t", "0.05"],
+            ] {
+                let cmd = Wrap::try_parse_from(["x", "me/nas"].into_iter().chain(argv))
+                    .unwrap()
+                    .speed;
+                let machine = cmd.peer.machine(contacts).unwrap();
+                let routed = tokio::time::timeout(
+                    core::time::Duration::from_secs(10),
+                    cmd.through_serve(home, &machine, None, contacts),
+                )
+                .await
+                .expect("the run never ended")
+                .unwrap();
+                assert!(
+                    matches!(routed, super::Routed::Ran(Ok(()))),
+                    "not a run through serve that measured"
+                );
+            }
+        })
+        .await;
+    });
 }

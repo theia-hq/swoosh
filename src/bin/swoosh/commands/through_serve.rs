@@ -13,12 +13,14 @@
 use core::cell::RefCell;
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use std::rc::Rc;
 
 use bifrost::{ConnInfo, NodeId, PathChanges, Refusal, WriteEnd};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::escaped_report;
 use swoosh::node_client::{Connected, NodeClient, Opened, UidSocket};
+use swoosh::observation::{Observed, Observer, PathSource, Receipt};
 use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::{
@@ -126,8 +128,23 @@ impl Dial<'_> {
         lane: OpenLane,
         observation: Observation,
     ) -> eyre::Result<Stream> {
+        match self.attach(socket, connected, lane, observation).await {
+            Ok(stream) => Ok(stream),
+            Err(unattached) => Err(self.unattached(unattached, socket).await),
+        }
+    }
+
+    /// [`open`](Self::open), with the resident's refusal kept typed for a verb that prints its own line
+    /// for it.
+    async fn attach(
+        &mut self,
+        socket: &UidSocket,
+        connected: Connected,
+        lane: OpenLane,
+        observation: Observation,
+    ) -> Result<Stream, Unattached> {
         if let Some(moot) = Moot::first(self.reach) {
-            return Err(moot.into());
+            return Err(Unattached::Failed(moot.into()));
         }
         let key = self.machine.key();
         let hints = Hints::new(
@@ -136,8 +153,10 @@ impl Dial<'_> {
                 .iter()
                 .filter(|hint| hint.node() == key)
                 .flat_map(|hint| hint.addrs().iter().copied()),
-        )?;
-        let request = OpenRequest::new(key, hints, self.service.clone(), lane, self.slip.take())?;
+        )
+        .map_err(|error| Unattached::Failed(error.into()))?;
+        let request = OpenRequest::new(key, hints, self.service.clone(), lane, self.slip.take())
+            .map_err(|error| Unattached::Failed(error.into()))?;
         let request = match observation {
             Observation::Unobserved => request,
             Observation::Observed => request.observed(),
@@ -154,14 +173,57 @@ impl Dial<'_> {
                 read,
                 write,
             }),
-            Ok(Opened::Refused(refusal)) => Err(self.refused(refusal, socket).await),
-            Ok(Opened::Error(reason)) => Err(escaped_report(eyre::eyre!(reason))),
-            Err(ControlError::Version { .. }) => Err(Skew.into()),
+            Ok(Opened::Refused(refusal)) => Err(Unattached::Refused(refusal)),
+            Ok(Opened::Error(reason)) => {
+                Err(Unattached::Failed(escaped_report(eyre::eyre!(reason))))
+            }
+            Err(ControlError::Version { .. }) => Err(Unattached::Failed(Skew.into())),
             Err(error) => {
                 tracing::debug!(%error, "an open through serve failed before its reply");
-                Err(self.cut(socket).await)
+                Err(Unattached::Failed(self.cut(socket).await))
             }
         }
+    }
+
+    /// The line an Open that attached nothing prints, when the verb prints none of its own for it.
+    pub async fn unattached(
+        &self,
+        unattached: Unattached,
+        serve: &impl NodeClient,
+    ) -> eyre::Report {
+        match unattached {
+            Unattached::Refused(refusal) => self.refused(refusal, serve).await,
+            Unattached::Failed(report) => report,
+        }
+    }
+
+    /// Open the verb's one stream through `serve` on `connected`, on `lane`, observed: the stream as a
+    /// session, and the observer that follows its connection through `socket`, read from the Attached
+    /// report on.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open), with the resident's refusal kept typed.
+    pub async fn observed(
+        &mut self,
+        socket: &Rc<UidSocket>,
+        connected: Connected,
+        lane: OpenLane,
+    ) -> Result<(OneStream, Observer), Unattached> {
+        let stream = self
+            .attach(socket, connected, lane, Observation::Observed)
+            .await?;
+        let Some(reference) = stream.reference else {
+            return Err(Unattached::Failed(eyre::eyre!(
+                "internal: an observed open through serve came back without its reference"
+            )));
+        };
+        let observer = Observer::new(
+            Receipt::new(reference, Rc::clone(socket)),
+            stream.info.clone(),
+        );
+        let session = OneStream::new(self.machine.key(), stream.info, stream.read, stream.write);
+        Ok((session, observer))
     }
 
     /// The line a refusal prints: the own bind's for the same outcome, except `Busy` and `NotHere`.
@@ -207,24 +269,97 @@ impl Dial<'_> {
     /// `serve`'s own line when it no longer answers, else `own`, the line the own bind prints for the
     /// same end.
     pub async fn cut_or(&self, socket: &UidSocket, own: eyre::Report) -> eyre::Report {
+        self.stopped(socket).await.unwrap_or(own)
+    }
+
+    /// `serve`'s own line when it no longer answers, asked after a run broke: `None` while it answers,
+    /// and the break was the machine's or the network's.
+    pub async fn stopped(&self, socket: &UidSocket) -> Option<eyre::Report> {
         let named = Machine::of(self.contacts, self.machine.key());
-        after_a_cut(socket.status_attributed().await.map(drop), &named, own)
+        serve_gone(socket.status_attributed().await.map(drop), &named).map(eyre::Report::new)
     }
 }
 
-/// The line for a cut-off stream, from what asking `serve` again gave: `serve`'s own line when nothing
-/// answers there, else `own`. An answer that is not a status still counts as one: something listens, so
-/// the cut was not `serve` going.
-fn after_a_cut(
-    asked: Result<(), ControlError>,
-    machine: &Machine,
-    own: eyre::Report,
-) -> eyre::Report {
+/// `serve`'s own line when asking it again found nothing answering. An answer that is not a status
+/// still counts as one: something listens, so the cut was not `serve` going.
+fn serve_gone(asked: Result<(), ControlError>, machine: &Machine) -> Option<ServeStopped> {
     match asked {
         Err(ControlError::NoResident | ControlError::Io(_) | ControlError::Timeout { .. }) => {
-            ServeStopped(machine.to_string()).into()
+            Some(ServeStopped(machine.to_string()))
         }
-        _ => own,
+        _ => None,
+    }
+}
+
+/// Why an Open through `serve` attached no stream: the resident's typed refusal, which a probe verb
+/// prints its own bind's line for, or the line for anything else.
+pub enum Unattached {
+    /// The resident or the peer refused the Open.
+    Refused(OpenRefusal),
+    /// The Open failed some other way: the line it prints.
+    Failed(eyre::Report),
+}
+
+/// A run through `serve` that failed after its Open attached, its error already printed by [`failed`]:
+/// the composition root exits 1 and prints nothing more.
+#[derive(Debug, thiserror::Error)]
+#[error("the run's error was printed before its path was read")]
+pub struct Reported;
+
+/// How long past its spacing a failed run's Finish may take before the run exits without it. The run
+/// prints no path, so nothing waits on the reply; a resident that accepts the query and stalls lets the
+/// reference go at the end of its retention instead.
+const FAILED_FINISH_GRACE: core::time::Duration = core::time::Duration::from_secs(1);
+
+/// End a run through `serve` that failed after its Open attached: print `report` on `err` as the
+/// composition root prints a run's error, then Finish `observer`, in this task, before the process
+/// exits. The error never waits on a reading it does not show, and the resident lets the reference go
+/// now rather than at the end of its retention. The Finish gets what is left of its spacing plus
+/// [`FAILED_FINISH_GRACE`], and is dropped past that. Returns [`Reported`].
+pub async fn failed<P: PathSource>(
+    report: eyre::Report,
+    observer: Observer<P>,
+    err: &mut impl std::io::Write,
+) -> eyre::Report {
+    crate::print_error(&report, err);
+    match observer.finish_within(FAILED_FINISH_GRACE).await {
+        Some(observed) => log_path(observed),
+        None => tracing::debug!("the failed run's Finish passed its bound and was dropped"),
+    }
+    Reported.into()
+}
+
+/// Log the observation of a run through `serve` that prints no path: its own line is what it prints.
+pub fn log_path(observed: Observed) {
+    if let Some(earlier) = &observed.earlier {
+        tracing::debug!(%earlier, "a sample of the run's path failed");
+    }
+    if let Err(error) = &observed.last {
+        tracing::debug!(%error, "the run's final path could not be read");
+    }
+}
+
+/// The path text a run through `serve` prints, from its final observation, the Finish's: `None` when
+/// that failed, and `err` then carries a warning while the run's own result and exit stay as they are.
+/// A sample that failed earlier is never shown: it goes to the log, at debug.
+///
+/// # Errors
+///
+/// The warning could not be written.
+pub fn final_path(
+    observed: Observed,
+    err: &mut impl std::io::Write,
+) -> std::io::Result<Option<ConnInfo>> {
+    if let Some(earlier) = &observed.earlier {
+        tracing::debug!(%earlier, "a sample of the run's path failed");
+    }
+    match observed.last {
+        Ok(info) => Ok(Some(info)),
+        Err(error) => {
+            tracing::debug!(%error, "the run's final path could not be read");
+            writeln!(err, "warning: could not read the path of this run")?;
+            Ok(None)
+        }
     }
 }
 
@@ -435,4 +570,4 @@ impl ThisMachine {
 
 #[cfg(test)]
 #[path = "through_serve_tests.rs"]
-mod tests;
+pub(crate) mod tests;
