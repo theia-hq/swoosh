@@ -28,4 +28,10 @@ stdout instead.
 `unix:<path>` is not built yet. A [link you were given](../../keys.md#using-a-grant-you-were-given) goes where
 the machine goes: `swoosh forward swoosh:ed01… tv 8096`.
 
+With `-`, `forward` exits 0 only when the other side ends cleanly and, if you sent anything, the other machine
+holds it. Any other end prints `error: connection lost` and exits 1; stdout keeps what arrived. If the other side
+finishes first, a terminal stdin ends the upload. A file or pipe on stdin is sent in full, and `forward` exits 0
+once the other machine holds it. There is no time limit; if the other machine stops answering, the connection
+ends after about 30 seconds.
+
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
