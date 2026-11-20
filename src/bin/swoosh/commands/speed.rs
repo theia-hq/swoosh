@@ -8,8 +8,14 @@
 //! relayed, the same source `status` reads) is reported after the transfer, since the run is the window
 //! in which a relayed iroh link may hole-punch up to direct: a slow number then reads as "it relayed",
 //! not a mystery.
+//!
+//! While `swoosh serve` runs here, the run is one observed Open through it on a connection of its own:
+//! the path is sampled there each second beside the run and read once more by a Finish after it, so
+//! the line names this run's connection at its end. Otherwise the verb binds its own, as before.
 
+use core::convert::Infallible;
 use core::time::Duration;
+use std::rc::Rc;
 use std::time::Instant;
 
 use bifrost::{Discovery, Node, Session, Transport};
@@ -19,13 +25,18 @@ use measure::{
     Throughput,
 };
 use nauthy::{Link, Service};
+use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
+use swoosh::home::Home;
 use swoosh::learn::Admitted;
+use swoosh::observation::{Observer, Receipt};
 use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
+use swoosh::serve::control_codec::{Observation, OpenLane};
 use swoosh::transport::{self, ReachArgs};
 
 use crate::commands::machine;
+use crate::commands::through_serve::{self, Dial, OneStream, Routed};
 
 /// How often a running speed test prints its current rate. One second matches iperf's default report
 /// interval and reads as a live, once-a-second heartbeat without flooding the terminal.
@@ -157,27 +168,8 @@ impl SpeedCmd {
         // Its first admitted stream tells the composition root it may ask which root vouches for the machine.
         let session = admitted.watch(session, connector);
         let label = machine.label();
-        println!(
-            "speed test to {label} via {} ({})",
-            transport::FAST_PATH,
-            mode.label()
-        );
-
-        // A shared counter the transfer bumps and the ticker reads, so the rate prints live rather than
-        // only at the end. The ticker runs until the transfer finishes and drops its end of the channel.
-        let progress = Progress::new();
-        let outcome = {
-            let ticker = report_over_time(progress.clone());
-            let test = Speedtest::new(mode, limit)
-                .tracking(progress.clone())
-                .run(&session);
-            // Race the transfer against the ticker: the transfer completes, the ticker loops forever, so
-            // select ends the ticker the moment the run returns.
-            tokio::select! {
-                report = test => report,
-                never = ticker => match never {},
-            }
-        };
+        println!("speed test to {label} ({})", mode.label());
+        let outcome = transfer(mode, limit, &session, core::future::pending()).await;
         // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but refused the
         // run, so name what refused it (a missing method, a rate limit, a busy service) rather than
         // reporting a zero-byte transfer over the elapsed window. A Layer-2 method refusal means the
@@ -211,6 +203,81 @@ impl SpeedCmd {
 }
 
 impl SpeedCmd {
+    /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
+    /// typed as it, if one was, and `contacts` to name it in a cut's line.
+    ///
+    /// # Errors
+    ///
+    /// The control socket cannot be trusted; never an own bind then.
+    pub async fn through_serve(
+        &self,
+        home: &Home,
+        machine: &Machine,
+        slip: Option<Link>,
+        contacts: &Contacts,
+    ) -> eyre::Result<Routed> {
+        let Some((socket, connected)) = through_serve::serve(home).await? else {
+            return Ok(Routed::OwnBind);
+        };
+        let service: Service = reach::SPEED_SERVICE.parse()?;
+        let mut dial = Dial {
+            machine,
+            service: &service,
+            slip,
+            reach: &self.reach,
+            contacts,
+        };
+        // Isolated, as by own bind, and observed: the rate and the path it prints belong to this run's
+        // own connection, and the path is read there, through `serve`, after the run.
+        let stream = match dial
+            .open(
+                &socket,
+                connected,
+                OpenLane::Isolated,
+                Observation::Observed,
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(report) => return Ok(Routed::Ran(Err(report))),
+        };
+        let Some(reference) = stream.reference else {
+            eyre::bail!("internal: an observed open through serve came back without its reference");
+        };
+        let (mode, label) = (self.mode(), machine.label());
+        println!("speed test to {label} ({})", mode.label());
+        let socket = Rc::new(socket);
+        let mut observer = Observer::new(
+            Receipt::new(reference, Rc::clone(&socket)),
+            stream.info.clone(),
+        );
+        let session = OneStream::new(machine.key(), stream.info, stream.read, stream.write);
+        let outcome = transfer(mode, self.limit(), &session, observer.watch()).await;
+        let report = match outcome {
+            Ok(report) => report,
+            Err(ProtocolError::Refused(refusal)) => {
+                let line = refusal_line(&label, &refusal);
+                return Ok(Routed::Ran(Err(eyre::eyre!("{line}"))));
+            }
+            Err(error) => {
+                let own = eyre::eyre!("{}", failed_line(&error));
+                return Ok(Routed::Ran(Err(dial.cut_or(&socket, own).await)));
+            }
+        };
+        // The run is over: the Finish reads its connection's path now. A path that cannot be read leaves
+        // the measured run as it is, and is never stood in for by an earlier sample.
+        let observed = observer.finish().await;
+        if let Some(earlier) = &observed.earlier {
+            tracing::debug!(%earlier, "a sample of the run's path failed");
+        }
+        match observed.last {
+            Ok(info) => println!("path: {}", reach::conn_path(&info)),
+            Err(error) => tracing::warn!(%error, "the run's final path could not be read"),
+        }
+        print_totals(&report);
+        Ok(Routed::Ran(Ok(())))
+    }
+
     /// What to measure: `--up`, `--bidir`, or download (the group makes more than one impossible).
     fn mode(&self) -> Mode {
         if self.up {
@@ -232,10 +299,30 @@ impl SpeedCmd {
     }
 }
 
+/// Run the transfer over `session` while a ticker prints the rate each interval and `beside` runs with
+/// it: the transfer completes, the other two loop forever, so the select ends them the moment it does.
+/// A shared counter the transfer bumps and the ticker reads makes the rate print live rather than only
+/// at the end.
+async fn transfer<S: Session>(
+    mode: Mode,
+    limit: Limit,
+    session: &S,
+    beside: impl Future<Output = Infallible>,
+) -> Result<SpeedReport, ProtocolError> {
+    let progress = Progress::new();
+    let ticker = report_over_time(progress.clone());
+    let test = Speedtest::new(mode, limit).tracking(progress).run(session);
+    tokio::select! {
+        report = test => report,
+        never = ticker => match never {},
+        never = beside => match never {},
+    }
+}
+
 /// Print the rate over each [`REPORT_INTERVAL`] until cancelled: the bytes moved since the last tick as
 /// a MiB/s line. Never returns (its result is [`core::convert::Infallible`]); the caller races it against the
 /// transfer and drops it when the run finishes, so the last partial interval is covered by the totals.
-async fn report_over_time(progress: Progress) -> core::convert::Infallible {
+async fn report_over_time(progress: Progress) -> Infallible {
     let started = Instant::now();
     let mut ticker = tokio::time::interval(REPORT_INTERVAL);
     ticker.tick().await; // The first tick fires immediately; skip it so the first line is one interval in.

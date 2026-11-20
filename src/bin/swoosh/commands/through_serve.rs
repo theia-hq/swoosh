@@ -1,24 +1,32 @@
-//! `forward <machine> <service> -` through a running `swoosh serve`: the first verb that dials through
-//! the resident rather than binding this home's key.
+//! Verbs that dial through a running `swoosh serve` rather than binding this home's key:
+//! `forward <machine> <service> -`, and `speed`, which also follows its connection's path there.
 //!
-//! When `serve` answers on this home's control socket, the pipe is one Open there: this process binds
-//! nothing, reads no key and asks no passphrase, and the resident presents this home's standing (or the
-//! link typed as the machine). When no `serve` runs, the verb binds its own as before. Once `serve` has
-//! answered, a failure is reported, never retried by an own bind.
+//! When `serve` answers on this home's control socket, the verb's stream is one Open there: this
+//! process binds nothing, reads no key and asks no passphrase, and the resident presents this home's
+//! standing (or the link typed as the machine). When no `serve` runs, the verb binds its own as before.
+//! Once `serve` has answered, a failure is reported, never retried by an own bind.
 //!
 //! The lines a resident's outcome prints are the own bind's, so one line has one shape on both paths;
 //! only a busy `serve`, a `serve` that stopped under the pipe, a different `serve` version and a reach
 //! flag `serve` makes moot have lines of their own.
 
-use bifrost::{NodeId, Refusal};
+use core::cell::RefCell;
+use core::pin::Pin;
+use core::task::{Context, Poll};
+
+use bifrost::{ConnInfo, NodeId, PathChanges, Refusal, WriteEnd};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::escaped_report;
-use swoosh::node_client::{NodeClient, Opened, UidSocket};
+use swoosh::node_client::{Connected, NodeClient, Opened, UidSocket};
 use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::Hints;
-use swoosh::serve::control_codec::{ControlError, OpenLane, OpenRefusal, OpenRequest, PeerRefusal};
+use swoosh::serve::control_codec::{
+    ControlError, Observation, OpenLane, OpenRead, OpenRefusal, OpenRequest, OpenWrite, PathRef,
+    PeerRefusal,
+};
 use swoosh::transport::ReachArgs;
+use tokio::io::{self, AsyncWrite};
 
 use crate::commands::connect::{ConnectionLost, Machine, Stdin, Stdout, pump_stdio};
 use crate::commands::machine;
@@ -27,12 +35,12 @@ use crate::commands::machine;
 pub enum Routed {
     /// No `serve` answers here: the verb binds its own.
     OwnBind,
-    /// The pipe ran through `serve`, to this end.
+    /// The verb ran through `serve`, to this end.
     Ran(eyre::Result<()>),
 }
 
-/// A `forward <machine> <service> -` to dial, as the resident needs it.
-pub struct Pipe<'a> {
+/// A verb's dial, as the resident needs it.
+pub struct Dial<'a> {
     /// The machine the verb dials.
     pub machine: &'a PeerMachine,
     /// The service it asks for.
@@ -46,31 +54,78 @@ pub struct Pipe<'a> {
     pub contacts: &'a Contacts,
 }
 
-/// Run `pipe` through the `serve` at `home`'s control socket when one answers.
+/// The `serve` at `home`'s control socket, with a connection to it checked and nothing sent, or `None`
+/// when no `serve` answers here.
 ///
 /// # Errors
 ///
 /// The control socket cannot be trusted; never an own bind then.
-pub async fn forward(home: &swoosh::home::Home, pipe: Pipe<'_>) -> eyre::Result<Routed> {
+pub async fn serve(home: &swoosh::home::Home) -> eyre::Result<Option<(UidSocket, Connected)>> {
     let socket = match UidSocket::resolve(home) {
         Ok(socket) => socket,
-        Err(ControlError::NoResident) => return Ok(Routed::OwnBind),
+        Err(ControlError::NoResident) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let connected = match socket.connected().await {
-        Ok(connected) => connected,
-        Err(ControlError::NoResident) => return Ok(Routed::OwnBind),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(Routed::Ran(pipe.run(&socket, connected).await))
+    match socket.connected().await {
+        Ok(connected) => Ok(Some((socket, connected))),
+        Err(ControlError::NoResident) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
-impl Pipe<'_> {
-    async fn run(
-        mut self,
+/// Run `dial` as a `forward <machine> <service> -` through the `serve` at `home`'s control socket when
+/// one answers.
+///
+/// # Errors
+///
+/// The control socket cannot be trusted; never an own bind then.
+pub async fn forward(home: &swoosh::home::Home, dial: Dial<'_>) -> eyre::Result<Routed> {
+    let Some((socket, connected)) = serve(home).await? else {
+        return Ok(Routed::OwnBind);
+    };
+    Ok(Routed::Ran(dial.forward(&socket, connected).await))
+}
+
+/// A stream the resident attached: the path it rode as it attached, the reference to observe it by
+/// when the Open asked for one, and its two halves.
+pub struct Stream {
+    /// The connection's path report, read as the stream attached.
+    pub info: ConnInfo,
+    /// Present exactly when the Open was observed.
+    pub reference: Option<PathRef>,
+    /// The peer's bytes.
+    pub read: OpenRead,
+    /// The bytes toward the peer.
+    pub write: OpenWrite,
+}
+
+impl Dial<'_> {
+    async fn forward(mut self, socket: &UidSocket, connected: Connected) -> eyre::Result<()> {
+        // Main: an ordinary pipe. Bulk is a fan-out's lane, Isolated a measurement's.
+        let stream = self
+            .open(socket, connected, OpenLane::Main, Observation::Unobserved)
+            .await?;
+        match pump_stdio(stream.write, stream.read, Stdin::open()?, Stdout::default()).await {
+            Err(report) if report.is::<ConnectionLost>() => Err(self.cut(socket).await),
+            ended => ended,
+        }
+    }
+
+    /// Open the verb's one stream through `serve` on `connected`, on `lane`, asking for a reference to
+    /// its connection when `observation` says so. Every outcome that is not a stream is the line the
+    /// verb prints for it.
+    ///
+    /// # Errors
+    ///
+    /// A reach flag `serve` makes moot, more hints than one Open carries, the resident's or the peer's
+    /// refusal, or a cut.
+    pub async fn open(
+        &mut self,
         socket: &UidSocket,
-        connected: swoosh::node_client::Connected,
-    ) -> eyre::Result<()> {
+        connected: Connected,
+        lane: OpenLane,
+        observation: Observation,
+    ) -> eyre::Result<Stream> {
         if let Some(moot) = Moot::first(self.reach) {
             return Err(moot.into());
         }
@@ -82,27 +137,30 @@ impl Pipe<'_> {
                 .filter(|hint| hint.node() == key)
                 .flat_map(|hint| hint.addrs().iter().copied()),
         )?;
-        // Main: an ordinary pipe. Bulk is a fan-out's lane, Isolated a measurement's.
-        let request = OpenRequest::new(
-            key,
-            hints,
-            self.service.clone(),
-            OpenLane::Main,
-            self.slip.take(),
-        )?;
-        let (read, write) = match connected.open(request).await {
-            Ok(Opened::Attached { read, write, .. }) => (read, write),
-            Ok(Opened::Refused(refusal)) => return Err(self.refused(refusal, socket).await),
-            Ok(Opened::Error(reason)) => return Err(escaped_report(eyre::eyre!(reason))),
-            Err(ControlError::Version { .. }) => return Err(Skew.into()),
+        let request = OpenRequest::new(key, hints, self.service.clone(), lane, self.slip.take())?;
+        let request = match observation {
+            Observation::Unobserved => request,
+            Observation::Observed => request.observed(),
+        };
+        match connected.open(request).await {
+            Ok(Opened::Attached {
+                info,
+                reference,
+                read,
+                write,
+            }) => Ok(Stream {
+                info,
+                reference,
+                read,
+                write,
+            }),
+            Ok(Opened::Refused(refusal)) => Err(self.refused(refusal, socket).await),
+            Ok(Opened::Error(reason)) => Err(escaped_report(eyre::eyre!(reason))),
+            Err(ControlError::Version { .. }) => Err(Skew.into()),
             Err(error) => {
                 tracing::debug!(%error, "an open through serve failed before its reply");
-                return Err(self.cut(socket).await);
+                Err(self.cut(socket).await)
             }
-        };
-        match pump_stdio(write, read, Stdin::open()?, Stdout::default()).await {
-            Err(report) if report.is::<ConnectionLost>() => Err(self.cut(socket).await),
-            ended => ended,
         }
     }
 
@@ -141,22 +199,156 @@ impl Pipe<'_> {
         }
     }
 
-    /// The line a pipe cut off prints: `serve`'s own when it no longer answers, else the cut-off's.
+    /// The line a stream cut off prints: `serve`'s own when it no longer answers, else the cut-off's.
     async fn cut(&self, socket: &UidSocket) -> eyre::Report {
+        self.cut_or(socket, ConnectionLost.into()).await
+    }
+
+    /// `serve`'s own line when it no longer answers, else `own`, the line the own bind prints for the
+    /// same end.
+    pub async fn cut_or(&self, socket: &UidSocket, own: eyre::Report) -> eyre::Report {
         let named = Machine::of(self.contacts, self.machine.key());
-        after_a_cut(socket.status_attributed().await.map(drop), &named)
+        after_a_cut(socket.status_attributed().await.map(drop), &named, own)
     }
 }
 
-/// The line for a cut-off pipe, from what asking `serve` again gave: `serve`'s own line when nothing
-/// answers there, else the cut-off's. An answer that is not a status still counts as one: something
-/// listens, so the cut was not `serve` going.
-fn after_a_cut(asked: Result<(), ControlError>, machine: &Machine) -> eyre::Report {
+/// The line for a cut-off stream, from what asking `serve` again gave: `serve`'s own line when nothing
+/// answers there, else `own`. An answer that is not a status still counts as one: something listens, so
+/// the cut was not `serve` going.
+fn after_a_cut(
+    asked: Result<(), ControlError>,
+    machine: &Machine,
+    own: eyre::Report,
+) -> eyre::Report {
     match asked {
         Err(ControlError::NoResident | ControlError::Io(_) | ControlError::Timeout { .. }) => {
             ServeStopped(machine.to_string()).into()
         }
-        _ => ConnectionLost.into(),
+        _ => own,
+    }
+}
+
+/// One stream through `serve`, as a session that hands out that stream once: what a verb written over a
+/// session, such as `speed`'s measurement, runs on.
+///
+/// Through `serve`, [`peer`](bifrost::Session::peer) is the key the verb asked for, as claimed by the
+/// process answering the socket. That process is checked to run as this user and to be the pid
+/// `serve.lock` records, and neither check holds against a process running as this user, which can bind
+/// the path and rewrite `serve.lock`; by own bind the transport proves the peer. The resident holds the
+/// connection, so `wait_closed` never resolves and `close` ends nothing. `accept_bi` refuses, and so does
+/// a second `open_bi`: `serve` gave one stream.
+pub struct OneStream {
+    peer: NodeId,
+    info: ConnInfo,
+    stream: RefCell<Option<(Upload, OpenRead)>>,
+}
+
+impl OneStream {
+    /// The stream `serve` attached to `peer`, its path reading `info` as it attached.
+    pub fn new(peer: NodeId, info: ConnInfo, read: OpenRead, write: OpenWrite) -> Self {
+        Self {
+            peer,
+            info,
+            stream: RefCell::new(Some((Upload(Some(write)), read))),
+        }
+    }
+}
+
+impl bifrost::Session for OneStream {
+    type Write = Upload;
+    type Read = OpenRead;
+
+    fn peer(&self) -> NodeId {
+        self.peer
+    }
+
+    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        self.stream
+            .borrow_mut()
+            .take()
+            .ok_or(bifrost::Error::Closed)
+    }
+
+    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        Err(bifrost::Error::Closed)
+    }
+
+    async fn wait_closed(&self) {
+        core::future::pending().await
+    }
+
+    fn close(&self) {}
+
+    /// The path as the stream attached. A verb that reports its path reads it from its observer, which
+    /// asks `serve`; this cannot.
+    fn conn_info(&self) -> ConnInfo {
+        self.info.clone()
+    }
+
+    /// The path as the stream attached, as a path that never moves: only `serve` can tell it moved.
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(self.info.path.clone())
+    }
+}
+
+/// The write half of a [`OneStream`]'s stream: Data frames, and End at its `shutdown`. Aborted, it
+/// closes the direction with no End, which `serve` passes on to the peer as a reset.
+pub struct Upload(Option<OpenWrite>);
+
+impl Upload {
+    fn half(&mut self) -> io::Result<Pin<&mut OpenWrite>> {
+        self.0
+            .as_mut()
+            .map(Pin::new)
+            .ok_or_else(|| io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+impl AsyncWrite for Upload {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut().half() {
+            Ok(half) => half.poll_write(cx, buf),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut().half() {
+            Ok(half) => half.poll_flush(cx),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut().half() {
+            Ok(half) => half.poll_shutdown(cx),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+}
+
+impl WriteEnd for Upload {
+    fn abort(&mut self) {
+        if let Some(write) = self.0.take() {
+            write.abort();
+        }
+    }
+
+    /// Ends the upload with End, then fails: through `serve` the word that the peer holds the upload is
+    /// Landed, which arrives on the read half ([`OpenRead::landed`]), out of this half's reach.
+    async fn delivered(self) -> io::Result<()> {
+        let Some(mut write) = self.0 else {
+            return Err(io::ErrorKind::ConnectionReset.into());
+        };
+        tokio::io::AsyncWriteExt::shutdown(&mut write).await?;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the upload's delivery through swoosh serve is heard on the read half",
+        ))
     }
 }
 

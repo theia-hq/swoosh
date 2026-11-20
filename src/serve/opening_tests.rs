@@ -2857,3 +2857,72 @@ impl rand::RngCore for Fill {
         Ok(())
     }
 }
+
+/// The resident at a socket path, asked directly: the Path exchange a receipt makes, without the
+/// listener-attribution checks a home's socket adds.
+struct AtSocket(std::path::PathBuf);
+
+impl crate::observation::PathSource for AtSocket {
+    async fn path(
+        &self,
+        request: PathRequest,
+    ) -> Result<PathReply, crate::serve::control_codec::ControlError> {
+        let mut client = UnixStream::connect(&self.0).await.unwrap();
+        Request::Path(request).write(&mut client).await.unwrap();
+        match Response::read_path(&mut client).await? {
+            Response::Path(reply) => Ok(reply),
+            other => panic!("not a path reply: {other:?}"),
+        }
+    }
+}
+
+/// The client's own observed Open, its observer sampling beside the run, and a Finish after it that
+/// reads the path the connection took after the last sample, not the one it attached on.
+#[tokio::test]
+async fn a_client_observer_finishes_on_its_own_connections_last_path() {
+    use crate::observation::{Observer, Receipt};
+
+    let fixture = Fixture::new("obs-client", [Script::Reads]);
+    fixture
+        .run(async |socket| {
+            let stream = UnixStream::connect(socket).await.unwrap();
+            let opened = crate::node_client::UidSocket::open_on(
+                stream,
+                request(fixture.peer, OpenLane::Isolated, None).observed(),
+            )
+            .await
+            .unwrap();
+            let crate::node_client::Opened::Attached {
+                info,
+                reference: Some(reference),
+                mut read,
+                mut write,
+            } = opened
+            else {
+                panic!("not attached with a reference: {opened:?}");
+            };
+            let source = Rc::new(AtSocket(socket.to_owned()));
+            let mut observer = Observer::new(Receipt::new(reference, source), info);
+            let run = async {
+                // Long enough for one sample beside the run.
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                write.write_all(b"measured").await.unwrap();
+                write.shutdown().await.unwrap();
+                let mut got = Vec::new();
+                read.read_to_end(&mut got).await.unwrap();
+                read.landed().await.unwrap();
+            };
+            tokio::select! {
+                never = observer.watch() => match never {},
+                () = run => {}
+            }
+            assert_eq!(observer.latest(), &ConnInfo::default());
+            fixture.scripted.set_path(0, direct());
+            let observed = observer.finish().await;
+            assert_eq!(observed.last.unwrap(), direct());
+            assert!(observed.earlier.is_none());
+            assert_eq!(fixture.scripted.received(), b"measured");
+            released(&fixture.opener, HANG_GUARD).await;
+        })
+        .await;
+}

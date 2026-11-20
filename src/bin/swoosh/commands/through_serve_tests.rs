@@ -11,7 +11,7 @@ use swoosh::serve::control_codec::{
 };
 use swoosh::transport::ReachArgs;
 
-use super::{Busy, Moot, Pipe, Skew, StandingEnded, ThisMachine, after_a_cut};
+use super::{Busy, Dial, Moot, Skew, StandingEnded, ThisMachine, after_a_cut};
 use crate::commands::connect::{ConnectionLost, Machine};
 
 /// The key of `me/nas`.
@@ -91,7 +91,7 @@ fn serve_lines_keep_their_ruled_words() {
 fn a_cut_with_nothing_answering_names_serve_and_otherwise_is_connection_lost() {
     let contacts = book();
     let named = Machine::of(&contacts, nas());
-    let stopped = after_a_cut(Err(ControlError::NoResident), &named);
+    let stopped = after_a_cut(Err(ControlError::NoResident), &named, ConnectionLost.into());
     assert_eq!(
         printed(&stopped),
         "error: swoosh serve stopped here and ended the connection to me/nas\n  Commands here \
@@ -104,11 +104,12 @@ fn a_cut_with_nothing_answering_names_serve_and_otherwise_is_connection_lost() {
         },
     ] {
         assert!(
-            printed(&after_a_cut(Err(gone), &named)).starts_with("error: swoosh serve stopped")
+            printed(&after_a_cut(Err(gone), &named, ConnectionLost.into()))
+                .starts_with("error: swoosh serve stopped")
         );
     }
     // `serve` still answers: the cut was the pipe's, and the line is the own bind's.
-    let lost = after_a_cut(Ok(()), &named);
+    let lost = after_a_cut(Ok(()), &named, ConnectionLost.into());
     assert!(lost.is::<ConnectionLost>());
     assert_eq!(printed(&lost), "error: connection lost\n");
 }
@@ -160,7 +161,7 @@ async fn an_ended_standing_names_the_own_binds_remedy_when_serve_says_who_it_is(
     let peer = machine(&contacts, "me/nas");
     let service = "ssh".parse().unwrap();
     let reach = reach(&["forward"]);
-    let pipe = Pipe {
+    let pipe = Dial {
         machine: &peer,
         service: &service,
         slip: None,
@@ -189,7 +190,7 @@ async fn a_refusal_through_serve_prints_the_own_binds_line() {
     let peer = machine(&contacts, "me/nas");
     let service = "ssh".parse().unwrap();
     let reach = reach(&["forward"]);
-    let pipe = Pipe {
+    let pipe = Dial {
         machine: &peer,
         service: &service,
         slip: None,
