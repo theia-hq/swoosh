@@ -303,7 +303,7 @@ async fn carry<S: Session>(session: &S, request: &Request, mut tcp: TcpStream) -
 /// A forward's remote stream ended. No source chain can disclose a transport or cut reason.
 #[derive(Debug, thiserror::Error)]
 #[error("connection lost")]
-struct ConnectionLost;
+pub struct ConnectionLost;
 
 /// A transport cause is diagnostic context, never part of the command's terminal outcome. Asking the
 /// closed session does not establish why the host ended it, so no cut reason is inferred here.
@@ -333,45 +333,177 @@ async fn pipe_stdio<T: Transport, D: Discovery>(
         Err(Refusal::NotAdmitted) => return Err(refused.on(&session, Refusal::NotAdmitted).await),
         Err(refusal) => return Err(bifrost::Error::Refused(refusal).into()),
     };
-    pump_stdio(writer, reader, stdin_chunks()?, io::stdout()).await
+    pump_stdio(
+        Stream(writer),
+        Stream(reader),
+        stdin_chunks()?,
+        io::stdout(),
+    )
+    .await
 }
 
 /// Endpoint provenance, not session closure, identifies a failed remote stream: its error can arrive
 /// before the session's close signal. Local stdin/stdout failures stay local even after a host cut.
-async fn pump_stdio(
-    mut writer: impl io::AsyncWrite + Unpin,
-    reader: impl io::AsyncRead + Unpin,
+///
+/// The upload ends cleanly only at stdin's end; every other way out cuts it, so the far service reads a
+/// reset and never a clean end of a truncated upload: a stdin read error, a failed write toward the
+/// host, a failed stdout write, and the host's half ending first while stdin is still open (the ssh
+/// bridge's normal close). After a clean upload end the run waits for the host's half, then for the word
+/// that the upload landed, where the stream carries one.
+pub(crate) async fn pump_stdio(
+    mut writer: impl Upload,
+    reader: impl Download,
     mut input: mpsc::Receiver<io::Result<Vec<u8>>>,
     mut output: impl io::AsyncWrite + Unpin,
 ) -> eyre::Result<()> {
-    let mut reader = RemoteReader(reader);
-    let upstream = async {
-        while let Some(chunk) = input.recv().await {
-            writer.write_all(&chunk?).await.map_err(remote_failure)?;
-        }
-        writer.shutdown().await.map_err(remote_failure)
-    };
-    let downstream = async {
-        io::copy(&mut reader, &mut output)
-            .await
-            .map_err(read_failure)?;
-        output.flush().await?;
-        Ok::<(), eyre::Report>(())
-    };
-    // A pending stdout write can leave remote bytes inside the copy's buffer. Keep that same
-    // operation through stdin EOF so a successful half-close cannot discard already consumed bytes.
-    tokio::pin!(downstream);
-    tokio::select! {
-        // The host's half ended or failed: the run is over. The stdin pump is dropped, never awaited.
-        result = &mut downstream => result?,
-        // stdin ended first (a piped, finite input), or the write toward the host failed. A clean end
-        // half-closes toward the host, then the host's remaining output still drains to stdout.
-        result = upstream => {
-            result?;
-            downstream.await?;
-        }
+    /// How the upload stopped.
+    enum Up {
+        /// stdin ended and the upload's clean end went out.
+        Ended,
+        /// stdin failed.
+        Local(io::Error),
+        /// A write toward the host failed.
+        Remote(io::Error),
     }
-    Ok(())
+    /// Which half settled the run.
+    enum Settled {
+        /// The host's half ended or failed with the upload unfinished.
+        DownFirst(eyre::Result<()>),
+        /// The upload failed.
+        UpFailed(Up),
+        /// The upload ended cleanly, then the host's half settled.
+        Uploaded(eyre::Result<()>),
+    }
+    let mut reader = RemoteReader(reader);
+    let settled = {
+        let upstream = async {
+            while let Some(chunk) = input.recv().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => return Up::Local(error),
+                };
+                // Flushed per chunk: a framed half may hold a frame until asked.
+                let sent = async {
+                    writer.write_all(&chunk).await?;
+                    writer.flush().await
+                };
+                if let Err(error) = sent.await {
+                    return Up::Remote(error);
+                }
+            }
+            match writer.shutdown().await {
+                Ok(()) => Up::Ended,
+                Err(error) => Up::Remote(error),
+            }
+        };
+        let downstream = async {
+            io::copy(&mut reader, &mut output)
+                .await
+                .map_err(read_failure)?;
+            output.flush().await?;
+            Ok::<(), eyre::Report>(())
+        };
+        // A pending stdout write can leave remote bytes inside the copy's buffer. Keep that same
+        // operation through stdin EOF so a successful half-close cannot discard already consumed bytes.
+        tokio::pin!(downstream);
+        tokio::select! {
+            // The host's half ended or failed: the run is over. The stdin pump is dropped, never awaited.
+            result = &mut downstream => Settled::DownFirst(result),
+            up = upstream => match up {
+                // stdin ended first (a piped, finite input): the host's remaining output still drains.
+                Up::Ended => Settled::Uploaded(downstream.await),
+                failed => Settled::UpFailed(failed),
+            },
+        }
+    };
+    match settled {
+        Settled::DownFirst(result) => {
+            writer.cut();
+            result
+        }
+        Settled::UpFailed(Up::Local(error)) => {
+            writer.cut();
+            Err(error.into())
+        }
+        Settled::UpFailed(Up::Remote(error)) => {
+            writer.cut();
+            Err(remote_failure(error))
+        }
+        Settled::UpFailed(Up::Ended) | Settled::Uploaded(Ok(())) => {
+            reader.0.landed().await.map_err(remote_failure)
+        }
+        Settled::Uploaded(Err(error)) => Err(error),
+    }
+}
+
+/// The upload half of a forwarded stream, as the pump ends it: `shutdown` is its clean end, and `cut`
+/// ends it so the far service reads a reset.
+pub(crate) trait Upload: io::AsyncWrite + Unpin {
+    /// End the upload as cut off.
+    fn cut(self);
+}
+
+/// The download half of a forwarded stream: the host's bytes, and the word that the upload landed.
+pub(crate) trait Download: io::AsyncRead + Unpin {
+    /// Resolve once the far side holds the whole upload and its end, or fail when that is not known.
+    fn landed(&mut self) -> impl Future<Output = io::Result<()>>;
+}
+
+/// One half of a transport stream, held by the own bind.
+pub(crate) struct Stream<H>(pub(crate) H);
+
+impl<W: io::AsyncWrite + bifrost::WriteEnd + Unpin> Upload for Stream<W> {
+    fn cut(mut self) {
+        self.0.abort();
+    }
+}
+
+impl<R: io::AsyncRead + Unpin> Download for Stream<R> {
+    /// The own bind exits on the host's end without waiting for its tail to be acknowledged, as every
+    /// direct client does: the transport carries the bytes after the stream is ended.
+    async fn landed(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for Stream<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl<R: io::AsyncRead + Unpin> io::AsyncRead for Stream<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl Upload for swoosh::serve::control_codec::OpenWrite {
+    fn cut(self) {
+        self.abort();
+    }
+}
+
+impl Download for swoosh::serve::control_codec::OpenRead {
+    fn landed(&mut self) -> impl Future<Output = io::Result<()>> {
+        swoosh::serve::control_codec::OpenRead::landed(self)
+    }
 }
 
 /// `io::copy` returns either endpoint's error as `io::Error`; only the remote reader gets this tag.
@@ -421,7 +553,7 @@ fn remote_failure(error: io::Error) -> eyre::Report {
 /// Not tokio's stdin: that reads on the runtime's blocking pool, and the runtime waits for every blocking
 /// read before the process can exit, so a run that has ended would hang until the next keystroke. This
 /// thread is never joined: a read it is parked in ends with the process.
-fn stdin_chunks() -> eyre::Result<mpsc::Receiver<io::Result<Vec<u8>>>> {
+pub fn stdin_chunks() -> eyre::Result<mpsc::Receiver<io::Result<Vec<u8>>>> {
     // One chunk in flight: the reader waits for the stream to take a chunk before reading the next, so
     // a slow host holds back stdin rather than this process buffering it.
     let (sender, receiver) = mpsc::channel(1);
@@ -481,6 +613,41 @@ mod tests {
                 format!("error: {:#}\n", super::escaped(report)),
                 "error: connection lost\n"
             );
+        }
+    }
+
+    /// A test half: cut is a drop, and nothing waits for a landing.
+    struct Plain<H>(H);
+    impl<W: io::AsyncWrite + Unpin> super::Upload for Plain<W> {
+        fn cut(self) {}
+    }
+    impl<R: io::AsyncRead + Unpin> super::Download for Plain<R> {
+        async fn landed(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for Plain<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.0).poll_shutdown(cx)
+        }
+    }
+    impl<R: io::AsyncRead + Unpin> io::AsyncRead for Plain<R> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.0).poll_read(cx, buf)
         }
     }
 
@@ -638,7 +805,7 @@ mod tests {
         assert!(session.wait_closed().now_or_never().is_none());
         let (_stdin, input) = mpsc::channel(1);
         assert_remote(
-            super::pump_stdio(io::sink(), FailedReader, input, io::sink())
+            super::pump_stdio(Plain(io::sink()), Plain(FailedReader), input, io::sink())
                 .now_or_never()
                 .expect("a remote read fails without waiting for closure"),
         );
@@ -646,7 +813,7 @@ mod tests {
         drop(stdin);
         let (writer, reader) = after_half_close(FailedReader);
         assert_remote(
-            super::pump_stdio(writer, reader, input, io::sink())
+            super::pump_stdio(Plain(writer), Plain(reader), input, io::sink())
                 .now_or_never()
                 .expect("the retained copy preserves the reader's tag after half-close"),
         );
@@ -664,9 +831,14 @@ mod tests {
             }
             drop(stdin);
             assert_remote(
-                super::pump_stdio(FailedWriter(at), PendingReader, input, io::sink())
-                    .now_or_never()
-                    .expect("remote writes fail without waiting for closure"),
+                super::pump_stdio(
+                    Plain(FailedWriter(at)),
+                    Plain(PendingReader),
+                    input,
+                    io::sink(),
+                )
+                .now_or_never()
+                .expect("remote writes fail without waiting for closure"),
             );
         }
         assert!(session.wait_closed().now_or_never().is_none());
@@ -683,22 +855,27 @@ mod tests {
             (stdin, input)
         };
         assert_local(
-            super::pump_stdio(io::sink(), PendingReader, input, io::sink())
+            super::pump_stdio(Plain(io::sink()), Plain(PendingReader), input, io::sink())
                 .now_or_never()
                 .expect("a local stdin error is ready"),
         );
         for at in [WriteFailure::Write, WriteFailure::Flush] {
             let (_stdin, input) = mpsc::channel(1);
             assert_local(
-                super::pump_stdio(io::sink(), &b"out"[..], input, FailedWriter(at))
-                    .now_or_never()
-                    .expect("a local stdout error is ready"),
+                super::pump_stdio(
+                    Plain(io::sink()),
+                    Plain(&b"out"[..]),
+                    input,
+                    FailedWriter(at),
+                )
+                .now_or_never()
+                .expect("a local stdout error is ready"),
             );
             let (stdin, input) = mpsc::channel(1);
             drop(stdin);
             let (writer, reader) = after_half_close(&b"out"[..]);
             assert_local(
-                super::pump_stdio(writer, reader, input, FailedWriter(at))
+                super::pump_stdio(Plain(writer), Plain(reader), input, FailedWriter(at))
                     .now_or_never()
                     .expect("a post-half-close stdout error stays local"),
             );
@@ -709,7 +886,7 @@ mod tests {
     async fn a_clean_remote_eof_ends_with_stdin_still_open() {
         let (_stdin, input) = mpsc::channel(1);
         assert!(
-            super::pump_stdio(io::sink(), io::empty(), input, io::sink())
+            super::pump_stdio(Plain(io::sink()), Plain(io::empty()), input, io::sink())
                 .now_or_never()
                 .expect("remote EOF does not wait for stdin")
                 .is_ok()
@@ -724,7 +901,7 @@ mod tests {
         let (writer, reader) = after_half_close(&b"drained"[..]);
         let mut output = Vec::new();
         assert!(
-            super::pump_stdio(writer, reader, input, &mut output)
+            super::pump_stdio(Plain(writer), Plain(reader), input, &mut output)
                 .now_or_never()
                 .expect("half-close makes the remaining output ready")
                 .is_ok()
@@ -813,7 +990,12 @@ mod tests {
                 flushed: &flushed,
                 bytes: &mut bytes,
             };
-            let pump = super::pump_stdio(HalfCloseWriter(Some(closed)), reader, input, output);
+            let pump = super::pump_stdio(
+                Plain(HalfCloseWriter(Some(closed))),
+                Plain(reader),
+                input,
+                output,
+            );
             tokio::pin!(pump);
             let mut cx = Context::from_waker(futures::task::noop_waker_ref());
             assert!(pump.as_mut().poll(&mut cx).is_pending());
@@ -1117,6 +1299,198 @@ mod tests {
             Machine::of(&contacts, stranger).to_string(),
             stranger.to_string(),
             "an unnamed machine prints its whole key"
+        );
+    }
+
+    /// An upload half that notes whether it was cut, and says when it shut down.
+    struct Noted {
+        cut: std::rc::Rc<core::cell::Cell<bool>>,
+        shut: Option<oneshot::Sender<()>>,
+    }
+    impl io::AsyncWrite for Noted {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if let Some(shut) = self.shut.take() {
+                let _ = shut.send(());
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+    impl super::Upload for Noted {
+        fn cut(self) {
+            self.cut.set(true);
+        }
+    }
+
+    /// A download half over `bytes`, read once `after` fires when one is given, whose landing answers
+    /// `landed`.
+    struct Landing {
+        bytes: &'static [u8],
+        landed: Option<io::ErrorKind>,
+        after: Option<oneshot::Receiver<()>>,
+    }
+    impl io::AsyncRead for Landing {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if let Some(after) = &mut self.after {
+                if Pin::new(after).poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
+                self.after = None;
+            }
+            Pin::new(&mut self.bytes).poll_read(cx, buf)
+        }
+    }
+    impl super::Download for Landing {
+        async fn landed(&mut self) -> io::Result<()> {
+            self.landed.map_or(Ok(()), |kind| Err(kind.into()))
+        }
+    }
+
+    /// An upload half, whether it was cut, and the word it shut down.
+    fn noted() -> (
+        Noted,
+        std::rc::Rc<core::cell::Cell<bool>>,
+        Option<oneshot::Receiver<()>>,
+    ) {
+        let cut = std::rc::Rc::default();
+        let (shut, after) = oneshot::channel();
+        (
+            Noted {
+                cut: std::rc::Rc::clone(&cut),
+                shut: Some(shut),
+            },
+            cut,
+            Some(after),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_clean_end_exits_0_and_prints_nothing() {
+        let (writer, cut, after) = noted();
+        let (stdin, input) = mpsc::channel(1);
+        stdin.try_send(Ok(b"up".to_vec())).unwrap();
+        drop(stdin);
+        let reader = Landing {
+            bytes: b"down",
+            landed: None,
+            after,
+        };
+        let mut output = Vec::new();
+        super::pump_stdio(writer, reader, input, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output, b"down");
+        assert!(!cut.get(), "a finished upload is never cut");
+    }
+
+    #[tokio::test]
+    async fn an_upload_that_did_not_land_exits_1_with_connection_lost() {
+        let (writer, _, after) = noted();
+        let (stdin, input) = mpsc::channel(1);
+        drop(stdin);
+        let reader = Landing {
+            bytes: b"whole download",
+            landed: Some(io::ErrorKind::ConnectionReset),
+            after,
+        };
+        let mut output = Vec::new();
+        assert_remote(super::pump_stdio(writer, reader, input, &mut output).await);
+        // What arrived stays on stdout.
+        assert_eq!(output, b"whole download");
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_ends_first_cuts_the_unfinished_upload_and_exits_0() {
+        let (writer, cut, _) = noted();
+        let (_stdin, input) = mpsc::channel(1);
+        let reader = Landing {
+            bytes: b"bye",
+            // Never asked: the upload did not end, so nothing landed to wait for.
+            landed: Some(io::ErrorKind::ConnectionReset),
+            after: None,
+        };
+        super::pump_stdio(writer, reader, input, io::sink())
+            .await
+            .unwrap();
+        assert!(
+            cut.get(),
+            "an upload stdin did not end is cut, never ended cleanly"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stdin_read_error_cuts_the_upload() {
+        let (writer, cut, _) = noted();
+        let (stdin, input) = mpsc::channel(1);
+        stdin.try_send(Err(fault())).unwrap();
+        assert_local(
+            super::pump_stdio(writer, Plain(PendingReader), input, io::sink())
+                .now_or_never()
+                .expect("a local stdin error is ready"),
+        );
+        assert!(cut.get());
+    }
+
+    /// The far end of an own-bind pipe over mem, whose peer reads an abort as `ConnectionReset`, and how
+    /// its read of the upload ends once the pump has run over `input`, the far end's own reply already
+    /// ended when `replied`.
+    async fn own_bind_upload_ends(
+        input: mpsc::Receiver<io::Result<Vec<u8>>>,
+        replied: bool,
+    ) -> io::ErrorKind {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (session, peer) = sessions().await;
+        let (writer, reader) = session.open_bi().await.unwrap();
+        let (mut far_write, mut far_read) = peer.accept_bi().await.unwrap();
+        if replied {
+            far_write.shutdown().await.unwrap();
+        }
+        let _ = super::pump_stdio(
+            super::Stream(writer),
+            super::Stream(reader),
+            input,
+            io::sink(),
+        )
+        .await;
+        let mut got = Vec::new();
+        match far_read.read_to_end(&mut got).await {
+            Ok(_) => io::ErrorKind::UnexpectedEof,
+            Err(error) => error.kind(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_own_bind_resets_an_upload_its_peer_outlived() {
+        // stdin still open when the host's half ends: the ssh bridge's normal close.
+        let (_stdin, input) = mpsc::channel(1);
+        assert_eq!(
+            own_bind_upload_ends(input, true).await,
+            io::ErrorKind::ConnectionReset
+        );
+    }
+
+    #[tokio::test]
+    async fn the_own_bind_resets_an_upload_whose_stdin_failed() {
+        let (stdin, input) = mpsc::channel(1);
+        stdin.try_send(Err(fault())).unwrap();
+        // The host's reply still open, so only the stdin error can end the run.
+        assert_eq!(
+            own_bind_upload_ends(input, false).await,
+            io::ErrorKind::ConnectionReset
         );
     }
 }

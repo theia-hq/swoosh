@@ -948,6 +948,33 @@ async fn run() -> eyre::Result<()> {
         })
         .transpose()?;
 
+    // `forward <machine> <service> -` while `serve` runs here: one Open on its socket, before any key is
+    // read, so nothing is bound and no passphrase asked. An `anyone` link never rides it: it dials under a
+    // throwaway key of its own.
+    if let Outward::Forward(cmd) = &reach
+        && cmd.to == commands::connect::To::Stdout
+        && let BindRole::Dialing(credential::Credential::Family { present }) = reach.bind_role()
+        && let Some(machine) = machine.as_ref()
+    {
+        let pipe = commands::through_serve::Pipe {
+            machine,
+            service: &cmd.service,
+            slip: present,
+            reach: &cmd.reach,
+            contacts: store.contacts(),
+        };
+        if let commands::through_serve::Routed::Ran(ended) =
+            commands::through_serve::forward(&home, pipe).await?
+        {
+            return ended.map_err(|report| {
+                match report.downcast_ref::<commands::through_serve::ThisMachine>() {
+                    Some(this) => usage_error(&["forward"], &this.to_string()),
+                    None => report,
+                }
+            });
+        }
+    }
+
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
     // writing nothing. Resolve it before binding, since the secret is what the transport is bound under.

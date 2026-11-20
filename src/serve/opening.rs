@@ -582,13 +582,23 @@ where
         match next {
             Next::Verdict(landed) => {
                 waiting = false;
-                if landed && !written(!downloading, to_client.write_landed()).await {
+                let written = match (landed, downloading) {
+                    (false, _) => true,
+                    (true, true) => to_client.write_landed().await.is_ok(),
+                    (true, false) => last(to_client.write_landed()).await,
+                };
+                if !written {
                     return None;
                 }
             }
             Next::Read(Ok(0)) => {
                 downloading = false;
-                if !written(!waiting, to_client.write_end()).await {
+                let written = if waiting {
+                    to_client.write_end().await.is_ok()
+                } else {
+                    last(to_client.write_end()).await
+                };
+                if !written {
                     return None;
                 }
             }
@@ -609,16 +619,12 @@ where
     }
 }
 
-/// Whether a frame toward the client was written. The last frame, the one after which both directions
-/// are settled, has [`REPLY_TIMEOUT`], so a client that stops reading cannot hold the splice past them;
-/// any earlier one waits as a Data frame does, so a reader that pauses while its upload runs never loses
-/// a download that came whole.
-async fn written(last: bool, write: impl Future<Output = io::Result<()>>) -> bool {
-    if last {
-        matches!(tokio::time::timeout(REPLY_TIMEOUT, write).await, Ok(Ok(())))
-    } else {
-        write.await.is_ok()
-    }
+/// Whether the last frame toward the client, the one after which both directions are settled, was
+/// written within [`REPLY_TIMEOUT`], so a client that stops reading cannot hold the splice past them.
+/// An earlier End or Landed waits as a Data frame does, so a reader that pauses while its upload runs
+/// never loses a download that came whole.
+async fn last(write: impl Future<Output = io::Result<()>>) -> bool {
+    matches!(tokio::time::timeout(REPLY_TIMEOUT, write).await, Ok(Ok(())))
 }
 
 /// The send half toward the peer for the life of an attached Open. Dropped before a successful

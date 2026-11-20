@@ -341,6 +341,16 @@ pub struct ComposedDiscovery {
 }
 
 impl PeerHint {
+    /// The key this hint is for.
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// The addresses it gives that key.
+    pub fn addrs(&self) -> &[SocketAddr] {
+        &self.addrs
+    }
+
     /// The original `<key>=<addr>` token, for `ssh` to forward verbatim into the ProxyCommand so the
     /// address resolves at the actual dial site (the `forward` it re-invokes), not at the launcher.
     pub fn as_arg(&self) -> &str {

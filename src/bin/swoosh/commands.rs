@@ -25,5 +25,6 @@ pub mod ssh;
 pub mod status;
 pub mod stop;
 pub mod sync;
+pub mod through_serve;
 pub mod token;
 pub mod tree;
