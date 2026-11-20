@@ -2639,7 +2639,12 @@ async fn an_ended_observed_open_gives_back_its_lane_but_keeps_its_reach_slot_unt
             attached(&mut fifth).await;
             assert_eq!(download(&mut fifth).await, [0, 0, 0, 0]);
             drop(fifth);
-            until_true(|| fixture.opener.reach.available_permits() == MAX_REACH - 4).await;
+            tokio::time::timeout(
+                HANG_GUARD,
+                until_true(|| fixture.opener.reach.available_permits() == MAX_REACH - 4),
+            )
+            .await
+            .expect("the fifth open kept its reach slot");
             // Each ended connection still answers, and a Finish lets its slot go at once.
             for (at, reference) in references.into_iter().enumerate() {
                 assert!(matches!(
@@ -2654,6 +2659,52 @@ async fn an_ended_observed_open_gives_back_its_lane_but_keeps_its_reach_slot_unt
                 .await
                 .unwrap();
             }
+        })
+        .await;
+}
+
+/// The held-lane case: an observed Main stream that has ended both ways gives back its place on the lane
+/// at once, and keeps its reach slot until its Finish.
+#[tokio::test]
+async fn an_ended_observed_main_open_gives_back_its_lane_but_keeps_its_reach_slot_until_finished() {
+    let fixture = Fixture::new("obs-main-end", [Script::Reads]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Main, None).observed(),
+            )
+            .await;
+            let reference = observed(&mut client).await;
+            client.write_all(&ended(b"")).await.unwrap();
+            let read = read_all(&mut client).await;
+            assert!(read.end && read.landed, "{read:?}");
+            drop(client);
+            // Every one of the peer's Main places is free again: the ended stream holds none.
+            let places = tokio::time::timeout(HANG_GUARD, async {
+                loop {
+                    let places: Result<Vec<_>, _> = (0..64)
+                        .map(|_| fixture.peers.place(fixture.peer, crate::peers::Lane::Main))
+                        .collect();
+                    if let Ok(places) = places {
+                        return places;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the ended stream kept its Main place");
+            assert!(matches!(
+                fixture.peers.place(fixture.peer, crate::peers::Lane::Main),
+                Err(OpenError::Busy)
+            ));
+            drop(places);
+            assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH - 1);
+            assert_eq!(
+                path(socket, reference, PathAction::Finish).await,
+                sampled(&ConnInfo::default())
+            );
+            released(&fixture.opener, HANG_GUARD).await;
         })
         .await;
 }
@@ -2678,6 +2729,120 @@ async fn an_ended_observed_open_unfinished_lets_go_at_the_retention_deadline() {
                 held >= TERMINAL_RETENTION - Duration::from_millis(1),
                 "{held:?}"
             );
+        })
+        .await;
+}
+
+/// An observed Isolated connection whose stream has ended stays open, for its path, through the
+/// retention, and is closed when the retention lets it go.
+#[tokio::test(start_paused = true)]
+async fn an_ended_observed_isolated_connection_stays_open_until_the_retention_deadline() {
+    let fixture = Fixture::new("obs-iso-open", [Script::Reads]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Isolated, None).observed(),
+            )
+            .await;
+            observed(&mut client).await;
+            client.write_all(&ended(b"")).await.unwrap();
+            let read = read_all(&mut client).await;
+            assert!(read.end && read.landed, "{read:?}");
+            let ended = tokio::time::Instant::now();
+            tokio::time::sleep_until(ended + TERMINAL_RETENTION - Duration::from_millis(10)).await;
+            assert_eq!(fixture.scripted.closes(), 0, "closed inside the retention");
+            released(&fixture.opener, TERMINAL_RETENTION).await;
+            assert_eq!(fixture.scripted.closes(), 1, "left open past the retention");
+        })
+        .await;
+}
+
+/// An ordinary Main Open and a slip's Main Open to one peer ride two sessions, and each reference reads
+/// its own.
+#[tokio::test]
+async fn an_ordinary_and_a_slip_open_to_one_peer_each_sample_their_own_session() {
+    let fixture = Fixture::new("obs-slip", [Script::Holds, Script::Holds]);
+    let slip = TestNode::seeded(PEER)
+        .bound_slip(
+            &"ssh".parse().unwrap(),
+            TestNode::seeded(THIS).verify_key(),
+            until(),
+        )
+        .unwrap();
+    fixture
+        .run(async |socket| {
+            let mut ordinary = open(
+                socket,
+                request(fixture.peer, OpenLane::Main, None).observed(),
+            )
+            .await;
+            let ordinary_ref = observed(&mut ordinary).await;
+            let mut slipped = open(
+                socket,
+                request(fixture.peer, OpenLane::Main, Some(slip)).observed(),
+            )
+            .await;
+            let slipped_ref = observed(&mut slipped).await;
+            assert_eq!(fixture.scripted.dials(), 2);
+            fixture.scripted.set_path(0, relayed());
+            fixture.scripted.set_path(1, direct());
+            assert_eq!(
+                path(socket, ordinary_ref, PathAction::Sample).await,
+                sampled(&relayed())
+            );
+            assert_eq!(
+                path(socket, slipped_ref, PathAction::Sample).await,
+                sampled(&direct())
+            );
+            // Only the slip's session moving changes the slip's sample.
+            fixture.scripted.set_path(1, ConnInfo::default());
+            assert_eq!(
+                path(socket, slipped_ref, PathAction::Finish).await,
+                sampled(&ConnInfo::default())
+            );
+            assert_eq!(
+                path(socket, ordinary_ref, PathAction::Finish).await,
+                sampled(&relayed())
+            );
+        })
+        .await;
+}
+
+/// The client's End ends only the upload: while the download is still open the Open is live, so no
+/// retention starts, however long the half-close lasts, and its reference still answers.
+#[tokio::test(start_paused = true)]
+async fn an_observed_open_half_closed_by_the_client_stays_observable() {
+    let fixture = Fixture::new("obs-half", [Script::ReadsThenHolds]);
+    fixture
+        .run(async |socket| {
+            let mut client = open(
+                socket,
+                request(fixture.peer, OpenLane::Isolated, None).observed(),
+            )
+            .await;
+            let reference = observed(&mut client).await;
+            client.write_all(&ended(b"up")).await.unwrap();
+            tokio::time::timeout(
+                HANG_GUARD,
+                until_true(|| fixture.scripted.received() == b"up"),
+            )
+            .await
+            .expect("the peer never read the upload");
+            tokio::time::sleep(TERMINAL_RETENTION * 2).await;
+            fixture.scripted.set_path(0, direct());
+            assert_eq!(
+                path(socket, reference, PathAction::Sample).await,
+                sampled(&direct())
+            );
+            assert_eq!(fixture.opener.reach.available_permits(), MAX_REACH - 1);
+            assert_eq!(
+                path(socket, reference, PathAction::Finish).await,
+                sampled(&direct())
+            );
+            // The download is still open: the Finish took the reference, not the stream.
+            drop(client);
+            released(&fixture.opener, HANG_GUARD).await;
         })
         .await;
 }
@@ -2827,8 +2992,11 @@ async fn a_reference_answers_only_once_attached_is_written_whole() {
         let mut read = 0;
         while read < frame.len() {
             read += reader.read(&mut frame[read..]).await.unwrap();
-            // Each poll that finishes the write publishes before it can return pending.
-            let _ = poll!(attaching.as_mut());
+            // Polled only while bytes are still to come: the poll that writes the last of them must
+            // publish before it returns, so an await slipped in before the publish leaves it unpublished.
+            if read < frame.len() {
+                let _ = poll!(attaching.as_mut());
+            }
         }
         assert_eq!(&frame[..7], b"SWC1\x06\x00\x1c");
         assert_eq!(sample(reference), PathReply::Sample(ConnInfo::default()));
@@ -2878,7 +3046,7 @@ impl crate::observation::PathSource for AtSocket {
 
 /// The client's own observed Open, its observer sampling beside the run, and a Finish after it that
 /// reads the path the connection took after the last sample, not the one it attached on.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_client_observer_finishes_on_its_own_connections_last_path() {
     use crate::observation::{Observer, Receipt};
 
@@ -2901,10 +3069,13 @@ async fn a_client_observer_finishes_on_its_own_connections_last_path() {
             else {
                 panic!("not attached with a reference: {opened:?}");
             };
+            assert_eq!(info, ConnInfo::default());
             let source = Rc::new(AtSocket(socket.to_owned()));
             let mut observer = Observer::new(Receipt::new(reference, source), info);
+            // The connection moves after it attached: only a sample can have seen this.
+            fixture.scripted.set_path(0, relayed());
             let run = async {
-                // Long enough for one sample beside the run.
+                // Long enough, on the paused clock, for one sample beside the run.
                 tokio::time::sleep(Duration::from_millis(1200)).await;
                 write.write_all(b"measured").await.unwrap();
                 write.shutdown().await.unwrap();
@@ -2916,7 +3087,7 @@ async fn a_client_observer_finishes_on_its_own_connections_last_path() {
                 never = observer.watch() => match never {},
                 () = run => {}
             }
-            assert_eq!(observer.latest(), &ConnInfo::default());
+            assert_eq!(observer.latest(), &relayed());
             fixture.scripted.set_path(0, direct());
             let observed = observer.finish().await;
             assert_eq!(observed.last.unwrap(), direct());

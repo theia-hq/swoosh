@@ -46,6 +46,11 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const MAIN_STREAMS: u16 = 64;
 // The most pipes one fan-out holds, so a full forward or proxy never queues inside the owner.
 const BULK_STREAMS: u16 = 128;
+// Counts only connections whose streams are still active: one kept open after its streams ended, to
+// read its path, has given its place back (`Isolated::release_place`). Live isolated connections to one
+// peer are therefore not capped here: the resident, the one caller that releases early, bounds them by
+// its reach slots beyond Main (`MAX_BEYOND_MAIN`, 224), which an observed connection holds until it lets
+// go.
 const ISOLATED_CONNECTIONS: u16 = 4;
 
 /// The held session a stream rides. An isolated connection is [`Peers::isolated`], never held.
@@ -776,9 +781,10 @@ impl<H: AsyncWrite + Unpin, S: Session> AsyncWrite for Half<H, S> {
 
 /// A connection [`Peers::isolated`] dialed for one caller: never held, shared or reused.
 ///
-/// Dropping it closes the connection and releases its per-peer count, so the count is exactly the live
-/// connections; a stream that outlived it ends with it. A caller whose streams on it have ended may
-/// release the count earlier and keep the connection open to read its path.
+/// Dropping it closes the connection and releases its per-peer count; a stream that outlived it ends
+/// with it. A caller whose streams on it have ended may release the count earlier and keep the
+/// connection open to read its path, so the count is the connections with active streams, not every
+/// live one: what bounds the rest is the caller's own cap on what it keeps open.
 pub struct Isolated<S: Session> {
     session: S,
     budget: Cell<Option<Budget>>,
@@ -786,7 +792,8 @@ pub struct Isolated<S: Session> {
 
 impl<S: Session> Isolated<S> {
     /// Give back this connection's place among the peer's isolated connections, keeping the connection
-    /// open. Once only: a second call has nothing left to release.
+    /// open. Once only: a second call has nothing left to release. From then on the connection counts
+    /// toward no per-peer cap, so a caller keeping it bounds it by a cap of its own.
     pub(crate) fn release_place(&self) {
         drop(self.budget.take());
     }

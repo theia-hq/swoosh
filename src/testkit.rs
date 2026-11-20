@@ -946,6 +946,11 @@ impl ScriptedPeer {
         self.lock().dials
     }
 
+    /// How many times a session to it was closed.
+    pub fn closes(&self) -> u32 {
+        self.lock().closes
+    }
+
     /// The shared state. A poisoned lock means a test thread panicked holding it; its state is still the
     /// record of what happened, so it is read anyway.
     fn lock(&self) -> std::sync::MutexGuard<'_, Scripted> {
