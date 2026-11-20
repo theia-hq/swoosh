@@ -17,7 +17,9 @@ use tokio::time::Instant;
 use crate::node_client::UidSocket;
 use crate::serve::control_codec::{ControlError, PathAction, PathRef, PathReply, PathRequest};
 
-/// The least time between the starts of two queries on one receipt, the Finish included.
+/// The least time between the starts of two queries on one receipt, the Finish included, and between
+/// the Attached report and the first periodic sample. The Attached report is the Open's reply, not a
+/// query, so a Finish with no query before it waits for nothing.
 pub const SPACING: Duration = Duration::from_secs(1);
 
 /// Where a receipt's queries go: the resident's control socket, or a test's stand-in.
@@ -108,21 +110,24 @@ pub struct Observer<P: PathSource = UidSocket> {
     receipt: Receipt<P>,
     latest: ConnInfo,
     earlier: Option<ObservationError>,
-    /// The earliest the next query may start.
-    next: Instant,
+    /// When the Attached report was read: the first periodic sample waits a [`SPACING`] after it.
+    attached_at: Instant,
+    /// When the last query started, if one has. Only a query spaces the Finish.
+    queried: Option<Instant>,
     /// Set once the resident has said the reference is gone: no later sample can say otherwise.
     gone: bool,
 }
 
 impl<P: PathSource> Observer<P> {
     /// Observe `receipt`, whose Open attached on a connection reading `attached`. The Attached report is
-    /// the first observation; the first query waits a whole [`SPACING`] after it.
+    /// the first observation; the first sample waits a whole [`SPACING`] after it.
     pub fn new(receipt: Receipt<P>, attached: ConnInfo) -> Self {
         Self {
             receipt,
             latest: attached,
             earlier: None,
-            next: after_spacing(Instant::now()),
+            attached_at: Instant::now(),
+            queried: None,
             gone: false,
         }
     }
@@ -135,16 +140,26 @@ impl<P: PathSource> Observer<P> {
     /// Sample the connection once per [`SPACING`] until dropped. Dropping it mid-query cancels that
     /// query at once; the spacing it began still holds for the next.
     pub async fn watch(&mut self) -> Infallible {
+        self.watch_with(|_| {}).await
+    }
+
+    /// [`watch`](Self::watch), handing each successful sample to `on_sample` as it lands. A failed
+    /// sample reaches it never: it is kept as the earlier failure, and the caller's view keeps what it
+    /// last showed.
+    pub async fn watch_with(&mut self, mut on_sample: impl FnMut(&ConnInfo)) -> Infallible {
         loop {
             if self.gone {
                 return core::future::pending().await;
             }
-            tokio::time::sleep_until(self.next).await;
+            tokio::time::sleep_until(after_spacing(self.queried.unwrap_or(self.attached_at))).await;
             // Counted from the query's start, before the await, so a query cut short still spaces the
             // next one, the Finish included.
-            self.next = after_spacing(Instant::now());
+            self.queried = Some(Instant::now());
             match self.receipt.sample().await {
-                Ok(info) => self.latest = info,
+                Ok(info) => {
+                    on_sample(&info);
+                    self.latest = info;
+                }
                 Err(error) => {
                     self.gone = matches!(error, ObservationError::Unavailable);
                     self.earlier.get_or_insert(error);
@@ -153,14 +168,28 @@ impl<P: PathSource> Observer<P> {
         }
     }
 
-    /// Finish the receipt once what is left of the spacing has passed, never a whole query's bound,
-    /// and return the final observation beside the run's earlier failure, if any.
+    /// Finish the receipt once what is left of the last query's spacing has passed, at once when no
+    /// query has started, never a whole query's bound, and return the final observation beside the
+    /// run's earlier failure, if any.
     pub async fn finish(self) -> Observed {
-        tokio::time::sleep_until(self.next).await;
+        if let Some(queried) = self.queried {
+            tokio::time::sleep_until(after_spacing(queried)).await;
+        }
         Observed {
             last: self.receipt.finish().await,
             earlier: self.earlier,
         }
+    }
+
+    /// [`finish`](Self::finish) for a run whose result does not wait on the reading: given what is left
+    /// of the spacing plus `grace`, and dropped past that, `None` then. A resident that accepts the
+    /// query and stalls holds the exit no longer; the resident lets the reference go at the end of its
+    /// retention instead.
+    pub async fn finish_within(self, grace: Duration) -> Option<Observed> {
+        let now = Instant::now();
+        let spaced = self.queried.map_or(now, after_spacing).max(now);
+        let deadline = spaced.checked_add(grace).unwrap_or(spaced);
+        tokio::time::timeout_at(deadline, self.finish()).await.ok()
     }
 }
 

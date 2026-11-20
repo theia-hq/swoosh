@@ -19,7 +19,6 @@
 //! The full verb arc (send, tunnel, share, fetch, run, cluster, MagicDNS names) is tracked in the README's
 //! Roadmap; it ticks as it ships.
 
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
@@ -479,12 +478,20 @@ async fn main() -> std::process::ExitCode {
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(report) => {
-            // Never `eprintln!`, which panics when the write fails: stderr can be a socket whose
-            // writing `forward -` has already ended with its stdout, and the run must still exit 1.
-            let _ = writeln!(std::io::stderr(), "error: {report:#}");
+            // A run through `serve` that failed printed its error itself, before finishing its reading.
+            if !report.is::<commands::through_serve::Reported>() {
+                print_error(&report, &mut std::io::stderr());
+            }
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Print `report` as a run's error line, its message chain on `err`.
+fn print_error(report: &eyre::Report, err: &mut impl std::io::Write) {
+    // Never `eprintln!`, which panics when the write fails: stderr can be a socket whose writing
+    // `forward -` has already ended with its stdout, and the run must still exit 1.
+    let _ = writeln!(err, "error: {report:#}");
 }
 
 /// Parse `argv`. A `forward` missing only its local end is refused with [`forward::NO_LOCAL_END`], which says
@@ -994,20 +1001,27 @@ async fn run() -> eyre::Result<()> {
 
     // `speed` while `serve` runs here, the same way: one observed Open there, its path read through
     // `serve` after the run.
-    if let Outward::Speed(cmd) = &reach
+    if matches!(reach, Outward::Speed(_))
         && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
-        && let commands::through_serve::Routed::Ran(ended) = cmd
-            .through_serve(&home, machine, slip, store.contacts())
-            .await?
     {
-        return ended.map_err(|report| {
-            match report.downcast_ref::<commands::through_serve::ThisMachine>() {
-                Some(this) => usage_error(&["speed"], &this.to_string()),
-                None => report,
-            }
-        });
+        let contacts = store.contacts();
+        let routed = match &reach {
+            Outward::Speed(cmd) => Some((
+                "speed",
+                cmd.through_serve(&home, machine, slip, contacts).await?,
+            )),
+            _ => None,
+        };
+        if let Some((verb, commands::through_serve::Routed::Ran(ended))) = routed {
+            return ended.map_err(|report| {
+                match report.downcast_ref::<commands::through_serve::ThisMachine>() {
+                    Some(this) => usage_error(&[verb], &this.to_string()),
+                    None => report,
+                }
+            });
+        }
     }
 
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward

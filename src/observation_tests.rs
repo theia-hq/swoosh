@@ -143,14 +143,36 @@ async fn a_stalled_sample_is_cut_when_the_run_ends_and_finish_waits_only_the_spa
     );
 }
 
+/// The Attached report is the Open's reply, not a query: a run that ends before the first sample is
+/// Finished as it ends, not a spacing after Attached.
 #[tokio::test(start_paused = true)]
-async fn a_run_shorter_than_the_spacing_is_finished_one_spacing_after_attached() {
+async fn a_run_shorter_than_the_spacing_is_finished_as_it_ends() {
     let script = Scripted::new([sample(direct())]);
     let mut observer = observer(&script);
     run_for(&mut observer, secs(0.3)).await;
     let observed = observer.finish().await;
     assert_eq!(observed.last.unwrap(), direct());
-    assert_eq!(script.asked(), [(secs(1.0), PathAction::Finish)]);
+    assert_eq!(script.asked(), [(secs(0.3), PathAction::Finish)]);
+}
+
+/// Each successful sample reaches the caller as it lands, in order; a failed one never does.
+#[tokio::test(start_paused = true)]
+async fn watch_with_hands_each_successful_sample_to_the_caller() {
+    let script = Scripted::new([
+        sample(relayed()),
+        Step::Answer(Err(ControlError::Timeout {
+            phase: "response read",
+        })),
+        sample(direct()),
+    ]);
+    let mut observer = observer(&script);
+    let mut seen = Vec::new();
+    tokio::select! {
+        never = observer.watch_with(|info| seen.push(info.path.clone())) => match never {},
+        () = tokio::time::sleep(secs(3.5)) => {}
+    }
+    assert_eq!(seen, [relayed().path, Path::Direct]);
+    assert_eq!(observer.latest(), &direct());
 }
 
 #[tokio::test(start_paused = true)]
@@ -205,4 +227,41 @@ async fn a_reference_gone_mid_run_stops_the_sampling() {
             (secs(5.5), PathAction::Finish)
         ]
     );
+}
+
+/// A run that failed gives its Finish what is left of the spacing plus the grace, then drops it: a
+/// resident that takes the query and stalls holds the exit no longer.
+#[tokio::test(start_paused = true)]
+async fn a_capped_finish_is_dropped_past_the_spacing_left_and_its_grace() {
+    let script = Scripted::new([Step::Stall]);
+    let mut observer = observer(&script);
+    run_for(&mut observer, secs(1.2)).await;
+    let ended = Instant::now();
+    let observed = tokio::time::timeout(secs(30.0), observer.finish_within(secs(1.0)))
+        .await
+        .expect("the capped Finish ends");
+    assert!(observed.is_none());
+    // The stalled sample began at 1.0 s: 0.8 s of spacing left, then the 1 s grace.
+    assert_eq!(Instant::now() - ended, secs(1.8));
+    assert_eq!(
+        script.asked(),
+        [
+            (secs(1.0), PathAction::Sample),
+            (secs(2.0), PathAction::Finish)
+        ]
+    );
+}
+
+/// With no query begun, the cap is the grace alone.
+#[tokio::test(start_paused = true)]
+async fn a_capped_finish_with_no_query_begun_waits_only_its_grace() {
+    let script = Scripted::new([]);
+    let observer = observer(&script);
+    let started = Instant::now();
+    let observed = tokio::time::timeout(secs(30.0), observer.finish_within(secs(1.0)))
+        .await
+        .expect("the capped Finish ends");
+    assert!(observed.is_none());
+    assert_eq!(Instant::now() - started, secs(1.0));
+    assert_eq!(script.asked(), [(secs(0.0), PathAction::Finish)]);
 }
