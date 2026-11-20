@@ -705,6 +705,13 @@ impl ServeCmd {
             std::sync::Arc::clone(&stop_source),
         ));
 
+        let dial = swoosh::sync::NodeDial::new(peers, &home);
+        let fetch = swoosh::renewal::NodeFetch::new(peers);
+        // The renewal an Open waits for, and what answers Opens on the control socket. Built before the
+        // banner, since drawing the epoch for its references can fail, and serve announces only what runs.
+        let renewal = swoosh::renewal::OpenRenewal::new(&home, &fetch);
+        let opener = swoosh::serve::Opener::new(peers, &renewal, &home, addr.node)?;
+
         if !self.quiet {
             let manifest = exposer.manifest();
             let transport = match (self.verbose, self.mdns.as_ref()) {
@@ -748,11 +755,6 @@ impl ServeCmd {
             );
         }
 
-        let dial = swoosh::sync::NodeDial::new(peers, &home);
-        let fetch = swoosh::renewal::NodeFetch::new(peers);
-        // The renewal an Open waits for, and what answers Opens on the control socket.
-        let renewal = swoosh::renewal::OpenRenewal::new(&home, &fetch);
-        let opener = swoosh::serve::Opener::new(peers, &renewal, &home, addr.node)?;
         // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
         // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. It is an
         // arm of the run, never a spawned task, so a run that stops first takes the timer with it.
