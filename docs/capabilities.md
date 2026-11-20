@@ -34,7 +34,8 @@ The holder presents the link when they dial. The link alone names the node and t
 <!-- live-run: real iroh reach, non-deterministic; re-capture before release -->
 ```console
 $ swoosh ping swoosh:ed01hcq6…
-ed01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.115:51445 and relayed)
+ed01hcq6balrlxwa
+  path: direct
   3 sent, 3 received, 0% loss
   rtt min/avg/max/mdev = 0.891/1.075/1.277/0.135 ms
 ```

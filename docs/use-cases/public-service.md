@@ -37,7 +37,8 @@ nothing to present:
 <!-- live-run: real iroh RTT over the internet, non-deterministic; 135.129.x.x masks the peer's address; re-capture before release -->
 ```console
 $ swoosh ping ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -c 4
-ed01hcq6balrlxwa via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
+ed01hcq6balrlxwa
+  path: direct
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 41.843/113.534/299.872/93.169 ms
 ```

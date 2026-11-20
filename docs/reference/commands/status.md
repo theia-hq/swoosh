@@ -35,6 +35,8 @@ With a machine, `status` dials it and prints one line. A healthy line has the pa
 for one of your own devices ends with what it serves (`; serving: ssh, web`). Otherwise `status` exits non-zero
 and the line reads `unreachable`, a refusal (`reached, but …`), or `reached, but the probe failed / went
 unanswered`. The path is read after the probe, so one machine can show `relayed` on one run and `direct` on the
-next. [Why a path changes](../../transports.md#iroh).
+next. [Why a path changes](../../transports.md#iroh). It works the same through `swoosh serve`. If the path
+cannot be read, the line has no `path:` field, stderr says `warning: could not read the path of this run`,
+and the exit code is unchanged.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
