@@ -973,7 +973,7 @@ async fn run() -> eyre::Result<()> {
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
     {
-        let pipe = commands::through_serve::Pipe {
+        let dial = commands::through_serve::Dial {
             machine,
             service: &cmd.service,
             slip,
@@ -981,7 +981,7 @@ async fn run() -> eyre::Result<()> {
             contacts: store.contacts(),
         };
         if let commands::through_serve::Routed::Ran(ended) =
-            commands::through_serve::forward(&home, pipe).await?
+            commands::through_serve::forward(&home, dial).await?
         {
             return ended.map_err(|report| {
                 match report.downcast_ref::<commands::through_serve::ThisMachine>() {
@@ -990,6 +990,24 @@ async fn run() -> eyre::Result<()> {
                 }
             });
         }
+    }
+
+    // `speed` while `serve` runs here, the same way: one observed Open there, its path read through
+    // `serve` after the run.
+    if let Outward::Speed(cmd) = &reach
+        && let BindRole::Dialing(credential) = reach.bind_role()
+        && let Some(slip) = credential.through_resident()
+        && let Some(machine) = machine.as_ref()
+        && let commands::through_serve::Routed::Ran(ended) = cmd
+            .through_serve(&home, machine, slip, store.contacts())
+            .await?
+    {
+        return ended.map_err(|report| {
+            match report.downcast_ref::<commands::through_serve::ThisMachine>() {
+                Some(this) => usage_error(&["speed"], &this.to_string()),
+                None => report,
+            }
+        });
     }
 
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward

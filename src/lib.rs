@@ -23,6 +23,7 @@ pub mod link;
 pub mod names;
 pub mod node_client;
 pub mod node_signer;
+pub mod observation;
 pub mod passphrase;
 pub mod peer;
 pub mod peers;
