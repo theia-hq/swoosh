@@ -17,7 +17,8 @@ use tokio::time::timeout;
 
 use crate::home::{Home, ProcessId};
 use crate::serve::control_codec::{
-    ControlError, LocalServiceSnapshot, Request, Response, ServiceMenu, StatusReply,
+    ControlError, LocalServiceSnapshot, OpenRead, OpenRefusal, OpenRequest, OpenWrite, Request,
+    Response, ServiceMenu, StatusReply,
 };
 
 /// How long a connect to the local control socket may take before it is a [`ControlError::Timeout`].
@@ -27,6 +28,29 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long writing one control request or reading one response may take. The read bound mirrors the
 /// server's own `READ_TIMEOUT`, so a client never sits longer than the server would.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an Open's reply may take. Longer than any one exchange: the resident may renew this
+/// machine's standing and dial the peer before it answers, each under bounds of its own, so this only
+/// ends a wait on a resident that has stopped answering.
+const OPEN_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What an Open got back from the resident.
+#[derive(Debug)]
+pub enum Opened {
+    /// The stream to the peer is attached: its path as it attached, and its two halves.
+    Attached {
+        /// The path the stream rides, read as it attached.
+        info: bifrost::ConnInfo,
+        /// The peer's bytes, a clean end only at the resident's End.
+        read: OpenRead,
+        /// The bytes toward the peer; `shutdown` is the upload's clean end.
+        write: OpenWrite,
+    },
+    /// The resident or the peer refused the Open.
+    Refused(OpenRefusal),
+    /// The resident could not take the Open: its fixed reason.
+    Error(String),
+}
 
 /// The control surface every node backend serves: read the menu, read status, stop. One behavior home
 /// so the uid-socket client and the resident implement the same contract and a behavior change lands
@@ -215,6 +239,47 @@ impl UidSocket {
         Ok((stream, peer.pid))
     }
 
+    /// Ask the resident for one admitted stream to a peer, on a connection of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution fails, the request cannot be written, or no valid reply to an
+    /// Open arrives within its bound.
+    pub async fn open(&self, request: OpenRequest) -> Result<Opened, ControlError> {
+        let (stream, _) = self.connect().await?;
+        Self::open_on(stream, request).await
+    }
+
+    /// [`open`](Self::open) on an established connection.
+    pub(crate) async fn open_on(
+        stream: UnixStream,
+        request: OpenRequest,
+    ) -> Result<Opened, ControlError> {
+        let (mut read, mut write) = stream.into_split();
+        Self::write_request(&mut write, &Request::Open(request)).await?;
+        // The reply is read off the bare socket: its reader takes exactly the frame, so the first
+        // splice byte stays for the read half.
+        let reply = timeout(OPEN_REPLY_TIMEOUT, Response::read_open(&mut read))
+            .await
+            .map_err(|_| ControlError::Timeout {
+                phase: "response read",
+            })??;
+        Ok(match reply {
+            Response::Attached(info) => Opened::Attached {
+                info,
+                read: OpenRead::new(read),
+                write: OpenWrite::new(write),
+            },
+            Response::OpenRefusal(refusal) => Opened::Refused(refusal),
+            Response::Error(reason) => Opened::Error(reason),
+            other => {
+                return Err(ControlError::Protocol(format!(
+                    "unexpected reply to open: {other:?}"
+                )));
+            }
+        })
+    }
+
     /// Request a graceful stop and return the kernel-reported listener PID checked on that connection
     /// against the selected home's record read after connecting.
     ///
@@ -396,6 +461,17 @@ impl ControlClient {
     pub async fn status_attributed(&self) -> Result<(StatusReply, ProcessId), ControlError> {
         match self {
             Self::Socket(socket) => socket.status_attributed().await,
+        }
+    }
+
+    /// Ask the resident for one admitted stream to a peer. See [`UidSocket::open`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`UidSocket::open`].
+    pub async fn open(&self, request: OpenRequest) -> Result<Opened, ControlError> {
+        match self {
+            Self::Socket(socket) => socket.open(request).await,
         }
     }
 

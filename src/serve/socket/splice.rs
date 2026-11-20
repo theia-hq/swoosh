@@ -69,10 +69,6 @@ pub(crate) enum Toward {
     /// Written by the client, read by the resident.
     Peer,
     /// Written by the resident, read by the client.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the client's reader lands in the next stage")
-    )]
     Client,
 }
 

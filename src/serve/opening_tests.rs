@@ -53,6 +53,38 @@ async fn an_open_through_the_running_resident_attaches_and_splices() {
 }
 
 #[tokio::test]
+async fn the_client_open_uploads_downloads_and_hears_landed_through_the_resident() {
+    let fixture = Fixture::new("client", [Script::Reads]);
+    fixture
+        .run(async |socket| {
+            let stream = UnixStream::connect(socket).await.unwrap();
+            let opened = crate::node_client::UidSocket::open_on(
+                stream,
+                request(fixture.peer, OpenLane::Main, None),
+            )
+            .await
+            .unwrap();
+            let crate::node_client::Opened::Attached {
+                mut read,
+                mut write,
+                ..
+            } = opened
+            else {
+                panic!("not attached: {opened:?}");
+            };
+            write.write_all(b"an upload").await.unwrap();
+            write.shutdown().await.unwrap();
+            // The peer reads the upload to its end, then ends its own side with nothing sent.
+            let mut got = Vec::new();
+            read.read_to_end(&mut got).await.unwrap();
+            assert!(got.is_empty());
+            read.landed().await.unwrap();
+            assert_eq!(fixture.scripted.received(), b"an upload");
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn an_open_to_this_machine_is_not_here_and_dials_nothing() {
     let fixture = Fixture::new("self", [Script::Lists(vec![])]);
     fixture
@@ -514,16 +546,14 @@ async fn an_upload_not_delivered_by_the_deadline_closes_without_landed() {
 
 #[tokio::test(start_paused = true)]
 async fn a_client_that_stops_reading_releases_the_splice_by_the_final_write_deadline() {
-    // Room for one small Data frame and nothing more.
+    // Room for one frame mark and part of a second.
     let pair = Pair::sized(HEADER + 4);
     let (mut client, mut peer, holds) = (pair.client, pair.peer, pair.holds);
     client.write_all(&END).await.unwrap();
-    peer.write_all(b"full").await.unwrap();
+    holds.send(()).unwrap();
+    // An empty download: End and Landed are all the resident writes, and the second one is the last.
     peer.shutdown().await.unwrap();
     let mut spliced = Box::pin(pair.splice);
-    // The Data frame fills the room; the End after it waits on a client that reads nothing.
-    assert!(poll!(&mut spliced).is_pending());
-    holds.send(()).unwrap();
     assert!(poll!(&mut spliced).is_pending());
     tokio::time::advance(REPLY_TIMEOUT - Duration::from_millis(1)).await;
     assert!(poll!(&mut spliced).is_pending());
