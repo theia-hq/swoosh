@@ -1659,6 +1659,143 @@ async fn a_held_iroh_stream_whose_far_side_stops_reading_is_never_delivered() {
     std::fs::remove_dir_all(home.dir()).unwrap();
 }
 
+/// A held iroh stream whose far machine goes silent after it admitted the stream (stopped, so it sends
+/// nothing: no acknowledgement, no stop, no close) is not delivered, and `delivered` says so on its own,
+/// with no clock of the caller's: the session ends at the transport's idle timeout and the answer is
+/// `ConnectionAborted`. A Landed wait with no clock rests on this. The far machine runs in a child of this
+/// test binary, stopped by its exact pid, so nothing in this process can answer for it.
+#[tokio::test]
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn delivered_on_a_held_iroh_lane_errors_once_the_peer_goes_silent() {
+    let home = scratch("silent");
+    let card = home.dir().join("host");
+    let host = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "peers::tests::silent_host_child",
+                "--include-ignored",
+            ])
+            .env(SILENT_HOST, &card)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let (key, addrs) = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&card) {
+                let mut lines = text.lines();
+                let key: NodeId = lines.next().unwrap().parse().unwrap();
+                let addrs: Vec<SocketAddr> = lines.map(|line| line.parse().unwrap()).collect();
+                return (key, addrs);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the far machine never came up");
+    let mut hints = StaticDiscovery::new();
+    hints.insert(key, addrs);
+    let node = Node::new(bifrost_iroh::Endpoint::bind_local().await.unwrap(), hints);
+    let badge = TestRoot::seeded(1)
+        .device_badge(
+            node.node_id(),
+            SystemTime::now() + Duration::from_secs(3600),
+        )
+        .unwrap();
+    let peers = Peers::new(&node);
+    let place = peers.place(key, Main).unwrap();
+    let (_, mut writer, _reader) = peers
+        .open_placed(place, Hints::NONE, service(), Standing(Some(badge)))
+        .await
+        .unwrap();
+    host.signal(libc::SIGSTOP);
+    // Well under the stream's window, so every write completes here with none of it acknowledged.
+    writer.write_all(&[7; 64 * 1024]).await.unwrap();
+    writer.shutdown().await.unwrap();
+    let started = tokio::time::Instant::now();
+    let delivered = tokio::time::timeout(SILENT_BOUND, bifrost::WriteEnd::delivered(writer))
+        .await
+        .expect("delivered hangs on a silent peer");
+    assert_eq!(
+        delivered.map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::ConnectionAborted),
+        "a silent peer's stream is never delivered"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(10),
+        "the transport's idle timeout ended it, after {:?}",
+        started.elapsed()
+    );
+    drop(host);
+    node.close().await;
+    std::fs::remove_dir_all(home.dir()).unwrap();
+}
+
+/// The longest [`delivered_on_a_held_iroh_lane_errors_once_the_peer_goes_silent`] waits: three times
+/// noq's default idle timeout of 30 s, which neither bifrost nor iroh changes for a session.
+const SILENT_BOUND: Duration = Duration::from_secs(90);
+
+/// The variable naming the file the silent row's far machine writes its key and addresses to.
+const SILENT_HOST: &str = "SWOOSH_TEST_SILENT_HOST";
+
+/// The far machine of [`delivered_on_a_held_iroh_lane_errors_once_the_peer_goes_silent`], in a child
+/// process: it serves [`service`] with a handler that never reads, writes its key and then each address
+/// on a line of the file [`SILENT_HOST`] names, and runs until killed.
+#[tokio::test]
+#[ignore = "the far half of a row that stops its process"]
+async fn silent_host_child() {
+    let Some(card) = std::env::var_os(SILENT_HOST) else {
+        return;
+    };
+    let card = std::path::PathBuf::from(card);
+    let dir = card.parent().unwrap();
+    let store = std::sync::Arc::new(nauthy::Denylist::load(dir.join("denylist")).unwrap());
+    let host = Node::new(
+        bifrost_iroh::Endpoint::bind_local().await.unwrap(),
+        NoDiscovery,
+    );
+    let exposer = tightbeam::tunnel::Router::new(nauthy::Gate::rooted(
+        TestRoot::seeded(1).verify_key(),
+        store,
+    ))
+    .service(service(), Sink::default())
+    .unwrap()
+    .expose()
+    .unwrap();
+    let mut text = host.node_id().to_string();
+    for addr in host.local_addr().hints {
+        text.push('\n');
+        text.push_str(&addr.to_string());
+    }
+    let written = dir.join("host.new");
+    std::fs::write(&written, text).unwrap();
+    std::fs::rename(&written, &card).unwrap();
+    exposer
+        .run(&host, tightbeam::tunnel::CancellationToken::new())
+        .await;
+}
+
+/// A child process, killed by its exact pid when dropped.
+struct Child(std::process::Child);
+
+impl Child {
+    fn signal(&self, signal: libc::c_int) {
+        let pid = libc::pid_t::try_from(self.0.id()).unwrap();
+        // SAFETY: `kill` takes plain integers; the pid is this test's own child, not yet reaped.
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// A handler that reads nothing until told to, then reads its stream to the end and keeps what it read.
 #[derive(Clone, Default)]
 struct Sink {

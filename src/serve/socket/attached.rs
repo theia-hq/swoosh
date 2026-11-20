@@ -96,8 +96,11 @@ impl OpenRead {
     }
 
     /// Wait for Landed, the resident's word that the peer holds every byte of the upload and its end.
-    /// Call it after the write half's `shutdown`, once the download has ended; Landed may have come
-    /// already. An end of file before it is `ConnectionReset`: the upload was not confirmed.
+    /// Call it once the download has ended; Landed may have come already. Called before the write half's
+    /// `shutdown`, it watches the connection while the upload is still going: the resident writes Landed
+    /// only after the upload's End, so anything it answers then is the connection ending. An end of file
+    /// before Landed is `ConnectionReset`: the upload was not confirmed. Cancel-safe: a frame header read
+    /// in part is kept for the next call.
     ///
     /// # Errors
     ///
