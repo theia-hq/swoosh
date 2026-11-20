@@ -77,7 +77,8 @@ added desk -> ed01hcq6balrlxwa
 <!-- live-run: real iroh RTT over the internet, non-deterministic; 135.129.x.x masks the peer's address; re-capture before release -->
 ```console
 $ swoosh ping desk -c 4
-desk/default via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
+desk/default
+  path: direct
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 41.843/113.534/299.872/93.169 ms
 ```

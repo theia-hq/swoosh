@@ -55,7 +55,8 @@ credential to present:
 <!-- live-run: real iroh RTT over the internet, non-deterministic; re-capture before release -->
 ```console
 $ swoosh ping ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -c 4
-ed01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.64:51778 and relayed)
+ed01hcq6balrlxwa
+  path: direct
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 0.532/0.739/0.888/0.103 ms
 ```

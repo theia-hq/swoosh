@@ -74,7 +74,8 @@ The member runs `ping` and `speed` against the server's key:
 <!-- live-run: iroh reach over the internet observed 2026-09-15 (a GitHub runner reached a home node across NAT); RTT, path, and throughput vary per run, and 143.105.x.x masks the peer's address -->
 ```console
 $ swoosh ping $SERVER -c 5 -i 0.2
-ed01f62wtyapessv via iroh: mixed (direct to 143.105.x.x:41125 and relayed)
+ed01f62wtyapessv
+  path: direct
   5 sent, 5 received, 0% loss
   rtt min/avg/max/mdev = 193.685/233.854/306.825/45.510 ms
 $ swoosh speed $SERVER --down -t 3

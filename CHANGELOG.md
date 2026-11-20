@@ -22,6 +22,10 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`ping` and `status <machine>` run through `swoosh serve` too, and their lines drop `via iroh`.**
+  `status` reads `me/nas, path: direct, rtt 12.031 ms`; `ping` prints the device, then a `path:` row from a
+  reading taken after the run. If that fails, the path is left out, stderr says
+  `warning: could not read the path of this run`, and the exit code is unchanged.
 - **`speed` runs through `swoosh serve` too, and its title drops `via iroh`.** It reads
   `speed test to <machine> (<mode>)` on both paths. The `path:` line comes from a reading taken after the
   run; if that fails, there is no `path:` line, stderr says `warning: could not read the path of this run`,

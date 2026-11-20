@@ -6,8 +6,8 @@ and says why, rather than reporting a healthy-looking result.
 ## "reached, but the probe failed" / "reached, but the probe went unanswered"
 
 ```
-desk via iroh: reached, but the probe failed (read frame: stream: peer went away)
-nas via iroh: reached, but the probe went unanswered (1 sent, 0 back)
+desk: reached, but the probe failed (read frame: stream: peer went away)
+nas: reached, but the probe went unanswered (1 sent, 0 back)
 Error: desk: reached, but the probe failed
 ```
 
@@ -47,7 +47,7 @@ owner.
 ## "reached, but it does not answer ping for you"
 
 ```
-bob/nas via iroh: reached, but it does not answer ping for you
+bob/nas: reached, but it does not answer ping for you
 ```
 
 `swoosh status` reached the machine, and it refused the probe: it does not serve `ping`, or it does not admit you
