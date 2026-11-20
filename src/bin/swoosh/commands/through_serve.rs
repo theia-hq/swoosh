@@ -1,6 +1,6 @@
 //! Verbs that dial through a running `swoosh serve` rather than binding this home's key:
-//! `forward <machine> <service> -`, and `speed` and `ping`, which also follow their connection's path
-//! there.
+//! `forward <machine> <service> -`, and `speed`, `ping` and `status <machine>`, which also follow
+//! their connection's path there.
 //!
 //! When `serve` answers on this home's control socket, the verb's stream is one Open there: this
 //! process binds nothing, reads no key and asks no passphrase, and the resident presents this home's

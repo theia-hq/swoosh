@@ -244,7 +244,7 @@ fn default_output_names_no_transport() {
     let lines = [title("me/nas", measure::Mode::Down), path_line(&direct())];
     for line in lines {
         assert!(!line.contains("via"), "{line}");
-        assert!(!line.contains(swoosh::transport::FAST_PATH), "{line}");
+        assert!(!line.contains("iroh"), "{line}");
     }
 }
 

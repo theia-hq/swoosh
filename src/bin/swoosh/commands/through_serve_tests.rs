@@ -614,10 +614,11 @@ fn speed_runs_through_the_resident_against_measures_responder() {
     });
 }
 
-/// `ping` through a running `serve`, end to end: its one observed Open rides the resident's held session to the machine, measure's responder answers its probes there, and
+/// `ping` and `status <machine>` through a running `serve`, end to end: each verb's one observed Open
+/// rides the resident's held session to the machine, measure's responder answers its probes there, and
 /// the run's Finish reads the path through the same socket.
 #[test]
-fn ping_runs_through_the_resident_on_its_held_session() {
+fn ping_and_status_run_through_the_resident_on_its_held_session() {
     on_a_big_stack(async || {
         through_the_resident("ping", &["ping"], "bob/nas", async |home, contacts| {
             use clap::Parser as _;
@@ -625,11 +626,13 @@ fn ping_runs_through_the_resident_on_its_held_session() {
             #[derive(clap::Parser)]
             enum Verb {
                 Ping(crate::commands::ping::PingCmd),
+                Status(crate::commands::status::StatusCmd),
             }
 
             for argv in [
                 &["x", "ping", "bob/nas", "-c", "2", "-i", "0.05"][..],
                 &["x", "ping", "bob/nas", "-v", "-c", "1"],
+                &["x", "status", "bob/nas"],
             ] {
                 // The open `ping` route admits one run a second per caller, and every run here is the
                 // resident's, so each waits out the last one's.
@@ -637,6 +640,14 @@ fn ping_runs_through_the_resident_on_its_held_session() {
                 let routed = match Verb::try_parse_from(argv).unwrap() {
                     Verb::Ping(cmd) => {
                         let machine = cmd.peer.machine(contacts).unwrap();
+                        tokio::time::timeout(
+                            core::time::Duration::from_secs(10),
+                            cmd.through_serve(home, &machine, None, contacts),
+                        )
+                        .await
+                    }
+                    Verb::Status(cmd) => {
+                        let machine = cmd.peer.as_ref().unwrap().machine(contacts).unwrap();
                         tokio::time::timeout(
                             core::time::Duration::from_secs(10),
                             cmd.through_serve(home, &machine, None, contacts),
@@ -655,18 +666,23 @@ fn ping_runs_through_the_resident_on_its_held_session() {
     });
 }
 
-/// `ping` through `serve` makes one Open, observed, on the held Main session.
+/// `ping` and `status <machine>` through `serve` make one Open each, observed, on the held Main session,
+/// for the service the probe names: `control.services` for one of your devices.
 #[tokio::test]
-async fn ping_opens_once_observed_on_main() {
+async fn ping_and_status_open_once_observed_on_main() {
     use clap::Parser as _;
     use swoosh::serve::control_codec::{Observation, OpenLane, Request, Response};
 
     #[derive(clap::Parser)]
     enum Verb {
         Ping(crate::commands::ping::PingCmd),
+        Status(crate::commands::status::StatusCmd),
     }
 
-    for (argv, service) in [(["x", "ping", "me/nas"], "ping")] {
+    for (argv, service) in [
+        (["x", "ping", "me/nas"], "ping"),
+        (["x", "status", "me/nas"], "control.services"),
+    ] {
         let mut served = Served::new(&format!("open-{}", argv[1])).await;
         let listener = served.listener();
         listener.set_nonblocking(true).unwrap();
@@ -690,6 +706,10 @@ async fn ping_opens_once_observed_on_main() {
                     cmd.through_serve(&served.home, &peer, None, &contacts)
                         .await
                 }
+                Verb::Status(cmd) => {
+                    cmd.through_serve(&served.home, &peer, None, &contacts)
+                        .await
+                }
             }
         };
         let (routed, asked) = tokio::time::timeout(core::time::Duration::from_secs(10), async {
@@ -708,19 +728,20 @@ async fn ping_opens_once_observed_on_main() {
     }
 }
 
-/// An Open the resident refused reaches `ping` typed, so it prints the own bind's outcome: an unreachable
-/// machine reads `could not reach`, with no reach hint.
+/// An Open the resident refused reaches `ping` and `status <machine>` typed, so each prints the own
+/// bind's outcome: an unreachable machine reads `could not reach`, with no reach hint.
 #[tokio::test]
-async fn an_unreachable_open_reaches_ping_as_its_own_line() {
+async fn an_unreachable_open_reaches_ping_and_status_as_their_own_line() {
     use clap::Parser as _;
     use swoosh::serve::control_codec::{Request, Response};
 
     #[derive(clap::Parser)]
     enum Verb {
         Ping(crate::commands::ping::PingCmd),
+        Status(crate::commands::status::StatusCmd),
     }
 
-    for argv in [["x", "ping", "me/nas"]] {
+    for argv in [["x", "ping", "me/nas"], ["x", "status", "me/nas"]] {
         let mut served = Served::new(&format!("unreached-{}", argv[1])).await;
         let listener = served.listener();
         listener.set_nonblocking(true).unwrap();
@@ -738,6 +759,10 @@ async fn an_unreachable_open_reaches_ping_as_its_own_line() {
         let run = async {
             match Verb::try_parse_from(argv).unwrap() {
                 Verb::Ping(cmd) => {
+                    cmd.through_serve(&served.home, &peer, None, &contacts)
+                        .await
+                }
+                Verb::Status(cmd) => {
                     cmd.through_serve(&served.home, &peer, None, &contacts)
                         .await
                 }

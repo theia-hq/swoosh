@@ -297,10 +297,6 @@ pub struct Bound {
     pub reach: Reach,
 }
 
-/// The name of the path a session rides, for the readouts that say which carried it (`via iroh`). A
-/// plain value named here, at the seam, so the verbs that print it stay transport-blind.
-pub const FAST_PATH: &str = "iroh";
-
 /// A direct hint for one peer: its [`NodeId`] mapped to reachable addresses. Parsed at the clap boundary
 /// from `<key>=<host:port>`, where the host may be an IP OR a DNS name (a Docker service, a LAN host): it
 /// resolves via the system resolver, so a readable `nodea:9000` reaches a peer by name. Layered under LAN
