@@ -295,7 +295,17 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                 // already waited for the peer to hold a finished upload, for as long as the client stayed
                 // attached and within the drain after its hang-up, so the close follows at once: after a
                 // delivery, nothing is lost; without one, the close is the reset a held lane cannot send.
-                attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
+                let lost = connection.wait_closed();
+                attach(
+                    from_client,
+                    to_client,
+                    from_peer,
+                    to_peer,
+                    info,
+                    &gone,
+                    lost,
+                )
+                .await;
                 drop((connection, held));
                 return;
             }
@@ -311,8 +321,18 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
             // after the splice drops it: no close to wait for. A held stream the client ended is never
             // reset, since an abort after its shutdown does nothing; a delivery that fails only withholds
             // Landed.
-            Ok((info, to_peer, from_peer)) => {
-                attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
+            Ok((info, session, to_peer, from_peer)) => {
+                let lost = session.closed();
+                attach(
+                    from_client,
+                    to_client,
+                    from_peer,
+                    to_peer,
+                    info,
+                    &gone,
+                    lost,
+                )
+                .await;
             }
             Err(error) => refuse(&mut to_client, failed(&error)).await,
         }
@@ -347,13 +367,15 @@ async fn answer<W: AsyncWrite + Unpin>(to_client: &mut W, reply: Response) {
     let _ = to_client.shutdown().await;
 }
 
-/// Reply Attached with the path the stream rides, then splice.
+/// Reply Attached with the path the stream rides, then splice; `lost` resolves once the session the
+/// stream rides has closed.
 ///
-/// However this ends, short of a successful shutdown of `to_peer`, the peer's stream is aborted: a failed
-/// reply, an upload cut off or malformed, a failed write toward the peer, a failed stream from the peer, a
-/// drain cut at its deadline, and this future dropped by `Stop` or a panic. A client gone while it splices does not drop this
-/// future: what it wrote drains, a drain that reaches the client's End in time ends cleanly, and only one
-/// still running at the deadline is aborted.
+/// However this ends, short of a successful shutdown of `to_peer`, the peer's stream is aborted: a
+/// failed reply, an upload cut off or malformed, a failed write toward the peer, a failed stream from
+/// the peer, a session lost, a drain cut at its deadline, and this future dropped by `Stop` or a panic.
+/// A client gone while it splices does not drop this future: what it wrote drains, a drain that
+/// reaches the client's End in time ends cleanly, and only one still running at the deadline is
+/// aborted.
 async fn attach<R, W, PR, PW>(
     from_client: R,
     mut to_client: W,
@@ -361,6 +383,7 @@ async fn attach<R, W, PR, PW>(
     to_peer: PW,
     info: bifrost::ConnInfo,
     gone: &ClientGone,
+    lost: impl Future<Output = ()>,
 ) where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -376,7 +399,15 @@ async fn attach<R, W, PR, PW>(
     ) {
         return;
     }
-    splice(from_client, to_client, from_peer, to_peer, gone.wait()).await;
+    splice(
+        from_client,
+        to_client,
+        from_peer,
+        to_peer,
+        gone.wait(),
+        lost,
+    )
+    .await;
 }
 
 /// Move a stream both ways in SWC1 frames, each direction on its own, until both are settled.
@@ -394,6 +425,11 @@ async fn attach<R, W, PR, PW>(
 /// off, even one that is idle and writing nothing. The resident shuts its writing only as the splice's
 /// last act, so the client's hang-up stays readable throughout and Landed can still follow the
 /// download's End.
+///
+/// `lost` resolves once the session the peer's stream rides has closed (the host cut it, or the path
+/// failed). While the upload runs, that ends the splice the same way, at once: after the peer's End,
+/// with the client idle, nothing reads or writes the peer's stream, so only the session can say so.
+/// The client reads a close with no Landed.
 ///
 /// Once the client's End is read and the peer's stream shut down, the splice waits for the transport to
 /// say the peer holds every byte and the end, with no clock of its own while the client stays attached,
@@ -419,6 +455,7 @@ pub(crate) async fn splice<R, W, PR, PW>(
     from_peer: PR,
     to_peer: ToPeer<PW>,
     hangup: impl Future<Output = ()>,
+    lost: impl Future<Output = ()>,
 ) where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -433,6 +470,7 @@ pub(crate) async fn splice<R, W, PR, PW>(
     let closing = 'spliced: {
         let mut up = pin!(upload_to(from_client, to_peer));
         let mut hangup = pin!(hangup);
+        let mut lost = pin!(lost);
         // Set once the download has settled.
         let mut settled: Option<Downloaded<W>> = None;
 
@@ -448,6 +486,23 @@ pub(crate) async fn splice<R, W, PR, PW>(
                 () = &mut hangup => {
                     drain(up).await;
                     break 'spliced None;
+                }
+                // Nothing more can reach the peer, and an idle client would read nothing until it
+                // wrote: no Landed can follow, so the download settles at once and the client's
+                // connection closes, while leaving the block aborts the upload.
+                () = &mut lost => {
+                    drop(landed);
+                    let done = match settled {
+                        Some(done) => done,
+                        None => tokio::select! {
+                            done = &mut down => done,
+                            () = &mut hangup => break 'spliced None,
+                        },
+                    };
+                    break 'spliced match done {
+                        Downloaded::Settled(writer) | Downloaded::PeerCut(writer) => Some(writer),
+                        Downloaded::Lost => None,
+                    };
                 }
             }
         };
@@ -551,8 +606,8 @@ enum Downloaded<W> {
 
 /// Frame the peer's bytes toward the client: Data while the peer sends, End at its clean end, nothing
 /// at a failed one. After End the writing stays open for the upload's verdict, and Landed goes out when
-/// `verdict` says so; a dropped `verdict` sender means none will. Every read is cancel-safe and every frame write runs to its end inside this one future, so a
-/// frame is never cut by a select.
+/// `verdict` says so; a dropped `verdict` sender means none will. Every read is cancel-safe and every
+/// frame write runs to its end inside this one future, so a frame is never cut by a select.
 async fn download<PR, W>(
     mut from_peer: PR,
     mut to_client: FramedWriter<W>,
@@ -630,9 +685,9 @@ async fn last(write: impl Future<Output = io::Result<()>>) -> bool {
 /// The send half toward the peer for the life of an attached Open. Dropped before a successful
 /// [`finish`](Self::finish), it aborts the stream, so the peer reads `ConnectionReset` where a
 /// transport's write half dropped as it is would end the stream cleanly: at the drain deadline, after a
-/// cut-off or malformed upload, after a failed reply or write toward the peer, after the peer's own stream
-/// failed, and when `Stop` or a panic drops the Open. Only the client's End leads to `finish`, so a stream the client did not end is never
-/// shut down cleanly.
+/// cut-off or malformed upload, after a failed reply or write toward the peer, after the peer's own
+/// stream failed, and when `Stop` or a panic drops the Open. Only the client's End leads to `finish`,
+/// so a stream the client did not end is never shut down cleanly.
 pub(crate) struct ToPeer<W: WriteEnd>(Option<W>);
 
 impl<W: WriteEnd> ToPeer<W> {

@@ -475,6 +475,7 @@ async fn a_peer_still_sending_does_not_hold_a_gone_client() {
         async {
             let _ = hung.await;
         },
+        core::future::pending(),
     ));
     assert!(poll!(&mut spliced).is_pending());
     hang_up.send(()).unwrap();
@@ -590,6 +591,7 @@ async fn a_clean_end_then_half_close_after_the_downloads_end_starts_no_clock() {
         TestWrite::read_by(to_peer, held),
         info,
         &gone,
+        core::future::pending(),
     ));
     let waiting = async {
         attached(&mut client).await;
@@ -665,18 +667,24 @@ async fn a_peer_that_stops_reading_the_upload_still_hands_over_its_download() {
     let (peer_in, to_peer) = tokio::io::duplex(64);
     let (mut peer_out, from_peer) = tokio::io::duplex(64);
     let (_holds, held) = tokio::sync::oneshot::channel::<()>();
+    let (aborted, cut) = tokio::sync::oneshot::channel();
     let spliced = splice(
         BufReader::new(from_client),
         to_client,
         from_peer,
-        ToPeer::arm(TestWrite::read_by(to_peer, held)),
+        ToPeer::arm(Signalled {
+            half: TestWrite::read_by(to_peer, held),
+            aborted: Some(aborted),
+        }),
+        core::future::pending(),
         core::future::pending(),
     );
     drop(peer_in);
     client.write_all(&framed(b"an upload")).await.unwrap();
     let far = async {
-        // Only once the upload has failed toward the peer does the peer answer.
-        tokio::time::sleep(HANG_GUARD / 4).await;
+        // Only once the upload has failed toward the peer, and the splice aborted it, does the peer
+        // answer.
+        cut.await.unwrap();
         peer_out.write_all(b"a reply").await.unwrap();
         peer_out.shutdown().await.unwrap();
     };
@@ -709,6 +717,7 @@ async fn a_stalled_upload_never_stalls_the_download() {
         to_client,
         from_peer,
         ToPeer::arm(TestWrite::read_by(to_peer, held)),
+        core::future::pending(),
         core::future::pending(),
     ));
     // More than the peer's stream holds, so the upload stalls on it.
@@ -758,7 +767,9 @@ async fn an_upload_the_peer_will_never_hold_keeps_its_download_without_landed() 
 }
 
 /// A far TCP service that answers and closes both ways partway through an upload: tightbeam's forward
-/// stops reading for it, so the upload never lands and the client hears no Landed.
+/// stops reading for it, so the upload never lands and the client hears no Landed. The close with the
+/// upload unread is a reset, so the download is cut too: no End, and the answer arrives whole or, where
+/// the reset discards it first, not at all.
 #[tokio::test]
 async fn a_service_closing_both_ways_mid_upload_never_earns_landed() {
     let (read, ()) = through_a_forward(async |mut service| {
@@ -769,6 +780,12 @@ async fn a_service_closing_both_ways_mid_upload_never_earns_landed() {
     })
     .await;
     assert!(!read.landed, "an upload its service dropped landed");
+    assert!(!read.end, "a download its service reset read as finished");
+    assert!(
+        read.data.is_empty() || read.data == b"no",
+        "the answer arrived in part: {:?}",
+        read.data
+    );
 }
 
 /// A far TCP service that half-closes its output and reads on: tightbeam's forward hands it the whole
@@ -877,6 +894,7 @@ async fn an_attached_reply_that_cannot_be_written_resets_the_peers_stream() {
         stream.to_peer.take().unwrap(),
         stream.sessions[0].conn_info(),
         &stream.gone,
+        core::future::pending(),
     )
     .await;
     assert_eq!(stream.peer_reads().await, Ended::Reset);
@@ -1505,6 +1523,35 @@ async fn a_client_still_open_to_an_ended_peer_stays_live() {
         .await;
 }
 
+/// A peer that ended its side, then cuts the session (a revoke or an expiry) while the client idles
+/// with its upload open, on a held lane and on an isolated connection: the Open ends at once, and the
+/// client reads a close with no Landed.
+#[tokio::test]
+async fn a_session_cut_after_the_downloads_end_reaches_an_idle_client_at_once() {
+    for lane in [OpenLane::Main, OpenLane::Isolated] {
+        let fixture = Fixture::new("cut", [Script::Ends]);
+        fixture
+            .run(async |socket| {
+                let mut client = open(socket, request(fixture.peer, lane, None)).await;
+                attached(&mut client).await;
+                assert!(download(&mut client).await.is_empty());
+                fixture.scripted.cut();
+                let read = tokio::time::timeout(HANG_GUARD, read_all(&mut client))
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("the cut never reached the idle client on {lane:?}")
+                    });
+                assert_eq!(
+                    read,
+                    Read::default(),
+                    "nothing follows the End, Landed least"
+                );
+                released(&fixture.opener, HANG_GUARD).await;
+            })
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn a_failed_write_to_the_client_still_sends_its_bytes_to_the_peer() {
     let (mut client, from_client) = tokio::io::duplex(1024);
@@ -1518,6 +1565,7 @@ async fn a_failed_write_to_the_client_still_sends_its_bytes_to_the_peer() {
         Gone,
         from_peer,
         ToPeer::arm(TestWrite::read_by(to_peer, held)),
+        core::future::pending(),
         core::future::pending(),
     ));
     assert!(
@@ -1883,7 +1931,7 @@ async fn through_a_forward<T>(service: impl AsyncFnOnce(tokio::net::TcpStream) -
         let place = peers
             .place(host.node_id(), crate::peers::Lane::Main)
             .unwrap();
-        let (_, to_peer, from_peer) = peers
+        let (_, session, to_peer, from_peer) = peers
             .open_placed(
                 place,
                 Hints::NONE,
@@ -1900,6 +1948,7 @@ async fn through_a_forward<T>(service: impl AsyncFnOnce(tokio::net::TcpStream) -
             from_peer,
             ToPeer::arm(to_peer),
             core::future::pending(),
+            session.closed(),
         );
         let (mut reading, mut writing) = tokio::io::split(&mut client);
         let upload = async {
@@ -2002,6 +2051,7 @@ impl Pair<()> {
                 async {
                     let _ = hung.await;
                 },
+                core::future::pending(),
             ),
         }
     }
@@ -2149,13 +2199,15 @@ impl MemStream {
     /// Attach the client to the peer, as an Open does once its stream opened.
     async fn attach(&mut self) {
         let (from_client, to_client) = self.server.take().unwrap().into_split();
+        let (from_peer, to_peer) = (self.from_peer.take().unwrap(), self.to_peer.take().unwrap());
         attach(
             BufReader::new(from_client),
             to_client,
-            self.from_peer.take().unwrap(),
-            self.to_peer.take().unwrap(),
+            from_peer,
+            to_peer,
             self.sessions[0].conn_info(),
             &self.gone,
+            self.sessions[0].wait_closed(),
         )
         .await;
     }
@@ -2183,6 +2235,7 @@ async fn splice_mem(
         to_peer,
         session.conn_info(),
         gone,
+        session.wait_closed(),
     )
     .await;
 }
@@ -2244,6 +2297,49 @@ impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Counted<W> {
 impl<W: WriteEnd> WriteEnd for Counted<W> {
     fn abort(&mut self) {
         self.aborts.set(self.aborts.get() + 1);
+        self.half.abort();
+    }
+
+    fn delivered(self) -> impl Future<Output = std::io::Result<()>> + Send + 'static {
+        self.half.delivered()
+    }
+}
+
+/// A write half that says when it is aborted.
+struct Signalled<W> {
+    half: W,
+    aborted: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Signalled<W> {
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> core::task::Poll<std::io::Result<usize>> {
+        core::pin::Pin::new(&mut self.get_mut().half).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::pin::Pin::new(&mut self.get_mut().half).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::pin::Pin::new(&mut self.get_mut().half).poll_shutdown(cx)
+    }
+}
+
+impl<W: WriteEnd> WriteEnd for Signalled<W> {
+    fn abort(&mut self) {
+        if let Some(aborted) = self.aborted.take() {
+            let _ = aborted.send(());
+        }
         self.half.abort();
     }
 

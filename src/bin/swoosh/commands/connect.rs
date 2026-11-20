@@ -11,11 +11,12 @@
 //! re-invokes THIS binary as `<self> forward <peer> <service> -` via `current_exe()` (not a separate
 //! `tightbeam` binary on PATH), so the bridge an operator debugs by hand is the one ssh runs.
 //!
-//! Both sinks end when the host cuts the session (on a revoke or an expiry), whatever the local side is
-//! doing; a stdin that is not a terminal still finishes its upload after a clean end (see
-//! [`pump_stdio`]). tightbeam's own stdio bridge and port forward do not yet:
-//! the bridge waits on a stdin read before the process can exit, and the forward keeps listening on a
-//! session that is gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
+//! The own bind ends when the host cuts the session (on a revoke or an expiry), whatever the local
+//! side is doing. Through `serve` only the stdout sink is routed, and it ends the same way:
+//! [`pump_stdio`] says how, including that a stdin that is not a terminal still finishes its upload
+//! after a clean end. tightbeam's own stdio bridge and port forward do not yet: the bridge waits on a
+//! stdin read before the process can exit, and the forward keeps listening on a session that is
+//! gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
 //! frames, until tightbeam's own end the same way.
 
 use core::pin::Pin;
@@ -318,9 +319,10 @@ async fn lost<S: Session>(session: &S) -> eyre::Report {
 /// Reach the service over one stream and pipe it against this process's stdin and stdout: the bridge
 /// `swoosh ssh` runs as its `ProxyCommand`.
 ///
-/// When the stream from the host fails (the host cut the session on a revoke or an expiry), the run is
-/// over, whatever stdin is doing; how a clean end ends the run is [`pump_stdio`]'s. stdin is read on its own thread (see [`stdin_chunks`]), so nothing waits on a read that, at a
-/// terminal or under ssh, only returns when the person types again.
+/// When the stream from the host fails or the session closes (the host cut it on a revoke or an
+/// expiry), the run is over, whatever stdin is doing; how a clean end ends the run is
+/// [`pump_stdio`]'s. stdin is read on its own thread (see [`stdin_chunks`]), so nothing waits on a
+/// read that, at a terminal or under ssh, only returns when the person types again.
 async fn pipe_stdio<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     refused: &Refused<'_>,
@@ -335,7 +337,10 @@ async fn pipe_stdio<T: Transport, D: Discovery>(
     };
     pump_stdio(
         Stream(writer),
-        Stream(reader),
+        OwnRead {
+            half: reader,
+            session: &session,
+        },
         Stdin::open()?,
         Stdout::default(),
     )
@@ -352,8 +357,9 @@ async fn pipe_stdio<T: Transport, D: Discovery>(
 ///
 /// When the download ends first on any other stdin (a file, a pipe, a ProxyCommand's pipe), stdout is
 /// closed at once, so whatever reads it sees its end now: a ProxyCommand host can wait for that end before
-/// it closes our stdin. The upload then runs to stdin's end. While stdin idles, the read half is watched,
-/// so a connection that ends without the word that the upload landed ends the run at once.
+/// it closes our stdin. The upload then runs to stdin's end. While stdin idles, the connection is
+/// watched (the session on the own bind, the resident's connection through `serve`), so one that ends
+/// without the word that the upload landed ends the run at once.
 ///
 /// After a clean upload end the run waits for the whole download, then, when the upload carried a byte,
 /// for the word that it landed, from whichever half carries it, with no clock: exit 0 says the far side
@@ -489,6 +495,8 @@ pub(crate) async fn pump_stdio(
         Settled::Uploaded(Carried::Nothing, _) => Ok(()),
         Settled::Uploaded(Carried::Data, mut reader) => {
             let landed = tokio::select! {
+                // Delivery first: a far side that holds the upload and then closes still exits 0.
+                biased;
                 delivered = writer.delivered() => delivered,
                 landed = reader.0.landed() => landed,
             };
@@ -511,8 +519,8 @@ pub(crate) trait Upload: io::AsyncWrite + Unpin {
 /// The download half of a forwarded stream: the host's bytes, and the word that the upload landed.
 pub(crate) trait Download: io::AsyncRead + Unpin {
     /// After the download's end, resolve with the word that the far side holds the whole upload and its
-    /// end, or fail once the connection ends without it. Pending forever where the word comes on the
-    /// upload half instead.
+    /// end, or fail once the connection ends without it. Where the word comes on the upload half
+    /// instead, this only fails, once the connection ends.
     fn landed(&mut self) -> impl Future<Output = io::Result<()>>;
 }
 
@@ -590,11 +598,27 @@ impl Output for Stdout {
     }
 }
 
-/// Point `fd` at `/dev/null`: what it named is closed, while the number stays taken, so nothing opened
-/// later becomes this process's stdout, and a later write goes nowhere rather than failing.
+/// End what `fd` names for its reader, then point `fd` at `/dev/null`, so the number stays taken:
+/// nothing opened later becomes this process's stdout, and a later write goes nowhere rather than
+/// failing.
+///
+/// A pipe ends for its reader only when its last write descriptor closes, and a socket only when every
+/// descriptor naming it closes, unless its writing is shut down. So a socket (one a host hands over as
+/// both stdin and stdout, as socat and inetd do) has its writing shut down first, which ends it for the
+/// reader however many descriptors name it. A pipe that another descriptor also names, such as stderr
+/// under `2>&1`, cannot be ended from here: its reader sees the end when this process exits.
 fn close_onto_null(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
     use std::os::fd::AsRawFd as _;
 
+    // SAFETY: `fd` is open for the call; `shutdown` changes no memory, only the socket's state. Any
+    // descriptor that is not a socket answers ENOTSOCK and is left to the `dup2`, as is a socket
+    // whose peer is already gone (ENOTCONN), whose reader has its end already.
+    if unsafe { libc::shutdown(fd.as_raw_fd(), libc::SHUT_WR) } < 0 {
+        let error = io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(libc::ENOTSOCK | libc::ENOTCONN)) {
+            return Err(error);
+        }
+    }
     let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
     // SAFETY: both descriptors are open for the call; `dup2` only makes `fd` name what `null` names.
     if unsafe { libc::dup2(null.as_raw_fd(), fd.as_raw_fd()) } < 0 {
@@ -603,7 +627,7 @@ fn close_onto_null(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
-/// One half of a transport stream, held by the own bind.
+/// The upload half of a transport stream, held by the own bind.
 pub(crate) struct Stream<H>(pub(crate) H);
 
 impl<W: io::AsyncWrite + bifrost::WriteEnd + Unpin> Upload for Stream<W> {
@@ -614,13 +638,6 @@ impl<W: io::AsyncWrite + bifrost::WriteEnd + Unpin> Upload for Stream<W> {
     /// The transport's own word, so exit 0 means the same on the own bind as through `serve`.
     fn delivered(self) -> impl Future<Output = io::Result<()>> {
         bifrost::WriteEnd::delivered(self.0)
-    }
-}
-
-impl<R: io::AsyncRead + Unpin> Download for Stream<R> {
-    /// A transport stream's download carries no such word; the upload half has it.
-    fn landed(&mut self) -> impl Future<Output = io::Result<()>> {
-        core::future::pending()
     }
 }
 
@@ -642,13 +659,32 @@ impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for Stream<W> {
     }
 }
 
-impl<R: io::AsyncRead + Unpin> io::AsyncRead for Stream<R> {
+/// The own bind's download half, with the session it rides: the session closing is the connection
+/// ending, which a read half that has already reached its end can no longer report.
+pub(crate) struct OwnRead<'s, S: Session> {
+    pub(crate) half: S::Read,
+    pub(crate) session: &'s S,
+}
+
+impl<S: Session> Download for OwnRead<'_, S> {
+    /// The word that the upload landed comes on the upload half, so this only fails, once the session
+    /// closes: the host cut it (on a revoke or an expiry), or the path to it failed.
+    async fn landed(&mut self) -> io::Result<()> {
+        self.session.wait_closed().await;
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "session closed",
+        ))
+    }
+}
+
+impl<S: Session> io::AsyncRead for OwnRead<'_, S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.0).poll_read(cx, buf)
+        Pin::new(&mut self.half).poll_read(cx, buf)
     }
 }
 
@@ -1656,6 +1692,27 @@ mod tests {
         assert!(!cut.get(), "an empty upload still ends cleanly");
     }
 
+    /// The far side holds the upload, and the connection ends as the word arrives: both answers are
+    /// ready at once, and the delivery decides, every time.
+    #[tokio::test]
+    async fn a_delivery_and_a_close_ready_together_exit_0() {
+        for _ in 0..32 {
+            let (stdin, input) = mpsc::channel(1);
+            stdin.try_send(Ok(b"up".to_vec())).unwrap();
+            drop(stdin);
+            // The download is read only once the upload has ended, so the run reaches its last wait.
+            let (writer, after) = after_half_close(());
+            let reader = Landing {
+                bytes: b"",
+                landed: Some(io::ErrorKind::ConnectionAborted),
+                after: after.closed,
+            };
+            super::pump_stdio(Plain(writer), reader, piped(input), io::sink())
+                .await
+                .expect("a delivered upload exits 0 whatever else is ready");
+        }
+    }
+
     #[tokio::test]
     async fn a_terminal_stdin_cuts_the_upload_at_the_downloads_end_and_exits_0() {
         let (writer, cut, _) = noted();
@@ -1702,7 +1759,7 @@ mod tests {
         }
         let _ = super::pump_stdio(
             super::Stream(writer),
-            super::Stream(reader),
+            own_read(reader, &session),
             input,
             io::sink(),
         )
@@ -1749,7 +1806,7 @@ mod tests {
         let (output, mut seen) = io::duplex(64);
         let pump = super::pump_stdio(
             super::Stream(writer),
-            super::Stream(reader),
+            own_read(reader, &session),
             piped(input),
             Closing(Some(output)),
         );
@@ -1788,6 +1845,99 @@ mod tests {
         );
         result.expect("delivered once read").unwrap();
         assert_eq!(&got, b"up");
+    }
+
+    /// The own bind's download half over `reader`, watching `session`.
+    fn own_read(
+        reader: bifrost_mem::MemRead,
+        session: &bifrost_mem::MemSession,
+    ) -> super::OwnRead<'_, bifrost_mem::MemSession> {
+        super::OwnRead {
+            half: reader,
+            session,
+        }
+    }
+
+    /// The own bind, its host's half ended first and stdin idle: the host closing the session (a revoke
+    /// or an expiry) ends the run at once, as cut off.
+    #[tokio::test]
+    async fn the_own_bind_ends_at_once_when_its_session_closes_while_stdin_idles() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (session, peer) = sessions().await;
+        let (writer, reader) = session.open_bi().await.unwrap();
+        let (mut far_write, _far_read) = peer.accept_bi().await.unwrap();
+        far_write.shutdown().await.unwrap();
+        let (_stdin, input) = mpsc::channel(1);
+        let (output, mut seen) = io::duplex(64);
+        let pump = super::pump_stdio(
+            super::Stream(writer),
+            own_read(reader, &session),
+            piped(input),
+            Closing(Some(output)),
+        );
+        tokio::pin!(pump);
+        let mut down = Vec::new();
+        tokio::time::timeout(GUARD, async {
+            tokio::select! {
+                _ = &mut pump => panic!("the run ended with stdin open"),
+                read = seen.read_to_end(&mut down) => { read.unwrap(); }
+            }
+        })
+        .await
+        .expect("stdout's reader saw no end while stdin stayed open");
+        assert!(futures::poll!(&mut pump).is_pending(), "stdin still idles");
+        peer.close();
+        assert_remote(
+            tokio::time::timeout(GUARD, pump)
+                .await
+                .expect("the closed session ended the run though stdin idles"),
+        );
+    }
+
+    /// The own bind, its upload ended cleanly: a far side that stops reading before it holds the
+    /// upload's end fails the transport's delivery, and the run exits as cut off.
+    #[tokio::test]
+    async fn the_own_bind_exits_cut_off_when_delivery_fails() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (session, peer) = sessions().await;
+        let (writer, reader) = session.open_bi().await.unwrap();
+        let (mut far_write, mut far_read) = peer.accept_bi().await.unwrap();
+        far_write.shutdown().await.unwrap();
+        let (stdin, input) = mpsc::channel(1);
+        stdin.send(Ok(b"up".to_vec())).await.unwrap();
+        drop(stdin);
+        let pump = super::pump_stdio(
+            super::Stream(writer),
+            own_read(reader, &session),
+            piped(input),
+            io::sink(),
+        );
+        tokio::pin!(pump);
+        // The far side reads the bytes, so the writes and the clean end all succeed, and stops
+        // before it reads the end: only the delivery can fail.
+        let mut got = [0; 2];
+        tokio::time::timeout(GUARD, async {
+            tokio::select! {
+                _ = &mut pump => panic!("the run ended before the far side read the upload"),
+                read = far_read.read_exact(&mut got) => { read.unwrap(); }
+            }
+        })
+        .await
+        .expect("the upload never reached the far side");
+        assert_eq!(&got, b"up");
+        assert!(
+            futures::poll!(&mut pump).is_pending(),
+            "no exit before delivery"
+        );
+        drop(far_read);
+        assert_remote(
+            tokio::time::timeout(GUARD, pump)
+                .await
+                .expect("the failed delivery ended the run"),
+        );
+        drop(peer);
     }
 
     /// How long a row waits for what should happen at once.
@@ -1957,5 +2107,36 @@ mod tests {
         reader.read_to_end(&mut got).unwrap();
         assert_eq!(got, b"down");
         writer.write_all(b"after").unwrap();
+    }
+
+    /// A socket whose reader has already gone has its end already: closing it is no error.
+    #[test]
+    fn closing_a_socket_whose_reader_has_gone_onto_null_succeeds() {
+        use std::os::fd::AsFd as _;
+
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        super::close_onto_null(writer.as_fd()).unwrap();
+    }
+
+    /// A socket that another descriptor also names, as when a host hands one socket over as both
+    /// stdin and stdout: closing stdout still ends it for its reader at once.
+    #[test]
+    fn closing_a_shared_socket_onto_null_ends_it_for_its_reader() {
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::AsFd as _;
+
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let _stdin = writer.try_clone().unwrap();
+        reader
+            .set_read_timeout(Some(core::time::Duration::from_secs(1)))
+            .unwrap();
+        writer.write_all(b"down").unwrap();
+        super::close_onto_null(writer.as_fd()).unwrap();
+        let mut got = Vec::new();
+        reader
+            .read_to_end(&mut got)
+            .expect("the reader saw no end while another descriptor named the socket");
+        assert_eq!(got, b"down");
     }
 }

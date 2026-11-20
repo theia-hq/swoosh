@@ -880,6 +880,8 @@ pub enum Script {
 pub struct ScriptedPeer {
     key: NodeId,
     state: std::sync::Arc<std::sync::Mutex<Scripted>>,
+    /// Whether the host has cut its sessions, for every session's `wait_closed`.
+    cut: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// What a [`ScriptedPeer`] has left to answer, and what it has read.
@@ -901,7 +903,14 @@ impl ScriptedPeer {
                 script: script.into_iter().collect(),
                 ..Scripted::default()
             })),
+            cut: std::sync::Arc::new(tokio::sync::watch::Sender::new(false)),
         }
+    }
+
+    /// Cut every session to it, as a host does on a revoke or an expiry: each session's `wait_closed`
+    /// resolves. Its streams are left as they are, so only a watch on the session can see the cut.
+    pub fn cut(&self) {
+        self.cut.send_replace(true);
     }
 
     /// Every request its gate has read, in order.
@@ -1093,9 +1102,11 @@ impl bifrost::Session for ScriptedPeer {
         Err(bifrost::Error::Closed)
     }
 
-    /// Open until dropped, so an owner holding it reuses it rather than redialing a closed session.
+    /// Open until [`cut`](Self::cut), so an owner holding it reuses it rather than redialing a closed
+    /// session.
     async fn wait_closed(&self) {
-        core::future::pending::<()>().await;
+        // The sender lives as long as `self`, so the wait ends only at the cut.
+        let _ = self.cut.subscribe().wait_for(|cut| *cut).await;
     }
 
     /// Counted, so a [`Script::EndsThenReads`] stream keeps nothing it reads after a close.

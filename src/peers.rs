@@ -265,13 +265,14 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         lane: Lane,
         presents: Presents,
     ) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), OpenError> {
-        let (_, writer, reader) = self
+        let (_, _, writer, reader) = self
             .open_attached(peer, hints, service, lane, presents)
             .await?;
         Ok((writer, reader))
     }
 
-    /// [`open`](Self::open), with the path report of the session the stream rides, read as it attached.
+    /// [`open`](Self::open), with the path report of the session the stream rides, read as it attached,
+    /// and a watch on that session's closing.
     pub(crate) async fn open_attached(
         &self,
         peer: NodeId,
@@ -282,6 +283,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     ) -> Result<
         (
             ConnInfo,
+            SessionEnd<T::Session>,
             impl AsyncWrite + Unpin + use<'_, 'n, T, D>,
             impl AsyncRead + Unpin + use<'_, 'n, T, D>,
         ),
@@ -321,6 +323,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
     ) -> Result<
         (
             ConnInfo,
+            SessionEnd<T::Session>,
             impl AsyncWrite + WriteEnd + Unpin + use<'_, 'n, T, D>,
             impl AsyncRead + Unpin + use<'_, 'n, T, D>,
         ),
@@ -356,6 +359,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                     });
                     return Ok((
                         info,
+                        SessionEnd(Rc::clone(&entry)),
                         Half {
                             inner: writer,
                             _lease: Rc::clone(&lease),
@@ -700,6 +704,18 @@ impl<S: Session> Drop for Active<S> {
         if self.answered {
             self.entry.idle_since.set(Instant::now());
         }
+    }
+}
+
+/// A watch on the held session a stream rides, for a caller that must learn the session ended while
+/// nothing reads or writes the stream: a stream already ended both ways reports nothing more. It keeps
+/// the session as the stream's halves do, so it lives no longer than they.
+pub(crate) struct SessionEnd<S: Session>(Rc<Entry<S>>);
+
+impl<S: Session> SessionEnd<S> {
+    /// Resolve once the session has closed: the host ended it, or the path to it failed.
+    pub(crate) async fn closed(&self) {
+        self.0.session.wait_closed().await;
     }
 }
 
