@@ -42,10 +42,10 @@ pub const MAX_BEYOND_MAIN: usize = 224;
 const _: () = assert!(MAX_BEYOND_MAIN < MAX_REACH);
 
 /// How long a splice whose local client has closed its socket in both directions may go on sending what
-/// the client wrote, on every lane, and how long after the client's End the peer has to hold the whole
-/// upload before Landed. Each is counted from its moment and never extended by progress, so a peer taking
-/// a byte at a time cannot hold the splice; at the deadline the splice is dropped, and with it the reach
-/// slots, the lane count and the session, or the isolated connection.
+/// the client wrote, on every lane, and waiting for the peer to hold it. Counted from the hang-up and never
+/// extended by progress, so a peer taking a byte at a time cannot hold the splice; at the deadline the
+/// splice is dropped, and with it the reach slots, the lane count and the session, or the isolated
+/// connection. It is the only clock a splice keeps: while the client stays attached, nothing is timed.
 pub const HANGUP_DRAIN: Duration = Duration::from_secs(4);
 
 /// The soft open-file limit a run asks for: each Open holds two descriptors, its connection and the
@@ -292,9 +292,9 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
                 };
                 let info = connection.conn_info();
                 // Closing a connection discards what the peer has not acknowledged. The splice has
-                // already waited, within its deadline, for the peer to hold a finished upload, so the
-                // close follows at once: after a delivery, nothing is lost; without one, the close is
-                // the reset a held lane cannot send.
+                // already waited for the peer to hold a finished upload, for as long as the client stayed
+                // attached and within the drain after its hang-up, so the close follows at once: after a
+                // delivery, nothing is lost; without one, the close is the reset a held lane cannot send.
                 attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
                 drop((connection, held));
                 return;
@@ -308,7 +308,9 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
         let Some(opened) = opened else { return };
         match opened {
             // The held session outlives this stream, so what the peer has not taken is still delivered
-            // after the splice drops it: no close to wait for.
+            // after the splice drops it: no close to wait for. A held stream the client ended is never
+            // reset, since an abort after its shutdown does nothing; a delivery that fails only withholds
+            // Landed.
             Ok((info, to_peer, from_peer)) => {
                 attach(from_client, to_client, from_peer, to_peer, info, &gone).await;
             }
@@ -374,23 +376,17 @@ async fn attach<R, W, PR, PW>(
     ) {
         return;
     }
-    splice(
-        from_client,
-        to_client,
-        from_peer,
-        to_peer,
-        gone.wait(),
-        gone.finished_writing(),
-    )
-    .await;
+    splice(from_client, to_client, from_peer, to_peer, gone.wait()).await;
 }
 
 /// Move a stream both ways in SWC1 frames, each direction on its own, until both are settled.
 ///
 /// Toward the peer, the client's Data bodies go to the peer's stream, and only the client's End shuts
 /// it down cleanly. An end of the client's writing without End (an end of file, a half-close, a failed
-/// read) is a cut-off: the peer's stream is aborted at once and the download keeps flowing. A malformed
-/// frame or a failed write toward the peer aborts it and ends the splice.
+/// read) is a cut-off, and so is a write toward the peer that fails, as one to a peer that stopped
+/// reading does: the peer's stream is aborted at once, no Landed can follow, and the download keeps
+/// flowing. An upload the peer is slow to take never holds the download back, since each direction runs
+/// on its own. A malformed frame aborts the peer's stream and ends the splice.
 ///
 /// Toward the client, the peer's bytes go out as Data frames, and the peer's clean end as End. A peer
 /// whose stream fails while the upload runs ends the splice at once: the upload toward the peer is
@@ -399,22 +395,18 @@ async fn attach<R, W, PR, PW>(
 /// last act, so the client's hang-up stays readable throughout and Landed can still follow the
 /// download's End.
 ///
-/// Once the client's End is read and the peer's stream shut down, the peer must hold every byte and the
-/// end within [`HANGUP_DRAIN`] of that End, never extended. Then Landed is written. A transport that says
-/// the peer will never hold it gets no Landed, and the download still runs to its end; a deadline passed
-/// ends the splice with no Landed, which is the client's cut-off. Only an isolated connection can
-/// still reset the peer then, by its close; a held lane's stream has already ended cleanly.
+/// Once the client's End is read and the peer's stream shut down, the splice waits for the transport to
+/// say the peer holds every byte and the end, with no clock of its own while the client stays attached,
+/// half-closed or not: a slow path is not a failed one. Then Landed is written. A transport that says the
+/// peer will never hold it (the peer stopped reading, or the session ended, which a silent peer's does at
+/// the transport's idle timeout) gets no Landed, and the download still runs to its end. Only an isolated
+/// connection can reset the peer then, by its close; a held lane's stream has already ended cleanly.
 ///
-/// `hangup` resolves when the client has closed its socket in both directions. Then the direction toward
-/// the client stops at once, and what the client wrote before it went goes on toward the peer for at most
-/// [`HANGUP_DRAIN`] from that moment; once its End arrives, the splice waits for the peer to hold the
-/// upload, never past the same deadline, so an isolated close loses nothing, and ends.
-///
-/// `finished` resolves when the client has finished writing, gone or half-closed. It is watched only
-/// once the download has ended and while the upload still runs: then what the client wrote goes on
-/// toward the peer for at most [`HANGUP_DRAIN`], so a client that stopped writing without End cannot hold
-/// a splice whose peer takes nothing. An End read within that bound still earns Landed, since a
-/// half-closed client still reads. A client still writing to a peer that has ended stays live.
+/// `hangup` resolves when the client has closed its socket in both directions, and it alone starts a
+/// clock. Then the direction toward the client stops at once, and what the client wrote before it went
+/// goes on toward the peer for at most [`HANGUP_DRAIN`] from that moment; once its End arrives, the splice
+/// waits for the peer to hold the upload, never past the same deadline, so an isolated close loses
+/// nothing, and ends.
 ///
 /// A write toward the client that fails ends only that direction: the client's frames still go to the
 /// peer.
@@ -427,7 +419,6 @@ pub(crate) async fn splice<R, W, PR, PW>(
     from_peer: PR,
     to_peer: ToPeer<PW>,
     hangup: impl Future<Output = ()>,
-    finished: impl Future<Output = ()>,
 ) where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -435,25 +426,13 @@ pub(crate) async fn splice<R, W, PR, PW>(
     PW: AsyncWrite + WriteEnd + Unpin,
 {
     let (landed, verdict) = tokio::sync::oneshot::channel();
-    let (over, downloaded) = tokio::sync::oneshot::channel();
-    let mut down = pin!(download(
-        from_peer,
-        FramedWriter::new(to_client),
-        verdict,
-        over
-    ));
+    let mut down = pin!(download(from_peer, FramedWriter::new(to_client), verdict));
     // The writer for the close, or none once a write toward the client failed. The block owns the upload,
     // so leaving it drops the guard toward the peer before the close; and the close is the splice's last
     // act, since the resident's own shutdown reads on the hang-up watch as a client gone.
     let closing = 'spliced: {
         let mut up = pin!(upload_to(from_client, to_peer));
         let mut hangup = pin!(hangup);
-        // Polled from the start, it waits first for the download to be over, so an upload's data never
-        // wakes the watch before then.
-        let mut finished = pin!(async {
-            let _ = downloaded.await;
-            finished.await;
-        });
         // Set once the download has settled.
         let mut settled: Option<Downloaded<W>> = None;
 
@@ -470,57 +449,41 @@ pub(crate) async fn splice<R, W, PR, PW>(
                     drain(up).await;
                     break 'spliced None;
                 }
-                () = &mut finished => {
-                    match tokio::time::timeout_at(Instant::now() + HANGUP_DRAIN, &mut up).await {
-                        Ok(uploaded) => break uploaded,
-                        Err(_) => {
-                            tracing::debug!("a finished client's upload was cut at the drain deadline");
-                            break 'spliced None;
-                        }
-                    }
-                }
             }
         };
         match uploaded {
-            // The client's writing ended without End: the peer was aborted as it ended, and the
-            // download goes on. No Landed can follow.
-            Err(UploadCut::Cut(error)) => {
-                tracing::debug!(%error, "a client's upload was cut off");
+            // The client's writing ended without End, or the peer stopped taking it: the peer was
+            // aborted as it ended, and the download goes on. No Landed can follow.
+            Err(cut @ (UploadCut::Cut(_) | UploadCut::Peer(_))) => {
+                tracing::debug!(%cut, "a client's upload was cut off");
                 drop(landed);
             }
-            Err(cut) => {
+            Err(cut @ UploadCut::Malformed(_)) => {
                 tracing::debug!(%cut, "a splice ended toward the peer");
                 break 'spliced None;
             }
-            Ok((ended, half)) => {
-                let mut delivery = pin!(tokio::time::timeout_at(
-                    ended + HANGUP_DRAIN,
-                    half.delivered()
-                ));
+            Ok(half) => {
+                let mut delivery = pin!(half.delivered());
                 loop {
                     tokio::select! {
                         delivered = &mut delivery => match delivered {
-                            Ok(Ok(())) => {
+                            Ok(()) => {
                                 let _ = landed.send(());
                                 break;
                             }
                             // The peer will never hold it: Landed is withheld, and the download
                             // still runs to its end, so a peer that stopped reading early still
                             // hands the client its reply.
-                            Ok(Err(error)) => {
+                            Err(error) => {
                                 tracing::debug!(%error, "an upload did not land");
                                 drop(landed);
                                 break;
-                            }
-                            Err(_) => {
-                                tracing::debug!("an upload did not land by its deadline");
-                                break 'spliced None;
                             }
                         },
                         done = &mut down, if settled.is_none() => settled = Some(done),
                         () = &mut hangup => {
                             // Nobody is left to tell; an isolated close still waits for the delivery,
-                            // never past the drain from now nor the deadline from the End.
+                            // never past the drain from now.
                             let by = Instant::now() + HANGUP_DRAIN;
                             let _ = tokio::time::timeout_at(by, delivery).await;
                             break 'spliced None;
@@ -551,12 +514,12 @@ pub(crate) async fn splice<R, W, PR, PW>(
 /// for the peer to hold it.
 async fn drain<F, PW>(up: core::pin::Pin<&mut F>)
 where
-    F: Future<Output = Result<(Instant, PW), UploadCut>>,
+    F: Future<Output = Result<PW, UploadCut>>,
     PW: WriteEnd,
 {
     let drained_by = Instant::now() + HANGUP_DRAIN;
     match tokio::time::timeout_at(drained_by, up).await {
-        Ok(Ok((_, half))) => {
+        Ok(Ok(half)) => {
             let _ = tokio::time::timeout_at(drained_by, half.delivered()).await;
         }
         Ok(Err(cut)) => tracing::debug!(%cut, "a gone client's upload ended short"),
@@ -564,21 +527,16 @@ where
     }
 }
 
-/// Carry the client's frames to the peer until its End, then shut the peer's stream down. Returns when
-/// the End was read and the peer's bare half, no longer armed; on any cut the guard drops here, which
-/// aborts the peer's stream at once.
-async fn upload_to<R, PW>(
-    mut from_client: R,
-    mut to_peer: ToPeer<PW>,
-) -> Result<(Instant, PW), UploadCut>
+/// Carry the client's frames to the peer until its End, then shut the peer's stream down. Returns the
+/// peer's bare half, no longer armed; on any cut the guard drops here, which aborts the peer's stream at
+/// once.
+async fn upload_to<R, PW>(mut from_client: R, mut to_peer: ToPeer<PW>) -> Result<PW, UploadCut>
 where
     R: AsyncBufRead + Unpin,
     PW: AsyncWrite + WriteEnd + Unpin,
 {
     upload(&mut from_client, to_peer.half().map_err(UploadCut::Peer)?).await?;
-    let ended = Instant::now();
-    let half = to_peer.finish().await.map_err(UploadCut::Peer)?;
-    Ok((ended, half))
+    to_peer.finish().await.map_err(UploadCut::Peer)
 }
 
 /// How the download toward the client ended, which decides how the splice closes.
@@ -593,15 +551,12 @@ enum Downloaded<W> {
 
 /// Frame the peer's bytes toward the client: Data while the peer sends, End at its clean end, nothing
 /// at a failed one. After End the writing stays open for the upload's verdict, and Landed goes out when
-/// `verdict` says so; a dropped `verdict` sender means none will. `over` is told once the download has
-/// ended cleanly; a failed peer stream or a write failure toward the client drops it, which says the
-/// same. Every read is cancel-safe and every frame write runs to its end inside this one future, so a
+/// `verdict` says so; a dropped `verdict` sender means none will. Every read is cancel-safe and every frame write runs to its end inside this one future, so a
 /// frame is never cut by a select.
 async fn download<PR, W>(
     mut from_peer: PR,
     mut to_client: FramedWriter<W>,
     mut verdict: tokio::sync::oneshot::Receiver<()>,
-    over: tokio::sync::oneshot::Sender<()>,
 ) -> Downloaded<W>
 where
     PR: AsyncRead + Unpin,
@@ -615,11 +570,7 @@ where
         Read(io::Result<usize>),
     }
     let (mut downloading, mut waiting) = (true, true);
-    let mut over = Some(over);
     loop {
-        if !downloading && let Some(over) = over.take() {
-            let _ = over.send(());
-        }
         let next = tokio::select! {
             // The verdict first, so a peer that never pauses cannot hold Landed back.
             biased;
@@ -748,9 +699,7 @@ const UNREADABLE_HOME: &str = "this machine's home or badge could not be read";
 /// socket closed both ways, which a client that exits or drops it leaves, reads as closed for writing
 /// on this side: the kqueue write filter's end of file on macOS, a hang-up on Linux. The resident shuts
 /// its own writing only as a splice's last act, after its last look at this watch, so this reading is
-/// never its own. The same watch also tells
-/// when the client has finished writing, gone or half-closed: the read side's end of file, seen even
-/// with the client's bytes still unread. The watch has a registration of its own, on a duplicate of the
+/// never its own. The watch has a registration of its own, on a duplicate of the
 /// connection's descriptor, so clearing its readiness never takes a wakeup from the splice reading or
 /// writing the same socket. The duplicate is a second descriptor per Open.
 pub struct ClientGone(AsyncFd<OwnedFd>);
@@ -783,21 +732,6 @@ impl ClientGone {
                 return core::future::pending().await;
             };
             if ready.ready().is_write_closed() {
-                return;
-            }
-            ready.clear_ready();
-        }
-    }
-
-    /// Return once the client has finished writing: half-closed, or gone. Each wake that is not that
-    /// clears the edge and waits for the next, so a client still writing never spins the watch.
-    pub(crate) async fn finished_writing(&self) {
-        loop {
-            let Ok(mut ready) = self.0.readable().await else {
-                // A registration that fails can tell nothing; the splice still ends on its own.
-                return core::future::pending().await;
-            };
-            if ready.ready().is_read_closed() {
                 return;
             }
             ready.clear_ready();

@@ -19,9 +19,8 @@ use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::{ControlError, OpenLane, OpenRefusal, OpenRequest, PeerRefusal};
 use swoosh::transport::ReachArgs;
-use tokio::io;
 
-use crate::commands::connect::{ConnectionLost, Machine, pump_stdio, stdin_chunks};
+use crate::commands::connect::{ConnectionLost, Machine, Stdin, Stdout, pump_stdio};
 use crate::commands::machine;
 
 /// Whether a run took the resident's path.
@@ -101,7 +100,7 @@ impl Pipe<'_> {
                 return Err(self.cut(socket).await);
             }
         };
-        match pump_stdio(write, read, stdin_chunks()?, io::stdout()).await {
+        match pump_stdio(write, read, Stdin::open()?, Stdout::default()).await {
             Err(report) if report.is::<ConnectionLost>() => Err(self.cut(socket).await),
             ended => ended,
         }
