@@ -236,10 +236,10 @@ fn ping_v_prints_the_sessions_path_before_its_probes() {
         ],
     );
     let lines: Vec<&str> = printed.lines().collect();
-    // The device block's head is `<label> via iroh` alone: the label the live lines must carry.
+    // The device block's head is `<label>` alone, unindented: the label the live lines must carry.
     let head = lines
         .iter()
-        .find(|line| line.ends_with(" via iroh"))
+        .find(|line| !line.starts_with(' ') && !line.contains(", "))
         .unwrap_or_else(|| panic!("no device block: {printed}"));
     assert_eq!(
         lines.first().copied(),

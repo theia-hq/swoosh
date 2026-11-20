@@ -122,6 +122,22 @@ async fn reference() -> PathRef {
     }
 }
 
+/// A path reading of `path`.
+pub(crate) fn reading(path: bifrost::Path) -> ConnInfo {
+    ConnInfo {
+        path,
+        rtt: None,
+        remote: None,
+    }
+}
+
+/// A relayed path, through `relay.example`.
+pub(crate) fn relayed() -> bifrost::Path {
+    bifrost::Path::Relayed(bifrost::Relay::from(
+        url::Url::parse("https://relay.example/").unwrap(),
+    ))
+}
+
 /// How `report` prints at the composition root.
 fn printed(report: &eyre::Report) -> String {
     format!("error: {report:#}\n")
@@ -596,4 +612,145 @@ fn speed_runs_through_the_resident_against_measures_responder() {
         })
         .await;
     });
+}
+
+/// `ping` through a running `serve`, end to end: its one observed Open rides the resident's held session to the machine, measure's responder answers its probes there, and
+/// the run's Finish reads the path through the same socket.
+#[test]
+fn ping_runs_through_the_resident_on_its_held_session() {
+    on_a_big_stack(async || {
+        through_the_resident("ping", &["ping"], "bob/nas", async |home, contacts| {
+            use clap::Parser as _;
+
+            #[derive(clap::Parser)]
+            enum Verb {
+                Ping(crate::commands::ping::PingCmd),
+            }
+
+            for argv in [
+                &["x", "ping", "bob/nas", "-c", "2", "-i", "0.05"][..],
+                &["x", "ping", "bob/nas", "-v", "-c", "1"],
+            ] {
+                // The open `ping` route admits one run a second per caller, and every run here is the
+                // resident's, so each waits out the last one's.
+                tokio::time::sleep(core::time::Duration::from_millis(1100)).await;
+                let routed = match Verb::try_parse_from(argv).unwrap() {
+                    Verb::Ping(cmd) => {
+                        let machine = cmd.peer.machine(contacts).unwrap();
+                        tokio::time::timeout(
+                            core::time::Duration::from_secs(10),
+                            cmd.through_serve(home, &machine, None, contacts),
+                        )
+                        .await
+                    }
+                };
+                let routed = routed.expect("the run never ended").unwrap();
+                assert!(
+                    matches!(routed, super::Routed::Ran(Ok(()))),
+                    "not a run through serve that answered: {argv:?}"
+                );
+            }
+        })
+        .await;
+    });
+}
+
+/// `ping` through `serve` makes one Open, observed, on the held Main session.
+#[tokio::test]
+async fn ping_opens_once_observed_on_main() {
+    use clap::Parser as _;
+    use swoosh::serve::control_codec::{Observation, OpenLane, Request, Response};
+
+    #[derive(clap::Parser)]
+    enum Verb {
+        Ping(crate::commands::ping::PingCmd),
+    }
+
+    for (argv, service) in [(["x", "ping", "me/nas"], "ping")] {
+        let mut served = Served::new(&format!("open-{}", argv[1])).await;
+        let listener = served.listener();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let contacts = book();
+        let peer = machine(&contacts, "me/nas");
+        let resident = async {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let Request::Open(open) = Request::read(&mut conn).await.unwrap() else {
+                panic!("not an Open");
+            };
+            Response::OpenRefusal(OpenRefusal::Busy)
+                .write(&mut conn)
+                .await
+                .unwrap();
+            (open.lane(), open.observation(), open.service().to_string())
+        };
+        let run = async {
+            match Verb::try_parse_from(argv).unwrap() {
+                Verb::Ping(cmd) => {
+                    cmd.through_serve(&served.home, &peer, None, &contacts)
+                        .await
+                }
+            }
+        };
+        let (routed, asked) = tokio::time::timeout(core::time::Duration::from_secs(10), async {
+            tokio::join!(run, resident)
+        })
+        .await
+        .expect("the Open was answered");
+        let super::Routed::Ran(Err(busy)) = routed.unwrap() else {
+            panic!("not a run through serve that ended in its refusal");
+        };
+        assert!(busy.is::<Busy>(), "{busy:#}");
+        assert_eq!(
+            asked,
+            (OpenLane::Main, Observation::Observed, service.to_owned())
+        );
+    }
+}
+
+/// An Open the resident refused reaches `ping` typed, so it prints the own bind's outcome: an unreachable
+/// machine reads `could not reach`, with no reach hint.
+#[tokio::test]
+async fn an_unreachable_open_reaches_ping_as_its_own_line() {
+    use clap::Parser as _;
+    use swoosh::serve::control_codec::{Request, Response};
+
+    #[derive(clap::Parser)]
+    enum Verb {
+        Ping(crate::commands::ping::PingCmd),
+    }
+
+    for argv in [["x", "ping", "me/nas"]] {
+        let mut served = Served::new(&format!("unreached-{}", argv[1])).await;
+        let listener = served.listener();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let contacts = book();
+        let peer = machine(&contacts, "me/nas");
+        let resident = async {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            Request::read(&mut conn).await.unwrap();
+            Response::OpenRefusal(OpenRefusal::Unreachable(RefusalDetail::bounded("no route")))
+                .write(&mut conn)
+                .await
+                .unwrap();
+        };
+        let run = async {
+            match Verb::try_parse_from(argv).unwrap() {
+                Verb::Ping(cmd) => {
+                    cmd.through_serve(&served.home, &peer, None, &contacts)
+                        .await
+                }
+            }
+        };
+        let (routed, ()) = tokio::time::timeout(core::time::Duration::from_secs(10), async {
+            tokio::join!(run, resident)
+        })
+        .await
+        .expect("the Open was answered");
+        let super::Routed::Ran(Err(unreached)) = routed.unwrap() else {
+            panic!("not a run through serve that ended unreached");
+        };
+        assert_eq!(printed(&unreached), "error: could not reach me/nas\n");
+    }
 }
