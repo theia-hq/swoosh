@@ -241,11 +241,17 @@ struct Served {
 
 impl Served {
     async fn new(tag: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let dir = std::env::temp_dir().join(format!("swoosh-ts-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let home = swoosh::home::Home::resolve(Some(dir.clone())).unwrap();
         let root = swoosh::home::runtime_root().unwrap();
+        // Other tests in this binary build their socket's leaf with `create_dir_all`, which leaves a fresh
+        // shared root at the umask's mode; `acquire_single` rightly refuses a loosened root it did not make.
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let (lock, listener) = swoosh::serve::acquire_single(&home, &root).await.unwrap();
         Self {
             home,
