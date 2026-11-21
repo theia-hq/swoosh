@@ -1,17 +1,26 @@
 //! Verbs that dial through a running `swoosh serve` rather than binding this home's key:
-//! `forward <machine> <service> -`, and `speed`, `ping` and `status <machine>`, which also follow
-//! their connection's path there.
+//! `forward <machine> <service> -` and `<port>`, and `speed`, `ping` and `status <machine>`, which also
+//! follow their connection's path there.
 //!
 //! When `serve` answers on this home's control socket, the verb's stream is one Open there: this
 //! process binds nothing, reads no key and asks no passphrase, and the resident presents this home's
 //! standing (or the link typed as the machine). When no `serve` runs, the verb binds its own as before.
 //! Once `serve` has answered, a failure is reported, never retried by an own bind.
 //!
+//! A listener (`forward <port>`) makes one Open per local connection, each on a control
+//! connection of its own, all on Bulk and none observed: it prints no path, so nothing would read a
+//! reference, and holding one per pipe for hours would keep a reach slot and the control pool busy for
+//! no reader. A pipe's outcome that every later Open would repeat ends the run with its line: `serve`
+//! gone, under the pipe or at its Open (its lock free, or a `serve` of another version answering), the
+//! machine's `NotAdmitted`, an ended standing, or the machine being this one. Any other (`Busy`, the
+//! machine unavailable or unreachable, a cut) ends that pipe alone, and goes to the log.
+//!
 //! The lines a resident's outcome prints are the own bind's, so one line has one shape on both paths;
 //! only a busy `serve`, a `serve` that stopped under the pipe, a different `serve` version and a reach
 //! flag `serve` makes moot have lines of their own.
 
 use core::cell::RefCell;
+use core::ops::ControlFlow;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::rc::Rc;
@@ -20,6 +29,7 @@ use bifrost::{ConnInfo, NodeId, PathChanges, Refusal, WriteEnd};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::escaped_report;
+use swoosh::home::ResidentPresence;
 use swoosh::node_client::{Connected, NodeClient, Opened, UidSocket};
 use swoosh::observation::{Observed, Observer, PathSource, Receipt};
 use swoosh::peer::{Kind, Machine as PeerMachine};
@@ -29,9 +39,12 @@ use swoosh::serve::control_codec::{
     PeerRefusal,
 };
 use swoosh::transport::ReachArgs;
-use tokio::io::{self, AsyncWrite};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 
-use crate::commands::connect::{ConnectionLost, Machine, Stdin, Stdout, pump_stdio};
+use crate::commands::connect::{
+    self, ConnectionLost, MAX_PIPES, Machine, Stdin, Stdout, accept_each, pump_stdio,
+};
 use crate::commands::machine;
 
 /// Whether a run took the resident's path.
@@ -89,6 +102,25 @@ pub async fn forward(home: &swoosh::home::Home, dial: Dial<'_>) -> eyre::Result<
     Ok(Routed::Ran(dial.forward(&socket, connected).await))
 }
 
+/// Run `dial` as a `forward <machine> <service> <port>` through the `serve` at `home`'s control socket
+/// when one answers.
+///
+/// # Errors
+///
+/// The control socket cannot be trusted; never an own bind then.
+pub async fn forward_port(
+    home: &swoosh::home::Home,
+    dial: Dial<'_>,
+    port: u16,
+) -> eyre::Result<Routed> {
+    let Some((socket, connected)) = serve(home).await? else {
+        return Ok(Routed::OwnBind);
+    };
+    Ok(Routed::Ran(
+        dial.forward_port(&socket, connected, port).await,
+    ))
+}
+
 /// A stream the resident attached: the path it rode as it attached, the reference to observe it by
 /// when the Open asked for one, and its two halves.
 pub struct Stream {
@@ -103,7 +135,7 @@ pub struct Stream {
 }
 
 impl Dial<'_> {
-    async fn forward(mut self, socket: &UidSocket, connected: Connected) -> eyre::Result<()> {
+    async fn forward(self, socket: &UidSocket, connected: Connected) -> eyre::Result<()> {
         // Main: an ordinary pipe. Bulk is a fan-out's lane, Isolated a measurement's.
         let stream = self
             .open(socket, connected, OpenLane::Main, Observation::Unobserved)
@@ -123,7 +155,7 @@ impl Dial<'_> {
     /// A reach flag `serve` makes moot, more hints than one Open carries, the resident's or the peer's
     /// refusal, or a cut.
     pub async fn open(
-        &mut self,
+        &self,
         socket: &UidSocket,
         connected: Connected,
         lane: OpenLane,
@@ -138,7 +170,7 @@ impl Dial<'_> {
     /// [`open`](Self::open), with the resident's refusal kept typed for a verb that prints its own line
     /// for it.
     async fn attach(
-        &mut self,
+        &self,
         socket: &UidSocket,
         connected: Connected,
         lane: OpenLane,
@@ -156,7 +188,10 @@ impl Dial<'_> {
                 .flat_map(|hint| hint.addrs().iter().copied()),
         )
         .map_err(|error| Unattached::Failed(error.into()))?;
-        let request = OpenRequest::new(key, hints, self.service.clone(), lane, self.slip.take())
+        // Cloned, never taken: a listener opens once per pipe, and an Open without the slip is refused
+        // by a peer that admits only the link.
+        let slip = Option::clone(&self.slip);
+        let request = OpenRequest::new(key, hints, self.service.clone(), lane, slip)
             .map_err(|error| Unattached::Failed(error.into()))?;
         let request = match observation {
             Observation::Unobserved => request,
@@ -206,7 +241,7 @@ impl Dial<'_> {
     ///
     /// As [`open`](Self::open), with the resident's refusal kept typed.
     pub async fn observed(
-        &mut self,
+        &self,
         socket: &Rc<UidSocket>,
         connected: Connected,
         lane: OpenLane,
@@ -225,6 +260,106 @@ impl Dial<'_> {
         );
         let session = OneStream::new(self.machine.key(), stream.info, stream.read, stream.write);
         Ok((session, observer))
+    }
+
+    /// Prove that the peer admits a listener's Open before its start lines print, so a refusal is one
+    /// line and a non-zero exit rather than a listener that refuses every connection. The stream is
+    /// ended with End, so the peer reads a clean end of an empty upload, never a reset.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open), or the End could not be written.
+    pub async fn admit(&self, socket: &UidSocket, connected: Connected) -> eyre::Result<()> {
+        let mut stream = self
+            .open(socket, connected, LISTENER_LANE, Observation::Unobserved)
+            .await?;
+        match stream.write.shutdown().await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.cut_or(socket, error.into()).await),
+        }
+    }
+
+    /// One listener pipe's Open, on a control connection of its own: a [`Connected`] carries one Open
+    /// and is spent by it.
+    ///
+    /// # Errors
+    ///
+    /// Why it attached nothing, sorted by what that does to the run ([`Unpiped`]).
+    pub async fn pipe(&self, socket: &UidSocket) -> Result<Stream, Unpiped> {
+        let connected = match socket.connected().await {
+            Ok(connected) => connected,
+            Err(ControlError::NoResident) if lock_free(socket).await => {
+                return Err(Unpiped::of(Unattached::Failed(self.serve_stopped())));
+            }
+            Err(error) => return Err(Unpiped::of(Unattached::Failed(error.into()))),
+        };
+        match self
+            .attach(socket, connected, LISTENER_LANE, Observation::Unobserved)
+            .await
+        {
+            Ok(stream) => Ok(stream),
+            // The run's `serve` answered its admission in this version, so a `serve` answering in
+            // another is a restarted one: the run's is gone.
+            Err(Unattached::Failed(report)) if report.is::<Skew>() => {
+                Err(Unpiped::of(Unattached::Failed(self.serve_stopped())))
+            }
+            Err(unattached) => Err(Unpiped::of(unattached)),
+        }
+    }
+
+    /// `forward <port>` through `serve`: admit, bind the local port, say so as the own bind does, then
+    /// carry each local connection.
+    async fn forward_port(
+        &self,
+        socket: &UidSocket,
+        connected: Connected,
+        port: u16,
+    ) -> eyre::Result<()> {
+        self.admit(socket, connected).await?;
+        raise_open_files();
+        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+        connect::forwarding(
+            self.service,
+            &Machine::of(self.contacts, self.machine.key()),
+            port,
+        );
+        Err(self.carry_each(socket, listener).await)
+    }
+
+    /// Carry each connection `listener` accepts over its own Open, at most [`MAX_PIPES`] at once, until
+    /// a pipe ends the run ([`Unpiped::Ends`], or `serve` gone under it): the line the run ends with.
+    pub async fn carry_each(&self, socket: &UidSocket, listener: TcpListener) -> eyre::Report {
+        accept_each(listener, MAX_PIPES, |tcp| self.carry(socket, tcp)).await
+    }
+
+    /// Carry one local connection over its own Open, both ways. A failure that is the pipe's own goes
+    /// to the log, as the own bind's does, and the listener stays up.
+    async fn carry(&self, socket: &UidSocket, tcp: TcpStream) -> ControlFlow<eyre::Report> {
+        let stream = match self.pipe(socket).await {
+            Ok(stream) => stream,
+            Err(Unpiped::Ends(unattached)) => {
+                return ControlFlow::Break(self.unattached(unattached, socket).await);
+            }
+            Err(Unpiped::Pipe(unattached)) => {
+                let error = self.unattached(unattached, socket).await;
+                tracing::warn!("connection failed: {error:#}");
+                return ControlFlow::Continue(());
+            }
+        };
+        if let Err(error) = splice(tcp, stream).await {
+            // A pipe cut under it may be `serve` stopping: asked now, so the run ends here rather than
+            // at the next connection's Open.
+            if let Some(stopped) = self.stopped(socket).await {
+                return ControlFlow::Break(stopped);
+            }
+            tracing::warn!("connection failed: {error:#}");
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// The line the run ends with when `serve` is gone.
+    fn serve_stopped(&self) -> eyre::Report {
+        ServeStopped(Machine::of(self.contacts, self.machine.key()).to_string()).into()
     }
 
     /// The line a refusal prints: the own bind's for the same outcome, except `Busy` and `NotHere`.
@@ -284,7 +419,31 @@ impl Dial<'_> {
                 phase: "status after a cut",
             }),
         };
-        serve_gone(asked, &named).map(eyre::Report::new)
+        let gone = serve_gone(asked, &named)?;
+        lock_free(socket).await.then(|| gone.into())
+    }
+}
+
+/// Whether `serve.lock` is free, so a refused connect means `serve` is gone. A refused connect alone
+/// does not: on macOS a live `serve` whose accept queue is full refuses one too, while it holds the
+/// lock. A held lock, a probe that failed or one past [`STOPPED_ASK`] shows nothing gone.
+async fn lock_free(socket: &UidSocket) -> bool {
+    match tokio::time::timeout(STOPPED_ASK, socket.resident_presence()).await {
+        Ok(Ok(presence)) => presence == ResidentPresence::Free,
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "serve.lock could not be probed after a refused connect");
+            false
+        }
+        Err(_elapsed) => false,
+    }
+}
+
+/// Raise this process's open-file limit for a listener through `serve`: each pipe holds two
+/// descriptors, its local connection and its control connection, so [`MAX_PIPES`] of them pass the
+/// limit macOS starts a process with. A run that cannot raise it still listens, with fewer pipes.
+pub fn raise_open_files() {
+    if let Err(error) = swoosh::serve::raise_open_files() {
+        tracing::warn!(%error, "could not raise the open-file limit");
     }
 }
 
@@ -309,6 +468,65 @@ pub enum Unattached {
     Refused(OpenRefusal),
     /// The Open failed some other way: the line it prints.
     Failed(eyre::Report),
+}
+
+/// The lane a listener's Opens ride: its pipes are a fan-out, so they never take the slots the person's
+/// other traffic on Main needs.
+const LISTENER_LANE: OpenLane = OpenLane::Bulk;
+
+/// Why a listener pipe's Open attached no stream, sorted by what it does to the run.
+pub enum Unpiped {
+    /// Load or a path fault, which the next connection can pass: that pipe ends, the listener stays up.
+    Pipe(Unattached),
+    /// An outcome every later Open would repeat: the run ends with its line, and never falls back to
+    /// an own bind.
+    Ends(Unattached),
+}
+
+impl Unpiped {
+    /// Sort `unattached`. `serve` gone finds no `serve` for any later Open. `NotAdmitted` is a ruling on
+    /// this machine (a revoke or a pause) that the wire says not to retry, so listening on would refuse
+    /// every connection. An ended standing's remedy is the person's, and the own bind ends the same way
+    /// when the lease end cuts its session. `NotHere` belongs to the fixed request, so it repeats.
+    fn of(unattached: Unattached) -> Self {
+        let ends = match &unattached {
+            Unattached::Refused(refusal) => match refusal {
+                OpenRefusal::Peer(PeerRefusal::NotAdmitted)
+                | OpenRefusal::StandingEnded
+                | OpenRefusal::NotHere => true,
+                OpenRefusal::Peer(PeerRefusal::BadRequest(_) | PeerRefusal::Unavailable(_))
+                | OpenRefusal::PeerUnreadable(_)
+                | OpenRefusal::Unreachable(_)
+                | OpenRefusal::Timeout
+                | OpenRefusal::Broken(_)
+                | OpenRefusal::Busy => false,
+            },
+            // A cut before the reply whose ask found `serve` gone, or no `serve` to connect to.
+            Unattached::Failed(report) => report.is::<ServeStopped>(),
+        };
+        if ends {
+            Self::Ends(unattached)
+        } else {
+            Self::Pipe(unattached)
+        }
+    }
+}
+
+/// Carry `tcp` over `stream` both ways until both ends close. An upload that carried a byte is whole
+/// only on Landed, so the pipe waits for it, with no clock of its own: a peer that stops answering ends
+/// the stream when the transport gives up on it.
+async fn splice(mut tcp: TcpStream, stream: Stream) -> eyre::Result<()> {
+    let Stream {
+        mut read,
+        mut write,
+        ..
+    } = stream;
+    let (up, _down) =
+        io::copy_bidirectional(&mut tcp, &mut io::join(&mut read, &mut write)).await?;
+    if up > 0 {
+        read.landed().await?;
+    }
+    Ok(())
 }
 
 /// A run through `serve` that failed after its Open attached, its error already printed by [`failed`]:

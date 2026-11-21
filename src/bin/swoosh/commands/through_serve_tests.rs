@@ -25,13 +25,13 @@ fn nas() -> NodeId {
     NodeId::from_ed25519_secret(&[0x61; 32])
 }
 
-fn book() -> Contacts {
+pub(crate) fn book() -> Contacts {
     let mut contacts = Contacts::default();
     contacts.save(&"me/nas".parse().unwrap(), nas()).unwrap();
     contacts
 }
 
-fn machine(contacts: &Contacts, typed: &str) -> PeerMachine {
+pub(crate) fn machine(contacts: &Contacts, typed: &str) -> PeerMachine {
     typed.parse::<Peer>().unwrap().machine(contacts).unwrap()
 }
 
@@ -272,6 +272,21 @@ fn this_machine_prints_as_it_was_typed() {
     );
 }
 
+/// The status a `serve` running as `node_id` answers.
+fn status_of(node_id: NodeId) -> StatusReply {
+    StatusReply {
+        node_id,
+        pid: 1,
+        addr: None,
+        uptime_secs: 0,
+        menu: ServiceMenu {
+            catalog: tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),
+            disabled: DisabledList::Known(Vec::new()),
+        },
+        warm: Vec::new(),
+    }
+}
+
 /// A `serve` that answers status as the machine `this`, or not at all, and nothing else.
 struct Serve(Option<NodeId>);
 
@@ -281,18 +296,7 @@ impl NodeClient for Serve {
     }
 
     async fn status(&self) -> Result<StatusReply, ControlError> {
-        let node_id = self.0.ok_or(ControlError::NoResident)?;
-        Ok(StatusReply {
-            node_id,
-            pid: 1,
-            addr: None,
-            uptime_secs: 0,
-            menu: ServiceMenu {
-                catalog: tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),
-                disabled: DisabledList::Known(Vec::new()),
-            },
-            warm: Vec::new(),
-        })
+        self.0.map(status_of).ok_or(ControlError::NoResident)
     }
 
     async fn stop(&self) -> Result<(), ControlError> {
@@ -377,15 +381,15 @@ async fn a_refusal_through_serve_prints_the_own_binds_line() {
 
 /// A home with this process recorded as its `serve` and the control socket bound, as `serve` binds it:
 /// a verb run here finds a resident, and the test answers as that resident.
-struct Served {
-    home: swoosh::home::Home,
+pub(crate) struct Served {
+    pub(crate) home: swoosh::home::Home,
     dir: std::path::PathBuf,
     listener: Option<std::os::unix::net::UnixListener>,
-    _lock: swoosh::serve::InstanceLock,
+    lock: Option<swoosh::serve::InstanceLock>,
 }
 
 impl Served {
-    async fn new(tag: &str) -> Self {
+    pub(crate) async fn new(tag: &str) -> Self {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = std::env::temp_dir().join(format!("swoosh-ts-{tag}-{}", std::process::id()));
@@ -402,13 +406,19 @@ impl Served {
             home,
             dir,
             listener: Some(listener),
-            _lock: lock,
+            lock: Some(lock),
         }
     }
 
     /// The bound socket, as the resident takes it.
-    fn listener(&mut self) -> std::os::unix::net::UnixListener {
+    pub(crate) fn listener(&mut self) -> std::os::unix::net::UnixListener {
         self.listener.take().unwrap()
+    }
+
+    /// The held `serve.lock`, for a resident that stops: dropping it unlinks the socket and frees the
+    /// lock, as `serve` exiting does.
+    fn lock(&mut self) -> swoosh::serve::InstanceLock {
+        self.lock.take().unwrap()
     }
 }
 
@@ -433,7 +443,7 @@ async fn attached(
     let peer = machine(&contacts, "me/nas");
     let service = "ssh".parse().unwrap();
     let reach = reach(&["forward"]);
-    let mut pipe = Dial {
+    let pipe = Dial {
         machine: &peer,
         service: &service,
         slip: None,
@@ -852,5 +862,496 @@ async fn asking_a_stalled_serve_whether_it_went_is_bounded_and_says_no() {
         (bound..bound + core::time::Duration::from_millis(50)).contains(&started.elapsed()),
         "{:?}",
         started.elapsed()
+    );
+}
+
+/// An End frame as the resident reads one: the magic, tag 11 and an empty body (`serve/socket/splice.rs`).
+pub(crate) const END: [u8; 7] = *b"SWC1\x0b\x00\x00";
+
+/// A Landed frame: tag 12, empty, toward the client only.
+const LANDED: [u8; 7] = *b"SWC1\x0c\x00\x00";
+
+/// `bytes` as one Data frame, tag 10 (at most a frame's 8 KiB).
+pub(crate) fn data(bytes: &[u8]) -> Vec<u8> {
+    let mut frame = b"SWC1\x0a".to_vec();
+    frame.extend_from_slice(&u16::try_from(bytes.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(bytes);
+    frame
+}
+
+/// The key the scripted resident's status names, so an ended standing's remedy has one to name.
+pub(crate) fn resident_key() -> NodeId {
+    NodeId::from_ed25519_secret(&[0x77; 32])
+}
+
+/// How the scripted resident answers one Open.
+pub(crate) enum Answer {
+    /// Attach, end the download with End, and keep what the client uploads until it hangs up.
+    Attach,
+    /// Attach, send these bytes and End, and answer the client's End with Landed.
+    Exchange(Vec<u8>),
+    /// Attach, then drop the connection with no End: a cut, the resident still up.
+    Cut,
+    /// Attach, then stop: the socket and the lock go before the connection does, as when `serve` exits
+    /// under a pipe.
+    Stop,
+    /// Attach, then stop accepting and cut the connection while the lock stays held, as a live `serve`
+    /// whose accept queue is full refuses connects, until the row's `stop`.
+    Deaf,
+    /// Reply as a `serve` of another control version.
+    Version,
+    /// Refuse it so.
+    Refuse(OpenRefusal),
+}
+
+/// One Open the scripted resident heard: what it asked for, and what an attached one uploaded.
+pub(crate) struct Heard {
+    pub(crate) lane: swoosh::serve::control_codec::OpenLane,
+    pub(crate) observation: swoosh::serve::control_codec::Observation,
+    pub(crate) slip: Option<String>,
+    pub(crate) upload: Vec<u8>,
+}
+
+/// What a row holds of its scripted resident: `stop` ends it (it stops on its own once its answers run
+/// out, unless it went deaf), and `landed` is told each time it answers an upload's End with Landed.
+#[derive(Default)]
+pub(crate) struct Rig {
+    pub(crate) stop: tightbeam::tunnel::CancellationToken,
+    pub(crate) landed: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// A resident on `served`'s socket that reads one request per connection and answers each Open with the
+/// next of `answers`, then stops, its lock freed and its socket gone, once they run out. A status ask
+/// is answered as [`resident_key`]. Resolves to the Opens it heard, once every attached one's client
+/// has hung up.
+pub(crate) fn scripted(
+    served: &mut Served,
+    answers: Vec<Answer>,
+    rig: &Rig,
+) -> tokio::task::JoinHandle<Vec<Heard>> {
+    use swoosh::serve::control_codec::{Attached, Request, Response};
+    use tokio::io::AsyncWriteExt as _;
+
+    let listener = served.listener();
+    listener.set_nonblocking(true).unwrap();
+    let mut listener = Some(tokio::net::UnixListener::from_std(listener).unwrap());
+    let mut lock = Some(served.lock());
+    let stop = rig.stop.clone();
+    let landed = std::sync::Arc::clone(&rig.landed);
+    tokio::spawn(async move {
+        let mut answers = VecDeque::from(answers);
+        let mut heard = Vec::new();
+        let mut held = Vec::new();
+        let mut deaf = false;
+        while let Some(accepting) = listener.as_ref().filter(|_| !answers.is_empty()) {
+            let (mut conn, _) = tokio::select! {
+                accepted = accepting.accept() => accepted.unwrap(),
+                () = stop.cancelled() => break,
+            };
+            let open = match Request::read(&mut conn).await {
+                Ok(Request::Open(open)) => open,
+                Ok(Request::Status) => {
+                    let _ = Response::Status(status_of(resident_key()))
+                        .write(&mut conn)
+                        .await;
+                    continue;
+                }
+                _ => continue,
+            };
+            heard.push(Heard {
+                lane: open.lane(),
+                observation: open.observation(),
+                slip: open.slip().map(|slip| slip.as_str().to_owned()),
+                upload: Vec::new(),
+            });
+            let at = heard.len() - 1;
+            match answers.pop_front().unwrap() {
+                Answer::Refuse(refusal) => {
+                    Response::OpenRefusal(refusal)
+                        .write(&mut conn)
+                        .await
+                        .unwrap();
+                }
+                // Another control version's magic: the client reads no further.
+                Answer::Version => conn.write_all(b"SWC2").await.unwrap(),
+                attach => {
+                    Response::Attached(Attached::from(direct()))
+                        .write(&mut conn)
+                        .await
+                        .unwrap();
+                    match attach {
+                        Answer::Attach => held.push((at, tokio::spawn(hold(conn, None, None)))),
+                        Answer::Exchange(download) => {
+                            let landed = Some(std::sync::Arc::clone(&landed));
+                            held.push((at, tokio::spawn(hold(conn, Some(download), landed))));
+                        }
+                        Answer::Stop => {
+                            listener = None;
+                            lock = None;
+                            drop(conn);
+                        }
+                        Answer::Deaf => {
+                            listener = None;
+                            deaf = true;
+                            drop(conn);
+                        }
+                        _ => drop(conn),
+                    }
+                }
+            }
+        }
+        drop(listener);
+        if deaf {
+            stop.cancelled().await;
+        }
+        drop(lock);
+        for (at, holder) in held {
+            heard[at].upload = holder.await.unwrap();
+        }
+        heard
+    })
+}
+
+/// Hold one attached connection as the resident: send `download` and End (End alone when there is no
+/// download), keep every frame the client uploads, and, for an exchange, answer its End with Landed and
+/// tell `landed`. Returns the upload's raw frames once the client hangs up.
+async fn hold(
+    mut conn: tokio::net::UnixStream,
+    download: Option<Vec<u8>>,
+    landed: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut sent = download.as_deref().map(data).unwrap_or_default();
+    sent.extend_from_slice(&END);
+    let _ = conn.write_all(&sent).await;
+    let mut upload = Vec::new();
+    if let Some(landed) = landed {
+        let mut header = [0; 7];
+        while conn.read_exact(&mut header).await.is_ok() {
+            upload.extend_from_slice(&header);
+            if header == END {
+                let _ = conn.write_all(&LANDED).await;
+                landed.notify_one();
+                break;
+            }
+            let mut body = vec![0; usize::from(u16::from_be_bytes([header[5], header[6]]))];
+            if conn.read_exact(&mut body).await.is_err() {
+                break;
+            }
+            upload.extend_from_slice(&body);
+        }
+    }
+    let _ = conn.read_to_end(&mut upload).await;
+    upload
+}
+
+/// A bound for each wait a listener row makes: far past a local round trip, and the one-second asks
+/// after a cut.
+pub(crate) const ROW_BOUND: core::time::Duration = core::time::Duration::from_secs(10);
+
+/// One local client that uploads `up`, closes its upload and reads to the end: what it read.
+async fn client(local: core::net::SocketAddr, up: &[u8]) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut client = tokio::net::TcpStream::connect(local).await.unwrap();
+    let _ = client.write_all(up).await;
+    let _ = client.shutdown().await;
+    let mut read = Vec::new();
+    let _ = client.read_to_end(&mut read).await;
+    read
+}
+
+/// `forward <port>`'s listener for `me/nas`'s `ssh` through a resident answering `answers`, `slip`
+/// typed as the machine, while `clients` connect to it. Returns the line the run ended with and the
+/// Opens the resident heard.
+async fn forwarded(
+    tag: &str,
+    answers: Vec<Answer>,
+    slip: Option<nauthy::Link>,
+    clients: impl AsyncFnOnce(core::net::SocketAddr, &Rig),
+) -> (eyre::Report, Vec<Heard>) {
+    let mut served = Served::new(tag).await;
+    let rig = Rig::default();
+    let resident = scripted(&mut served, answers, &rig);
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let service = "ssh".parse().unwrap();
+    let reach = reach(&["forward"]);
+    let dial = Dial {
+        machine: &peer,
+        service: &service,
+        slip,
+        reach: &reach,
+        contacts: &contacts,
+    };
+    let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let local = listener.local_addr().unwrap();
+    let connecting = async {
+        clients(local, &rig).await;
+        core::future::pending::<()>().await;
+    };
+    let ended = tokio::time::timeout(ROW_BOUND, async {
+        tokio::select! {
+            ended = dial.carry_each(&socket, listener) => ended,
+            () = connecting => unreachable!(),
+        }
+    })
+    .await
+    .expect("the run ended");
+    rig.stop.cancel();
+    let heard = tokio::time::timeout(ROW_BOUND, resident)
+        .await
+        .expect("the resident ended")
+        .unwrap();
+    (ended, heard)
+}
+
+/// `n` clients, one at a time, each uploading nothing.
+fn one_at_a_time(n: usize) -> impl AsyncFnOnce(core::net::SocketAddr, &Rig) {
+    async move |local, _rig| {
+        for _ in 0..n {
+            client(local, b"").await;
+        }
+    }
+}
+
+/// A slip the machine `me/nas` issued for `ssh`, so an Open may present it.
+fn nas_slip() -> nauthy::Link {
+    swoosh::testkit::TestNode::seeded(0x61)
+        .slip(
+            &"ssh".parse().unwrap(),
+            std::time::SystemTime::now() + core::time::Duration::from_secs(3600),
+        )
+        .unwrap()
+        .link()
+        .unwrap()
+}
+
+/// `forward <port>` through `serve` makes one Open per local connection, each on a control connection of
+/// its own (one Open a connection is what the resident reads), each on Bulk, unobserved, and each
+/// presenting the link typed as the machine; the pipe after the last finds no `serve` and ends the run
+/// with the serve-stopped line.
+#[tokio::test]
+async fn a_port_through_serve_opens_each_pipe_on_bulk_unobserved_with_the_slip() {
+    use swoosh::serve::control_codec::{Observation, OpenLane};
+
+    let slip = nas_slip();
+    let (ended, heard) = forwarded(
+        "port-pipes",
+        vec![Answer::Attach, Answer::Attach, Answer::Attach],
+        Some(slip.clone()),
+        one_at_a_time(4),
+    )
+    .await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 3);
+    for open in heard {
+        assert_eq!(open.lane, OpenLane::Bulk);
+        assert_eq!(open.observation, Observation::Unobserved);
+        assert_eq!(open.slip.as_deref(), Some(slip.as_str()));
+    }
+}
+
+/// A pipe carries bytes both ways: the local client's upload reaches the resident as Data then End,
+/// and the machine's bytes reach the client.
+#[tokio::test]
+async fn a_pipe_through_serve_carries_bytes_both_ways() {
+    let mut read = Vec::new();
+    let (ended, heard) = forwarded(
+        "port-bytes",
+        vec![Answer::Exchange(b"hello".to_vec())],
+        None,
+        async |local, rig: &Rig| {
+            read = client(local, b"ping").await;
+            rig.landed.notified().await;
+            client(local, b"").await;
+        },
+    )
+    .await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(read, b"hello");
+    let mut upload = data(b"ping");
+    upload.extend_from_slice(&END);
+    assert_eq!(heard[0].upload, upload);
+}
+
+/// Pipes run together: while one is in flight, another is refused `Busy` and a third carries, and the
+/// first then finishes its exchange whole.
+#[tokio::test]
+async fn pipes_through_serve_run_together_and_one_failing_leaves_the_others() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut read = Vec::new();
+    let (ended, heard) = forwarded(
+        "port-together",
+        vec![
+            Answer::Exchange(b"hello".to_vec()),
+            Answer::Refuse(OpenRefusal::Busy),
+            Answer::Attach,
+        ],
+        None,
+        async |local, rig: &Rig| {
+            let mut first = tokio::net::TcpStream::connect(local).await.unwrap();
+            // The download ends on the machine's End while the upload stays open: the pipe is in flight.
+            first.read_to_end(&mut read).await.unwrap();
+            client(local, b"").await;
+            client(local, b"").await;
+            first.write_all(b"ping").await.unwrap();
+            first.shutdown().await.unwrap();
+            rig.landed.notified().await;
+            client(local, b"").await;
+        },
+    )
+    .await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 3);
+    assert_eq!(read, b"hello");
+    let mut upload = data(b"ping");
+    upload.extend_from_slice(&END);
+    assert_eq!(heard[0].upload, upload);
+}
+
+/// A pipe's own failure, `serve`'s `Busy`, the machine unavailable, or a cut while `serve` still answers,
+/// ends that pipe alone: the next connection's Open is made and carries.
+#[tokio::test]
+async fn a_pipes_own_failure_keeps_the_port_listening() {
+    let (ended, heard) = forwarded(
+        "port-own",
+        vec![
+            Answer::Refuse(OpenRefusal::Busy),
+            Answer::Refuse(OpenRefusal::Peer(PeerRefusal::Unavailable(
+                RefusalDetail::bounded("down"),
+            ))),
+            Answer::Cut,
+            Answer::Attach,
+        ],
+        None,
+        one_at_a_time(5),
+    )
+    .await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 4);
+}
+
+/// A pipe's refusal that every later Open would repeat ends the run with its line, as the first Open's
+/// refusal would: the machine's `NotAdmitted`, an ended standing, the machine being this one.
+#[tokio::test]
+async fn a_refusal_every_later_pipe_would_meet_ends_the_port() {
+    for (tag, refusal) in [
+        ("port-admitted", OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
+        ("port-standing", OpenRefusal::StandingEnded),
+        ("port-here", OpenRefusal::NotHere),
+    ] {
+        let expected = refusal.clone();
+        let (ended, heard) =
+            forwarded(tag, vec![Answer::Refuse(refusal)], None, one_at_a_time(1)).await;
+        assert_eq!(heard.len(), 1);
+        match expected {
+            OpenRefusal::Peer(_) => {
+                assert!(ended.is::<crate::commands::machine::Refused>(), "{ended:#}")
+            }
+            OpenRefusal::StandingEnded => assert!(ended.is::<StandingEnded>(), "{ended:#}"),
+            _ => assert!(ended.is::<ThisMachine>(), "{ended:#}"),
+        }
+    }
+}
+
+/// `serve` stopping under a live pipe ends the run at once with the serve-stopped line: the cut asks the
+/// socket, rather than waiting for a next connection that may never come.
+#[tokio::test]
+async fn serve_stopping_under_a_pipe_ends_the_port_at_once() {
+    let (ended, heard) = forwarded("port-stop", vec![Answer::Stop], None, one_at_a_time(1)).await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 1);
+}
+
+/// A refused connect while `serve.lock` is held is a live `serve` that cannot take the connection now
+/// (on macOS, a full accept queue), never a stopped one: a pipe cut then, and the next pipe refused,
+/// each end alone. Once the lock is free, the next pipe ends the run.
+#[tokio::test]
+async fn a_refused_connect_under_a_held_lock_keeps_the_port_listening() {
+    let released = core::cell::Cell::new(false);
+    let (ended, heard) = forwarded(
+        "port-deaf",
+        vec![Answer::Deaf],
+        None,
+        async |local, rig: &Rig| {
+            client(local, b"").await;
+            client(local, b"").await;
+            rig.stop.cancel();
+            released.set(true);
+            client(local, b"").await;
+        },
+    )
+    .await;
+    assert!(
+        released.get(),
+        "the run ended while the lock was held: {ended:#}"
+    );
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 1);
+}
+
+/// A `serve` of another version answering a later pipe is a restarted one, so the run's `serve` is
+/// gone: the run ends with the serve-stopped line rather than refusing every connection.
+#[tokio::test]
+async fn another_version_answering_a_pipe_ends_the_port_as_serve_stopped() {
+    let (ended, heard) = forwarded(
+        "port-version",
+        vec![Answer::Version, Answer::Attach],
+        None,
+        one_at_a_time(1),
+    )
+    .await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 1);
+}
+
+/// `forward <port>` through `serve` proves admission on one Open, ended with End, before it binds the
+/// port or prints its start lines.
+#[tokio::test]
+async fn a_port_through_serve_admits_on_an_open_it_ends_with_end() {
+    let mut served = Served::new("port-admit").await;
+    let rig = Rig::default();
+    let resident = scripted(&mut served, vec![Answer::Attach], &rig);
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let service = "ssh".parse().unwrap();
+    let reach = reach(&["forward"]);
+    let dial = Dial {
+        machine: &peer,
+        service: &service,
+        slip: None,
+        reach: &reach,
+        contacts: &contacts,
+    };
+    let (socket, connected) = super::serve(&served.home).await.unwrap().unwrap();
+    // A free port; the run listens on once admitted, and the resident resolves once the admission
+    // stream has closed.
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let heard = tokio::time::timeout(ROW_BOUND, async {
+        tokio::select! {
+            ended = dial.forward_port(&socket, connected, port) => {
+                panic!("the run ended before a connection: {ended:?}")
+            }
+            heard = resident => heard.unwrap(),
+        }
+    })
+    .await
+    .expect("the admission Open was made and closed");
+    let [admission] = heard.as_slice() else {
+        panic!("{} Opens, not the one admission", heard.len());
+    };
+    assert_eq!(
+        admission.upload, END,
+        "the admission stream ends with End alone"
     );
 }
