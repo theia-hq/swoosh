@@ -1,13 +1,13 @@
 //! Verbs that dial through a running `swoosh serve` rather than binding this home's key:
-//! `forward <machine> <service> -` and `<port>`, and `speed`, `ping` and `status <machine>`, which also
-//! follow their connection's path there.
+//! `forward <machine> <service> -`, `forward <machine> <service> <port>` and `proxy`, and `speed`, `ping`
+//! and `status <machine>`, which also follow their connection's path there.
 //!
 //! When `serve` answers on this home's control socket, the verb's stream is one Open there: this
 //! process binds nothing, reads no key and asks no passphrase, and the resident presents this home's
 //! standing (or the link typed as the machine). When no `serve` runs, the verb binds its own as before.
 //! Once `serve` has answered, a failure is reported, never retried by an own bind.
 //!
-//! A listener (`forward <port>`) makes one Open per local connection, each on a control
+//! A listener (`forward <port>`, `proxy`) makes one Open per local connection, each on a control
 //! connection of its own, all on Bulk and none observed: it prints no path, so nothing would read a
 //! reference, and holding one per pipe for hours would keep a reach slot and the control pool busy for
 //! no reader. A pipe's outcome that every later Open would repeat ends the run with its line: `serve`
@@ -478,8 +478,8 @@ const LISTENER_LANE: OpenLane = OpenLane::Bulk;
 pub enum Unpiped {
     /// Load or a path fault, which the next connection can pass: that pipe ends, the listener stays up.
     Pipe(Unattached),
-    /// An outcome every later Open would repeat: the run ends with its line, and never falls back to
-    /// an own bind.
+    /// An outcome every later Open would repeat: the run ends with its line, after a `proxy` client's
+    /// answer, and never falls back to an own bind.
     Ends(Unattached),
 }
 

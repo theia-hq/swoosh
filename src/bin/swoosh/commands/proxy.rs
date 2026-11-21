@@ -14,25 +14,28 @@
 
 use core::future::Future;
 use core::net::{Ipv4Addr, SocketAddr};
+use core::ops::ControlFlow;
 use core::time::Duration;
 
 use ::fetch::http::{FetchRequest, FetchResponse};
-use bifrost::{Discovery, Node, NodeId, Session, Transport};
+use bifrost::{Discovery, Node, NodeId, Refusal, Session, Transport};
 use clap::Args;
-use futures::StreamExt as _;
-use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::home::Home;
+use swoosh::node_client::UidSocket;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::{Hints, Lane, OpenError, Peers, Presents};
 use swoosh::reach;
+use swoosh::serve::control_codec::OpenRefusal;
 use swoosh::transport::{self, ReachArgs};
 use swoosh::unbound::Unbound;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::commands::connect::{self, ACCEPT_RETRY, MAX_PIPES, press_ctrl_c};
+use crate::commands::connect::{self, MAX_PIPES, accept_each, press_ctrl_c};
 use crate::commands::machine;
+use crate::commands::through_serve::{self, Dial, Routed, Unattached, Unpiped};
 
 /// Mint a local URL that reaches an origin through a machine you name (your own exit, over the overlay).
 #[derive(Debug, Args)]
@@ -150,9 +153,10 @@ impl ProxyCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        let exit = Exit {
+        let exit = OwnExit {
             peers,
             key: machine.key(),
+            service: Service::clone(&self.service),
             presents: Presents::resolved(
                 &self.peer,
                 Option::clone(&present),
@@ -162,7 +166,7 @@ impl ProxyCmd {
         // Admission is proven on one stream before the URL prints, so a refusal is one line and a
         // non-zero exit rather than a URL that answers every request with a 403. The stream is dropped
         // once admitted; the machine tears its half down.
-        match exit.open(&self.service).await {
+        match exit.held().await {
             Ok(_admitted) => {}
             Err(OpenError::Open(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))) => {
                 // The held Bulk session carries only proxy streams, so the follow-up asks on its own.
@@ -172,43 +176,95 @@ impl ProxyCmd {
             }
             Err(error) => return Err(reach::open_failed(&self.peer, error, bound)),
         }
+        self.listen(&exit, &connect::Machine::of(contacts, exit.key))
+            .await
+    }
+
+    /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
+    /// typed as it, if one was, and `contacts` to name it. Admission is proven on one Open before the URL
+    /// prints, as by own bind, and each request then rides an Open of its own.
+    ///
+    /// # Errors
+    ///
+    /// The control socket cannot be trusted; never an own bind then.
+    pub async fn through_serve(
+        &self,
+        home: &Home,
+        machine: &Machine,
+        slip: Option<Link>,
+        contacts: &Contacts,
+    ) -> eyre::Result<Routed> {
+        let Some((socket, connected)) = through_serve::serve(home).await? else {
+            return Ok(Routed::OwnBind);
+        };
+        let dial = Dial {
+            machine,
+            service: &self.service,
+            slip,
+            reach: &self.reach,
+            contacts,
+        };
+        if let Err(refused) = dial.admit(&socket, connected).await {
+            return Ok(Routed::Ran(Err(refused)));
+        }
+        through_serve::raise_open_files();
+        let exit = ServeExit {
+            dial: &dial,
+            socket: &socket,
+        };
+        let named = connect::Machine::of(contacts, machine.key());
+        Ok(Routed::Ran(self.listen(&exit, &named).await))
+    }
+
+    /// Bind the loopback listener, print the local URL and the start lines naming `machine`, then answer
+    /// each request through `exit` until a request finds the run over.
+    async fn listen(&self, exit: &impl Exit, machine: &connect::Machine) -> eyre::Result<()> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
         let local = Local::new(listener.local_addr()?);
         println!("{local}");
-        eprintln!(
-            "Proxying {} through {}.",
-            self.url,
-            connect::Machine::of(contacts, exit.key)
-        );
+        eprintln!("Proxying {} through {machine}.", self.url);
         press_ctrl_c();
-        accept_each(listener, MAX_PIPES, |tcp| self.serve(tcp, &local, &exit)).await
+        Err(accept_each(listener, MAX_PIPES, |tcp| self.answer(tcp, &local, exit)).await)
+    }
+
+    /// Answer one local connection: its failure goes to the log and the listener stays up, unless the
+    /// request found the run over ([`Unopened`] says when), which ends it with that line.
+    async fn answer(
+        &self,
+        tcp: TcpStream,
+        local: &Local,
+        exit: &impl Exit,
+    ) -> ControlFlow<eyre::Report> {
+        match self.serve(tcp, local, exit).await {
+            Ok(flow) => flow,
+            Err(error) => {
+                tracing::warn!(%error, "proxy request ended");
+                ControlFlow::Continue(())
+            }
+        }
     }
 
     /// Serve one inbound HTTP request. A failure BEFORE any response bytes are written serves a `502` so
     /// a downloader sees a real HTTP error, not a bare connection reset; a failure once the response has
-    /// begun just closes the socket (a second HTTP response into the body would corrupt it).
-    async fn serve<T: Transport, D: Discovery>(
+    /// begun just closes the socket (a second HTTP response into the body would corrupt it). Breaks with
+    /// the line the run ends with once the request's client has its answer.
+    async fn serve(
         &self,
         mut tcp: TcpStream,
         local: &Local,
-        exit: &Exit<'_, '_, T, D>,
-    ) -> eyre::Result<()> {
+        exit: &impl Exit,
+    ) -> eyre::Result<ControlFlow<eyre::Report>> {
         let mut responded = false;
-        if let Err(error) = self.relay(&mut tcp, local, exit, &mut responded).await {
-            if !responded {
-                // A failure before any response (an open, a parse, a stream drop) is a bad-gateway
-                // condition, not an authorization one, so `502`. The refusal path inside `relay` serves
-                // its own `403`/`502` before returning, so a refusal never reaches this fallback.
-                let _ = respond_error(
-                    &mut tcp,
-                    Status::BadGateway,
-                    &format!("proxy failed: {error:#}"),
-                )
-                .await;
-            }
-            return Err(error);
+        let relayed = self.relay(&mut tcp, local, exit, &mut responded).await;
+        if let Err(error) = &relayed
+            && !responded
+        {
+            // A failure before any response (an open, a parse, a stream drop) is a bad-gateway
+            // condition, not an authorization one, so `502`. The refusal path inside `relay` serves its
+            // own `403`/`502` before returning, so a refusal never reaches this fallback.
+            let _ = respond_error(&mut tcp, Status::BadGateway, &failed(error)).await;
         }
-        Ok(())
+        relayed
     }
 
     /// Relay one request to the `proxy:` service and stream the response back, setting `responded` the
@@ -216,13 +272,13 @@ impl ProxyCmd {
     ///
     /// The local checks ([`Local::admit`]) run before the stream opens, so a request this run did not
     /// print the URL for never reaches the machine or carries the credential.
-    async fn relay<T: Transport, D: Discovery>(
+    async fn relay(
         &self,
         tcp: &mut TcpStream,
         local: &Local,
-        exit: &Exit<'_, '_, T, D>,
+        exit: &impl Exit,
         responded: &mut bool,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<ControlFlow<eyre::Report>> {
         let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(tcp))
             .await
             .map_err(|_| eyre::eyre!("no request within {HEAD_TIMEOUT:?}"))??;
@@ -231,16 +287,17 @@ impl ProxyCmd {
             Ok(origin) => origin,
             Err(refused) => {
                 *responded = true;
-                return respond_error(tcp, refused.status(), refused.body()).await;
+                respond_error(tcp, refused.status(), refused.body()).await?;
+                return Ok(ControlFlow::Continue(()));
             }
         };
         let Parsed {
             method, headers, ..
         } = parsed;
 
-        let (mut writer, mut reader) = match exit.open(&self.service).await {
+        let (mut writer, mut reader) = match exit.open().await {
             Ok(halves) => halves,
-            Err(OpenError::Open(bifrost::Error::Refused(refusal))) => {
+            Err(Unopened::Refused { refusal, ends }) => {
                 *responded = true;
                 // `NotAdmitted` is an AUTHORIZATION failure (the exit node refused YOU): serve `403`.
                 // `BadRequest` and `Unavailable` are the node's own failure to serve the request and rule on
@@ -272,58 +329,123 @@ impl ProxyCmd {
                         Status::BadGateway
                     }
                 };
-                return respond_error(tcp, status, &format!("proxy service refused: {refusal}"))
-                    .await;
+                let answered =
+                    respond_error(tcp, status, &format!("proxy service refused: {refusal}")).await;
+                // A run-ending refusal ends the run even when its client went before the answer.
+                return match ends {
+                    Some(line) => Ok(ControlFlow::Break(line)),
+                    None => answered.map(|()| ControlFlow::Continue(())),
+                };
             }
-            Err(error) => return Err(error.into()),
+            Err(Unopened::Over(line)) => {
+                *responded = true;
+                let _ = respond_error(tcp, Status::BadGateway, &failed(&line)).await;
+                return Ok(ControlFlow::Break(line));
+            }
+            Err(Unopened::Failed(error)) => return Err(error),
         };
-
-        FetchRequest {
-            method,
-            url: origin,
-            headers,
-        }
-        .write(&mut writer)
-        .await?;
-        match FetchResponse::read(&mut reader).await? {
-            FetchResponse::Ok { status, headers } => {
-                // Checked before a byte of it is written, so a head the machine sent malformed is a
-                // `502` from the fallback rather than lines injected into the local response.
-                let head = Head::checked(status, headers)?;
-                *responded = true;
-                head.write(tcp).await?;
-                // The body follows on the same stream; stream it to the client until the node closes.
-                tokio::io::copy(&mut reader, tcp).await?;
-                tcp.shutdown().await?;
+        // Once the stream opened, a failure may be `serve` stopping under it.
+        let fetched: eyre::Result<()> = async {
+            FetchRequest {
+                method,
+                url: origin,
+                headers,
             }
-            FetchResponse::Error(message) => {
-                *responded = true;
-                respond_error(tcp, Status::BadGateway, &format!("origin error: {message}")).await?;
+            .write(&mut writer)
+            .await?;
+            match FetchResponse::read(&mut reader).await? {
+                FetchResponse::Ok { status, headers } => {
+                    // Checked before a byte of it is written, so a head the machine sent malformed is a
+                    // `502` from the fallback rather than lines injected into the local response.
+                    let head = Head::checked(status, headers)?;
+                    *responded = true;
+                    head.write(tcp).await?;
+                    // The body follows on the same stream; stream it to the client until the node closes.
+                    tokio::io::copy(&mut reader, tcp).await?;
+                    tcp.shutdown().await?;
+                }
+                FetchResponse::Error(message) => {
+                    *responded = true;
+                    respond_error(tcp, Status::BadGateway, &format!("origin error: {message}"))
+                        .await?;
+                }
             }
+            Ok(())
         }
-        Ok(())
+        .await;
+        match fetched {
+            Ok(()) => Ok(ControlFlow::Continue(())),
+            Err(error) => match exit.stopped().await {
+                // `serve` stopped under the request: its client's `502` says so, if none has begun, and
+                // the run ends here rather than at the next request's Open.
+                Some(stopped) => {
+                    if !*responded {
+                        *responded = true;
+                        let _ = respond_error(tcp, Status::BadGateway, &failed(&stopped)).await;
+                    }
+                    Ok(ControlFlow::Break(stopped))
+                }
+                None => Err(error),
+            },
+        }
     }
 }
 
-/// The machine every request leaves from, and what each request's stream presents to it.
-struct Exit<'p, 'n, T: Transport, D: Discovery> {
+/// Where a run's requests leave from: one admitted stream per request, each on the Bulk lane, since a
+/// downloader's parallel requests are a fan-out and never take the slots the run's other streams to the
+/// machine need. Each request rides its own stream, so parallel ranged GETs do not stall behind one slow
+/// transfer.
+trait Exit {
+    /// One admitted stream for the run's service, or why none opened.
+    fn open(
+        &self,
+    ) -> impl Future<Output = Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), Unopened>>;
+
+    /// `serve`'s own line when it is gone, asked after a request's open stream broke: `None` while it
+    /// answers, and always by own bind, which holds no `serve`.
+    fn stopped(&self) -> impl Future<Output = Option<eyre::Report>>;
+}
+
+/// Why a request's stream did not open, and whether the run goes on.
+enum Unopened {
+    /// The machine refused the request: the local client gets the status that refusal reads as. `ends`
+    /// is the line the run ends with after that answer, when every later request would meet the same
+    /// refusal ([`Unpiped::Ends`]).
+    Refused {
+        refusal: Refusal,
+        ends: Option<eyre::Report>,
+    },
+    /// The run is over ([`Unpiped::Ends`] for anything but the machine's refusal): the local client gets a
+    /// `502` saying why, then the run ends with this line.
+    Over(eyre::Report),
+    /// Anything else: the local client gets a `502` saying so, and the listener stays up.
+    Failed(eyre::Report),
+}
+
+/// The body of a failed request's `502`: one line, `proxy failed: ` and the first line of the error,
+/// which for an ended standing carries its remedy. The lines below it address the person at the
+/// terminal and stay there.
+fn failed(error: &eyre::Report) -> String {
+    let error = format!("{error:#}");
+    format!("proxy failed: {}", error.lines().next().unwrap_or_default())
+}
+
+/// The machine every request leaves from by own bind, and what each request's stream presents to it.
+struct OwnExit<'p, 'n, T: Transport, D: Discovery> {
     peers: &'p Peers<'n, T, D>,
     key: NodeId,
+    service: Service,
     presents: Presents,
 }
 
-impl<T: Transport, D: Discovery> Exit<'_, '_, T, D> {
-    /// One admitted stream for `service` on the Bulk lane: a downloader's parallel requests are a fan-out,
-    /// so they never take the slots the run's other streams to the machine need.
-    async fn open(
-        &self,
-        service: &Service,
-    ) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), OpenError> {
+impl<T: Transport, D: Discovery> OwnExit<'_, '_, T, D> {
+    /// One admitted stream on the held Bulk session, its failure as the lane gives it.
+    async fn held(&self) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), OpenError> {
         self.peers
             .open(
                 self.key,
                 Hints::NONE,
-                Service::clone(service),
+                Service::clone(&self.service),
                 Lane::Bulk,
                 Presents::clone(&self.presents),
             )
@@ -331,40 +453,67 @@ impl<T: Transport, D: Discovery> Exit<'_, '_, T, D> {
     }
 }
 
-/// Accept each local connection and hand it to `serve`, all served concurrently, until the process ends.
-///
-/// Each request rides its own bifrost stream, so a downloader's parallel ranged GETs do not stall behind
-/// one slow transfer. At most `cap` are held at once ([`MAX_PIPES`] in a run; past it, new connections
-/// wait in the kernel's backlog), and a failed accept pauses for [`ACCEPT_RETRY`] rather than spinning, the same
-/// bounds `forward` keeps. One failed accept or request never tears down the ones in flight.
-async fn accept_each<F, Fut>(listener: TcpListener, cap: usize, mut serve: F) -> eyre::Result<()>
-where
-    F: FnMut(TcpStream) -> Fut,
-    Fut: Future<Output = eyre::Result<()>>,
-{
-    let mut pipes = FuturesUnordered::new();
-    // Set after a failed accept: accepting resumes once `retry` fires.
-    let retry = tokio::time::sleep(Duration::ZERO);
-    tokio::pin!(retry);
-    let mut paused = false;
-    loop {
-        tokio::select! {
-            () = &mut retry, if paused => paused = false,
-            // Accept only below the cap: a connection waiting for its head holds a descriptor.
-            accepted = listener.accept(), if !paused && pipes.len() < cap => match accepted {
-                Ok((tcp, _)) => pipes.push(serve(tcp)),
-                Err(error) => {
-                    tracing::warn!(%error, "local accept failed; still listening");
-                    retry.as_mut().reset(tokio::time::Instant::now() + ACCEPT_RETRY);
-                    paused = true;
-                }
-            },
-            Some(result) = pipes.next(), if !pipes.is_empty() => {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "proxy request ended");
-                }
-            }
+impl<T: Transport, D: Discovery> Exit for OwnExit<'_, '_, T, D> {
+    async fn open(&self) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), Unopened> {
+        match self.held().await {
+            Ok(halves) => Ok(halves),
+            // By own bind a later refusal is that request's alone.
+            Err(OpenError::Open(bifrost::Error::Refused(refusal))) => Err(Unopened::Refused {
+                refusal,
+                ends: None,
+            }),
+            Err(error) => Err(Unopened::Failed(error.into())),
         }
+    }
+
+    async fn stopped(&self) -> Option<eyre::Report> {
+        None
+    }
+}
+
+/// The machine every request leaves from through `serve`: an Open per request, on a control connection
+/// of its own.
+struct ServeExit<'d> {
+    dial: &'d Dial<'d>,
+    socket: &'d UidSocket,
+}
+
+impl Exit for ServeExit<'_> {
+    async fn open(&self) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), Unopened> {
+        match self.dial.pipe(self.socket).await {
+            Ok(stream) => Ok((stream.write, stream.read)),
+            // The machine's own refusal reads as the own bind's does, so a downloader sees one status
+            // for one refusal on both paths.
+            Err(Unpiped::Pipe(Unattached::Refused(OpenRefusal::Peer(refusal)))) => {
+                Err(Unopened::Refused {
+                    refusal: refusal.into(),
+                    ends: None,
+                })
+            }
+            Err(Unpiped::Pipe(unattached)) => Err(Unopened::Failed(
+                self.dial.unattached(unattached, self.socket).await,
+            )),
+            Err(Unpiped::Ends(Unattached::Refused(OpenRefusal::Peer(refusal)))) => {
+                let ends = self
+                    .dial
+                    .unattached(
+                        Unattached::Refused(OpenRefusal::Peer(refusal.clone())),
+                        self.socket,
+                    )
+                    .await;
+                Err(Unopened::Refused {
+                    refusal: refusal.into(),
+                    ends: Some(ends),
+                })
+            }
+            Err(Unpiped::Ends(unattached)) => Err(Unopened::Over(
+                self.dial.unattached(unattached, self.socket).await,
+            )),
+        }
+    }
+
+    async fn stopped(&self) -> Option<eyre::Report> {
+        self.dial.stopped(self.socket).await
     }
 }
 

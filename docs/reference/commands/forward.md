@@ -21,7 +21,8 @@ Forwarding db on me/nas to 127.0.0.1:5432.
 Press ctrl-c to stop.
 ```
 
-A client on the laptop connects to `127.0.0.1:5432`. `swoosh forward me/nas logs - | less` puts the stream on
+A client on the laptop connects to `127.0.0.1:5432`. If `swoosh serve` is running here, `forward` runs through it;
+if `serve` stops, `forward` ends with `error: swoosh serve stopped here and ended the connection to me/nas`. `swoosh forward me/nas logs - | less` puts the stream on
 stdout instead.
 
 **Things to know.** The local end is required: nothing defaults to the terminal or to the served port.

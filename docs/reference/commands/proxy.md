@@ -22,6 +22,10 @@ $ swoosh proxy me/nas https://example.com/big.iso
 It prints a local URL, `http://127.0.0.1:<port>/<token>/`, on stdout. Point curl or a browser at it: the
 request leaves from `nas`, and `Range` passes through, so a stopped download resumes.
 
+If `swoosh serve` is running here, `proxy` runs through it. If `serve` stops, `proxy` ends, and the request in
+flight gets a `502` whose body is one line: `proxy failed: swoosh serve stopped here and ended the connection to
+me/nas`. Any other failed request gets the same shape, `proxy failed: <what went wrong>`.
+
 **Things to know.** The machine must serve a proxy for that site (`swoosh serve proxy:<url>` there). Until it does, each
 request gets an error that names that line.
 

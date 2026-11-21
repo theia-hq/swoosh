@@ -2,6 +2,7 @@
 //! response heads it passes on, and the bounds it keeps on local connections.
 
 use core::net::SocketAddr;
+use core::ops::ControlFlow;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use std::sync::Arc;
@@ -11,13 +12,19 @@ use clap::Parser as _;
 use swoosh::credential::Credential;
 use swoosh::peers::{Hints, Lane, Peers, Presents};
 use swoosh::reaching::{BindRole, Reaching as _};
+use swoosh::serve::control_codec::{OpenRefusal, PeerRefusal};
 use swoosh::testkit::{TestNode, TestWrite};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::{
-    BadHead, Exit, HEAD_TIMEOUT, Head, Local, Parsed, ProxyCmd, Refused, accept_each, origin_url,
+    BadHead, Exit, HEAD_TIMEOUT, Head, Local, MAX_PIPES, OwnExit, Parsed, ProxyCmd, Refused,
+    ServeExit, accept_each, origin_url,
 };
+use crate::commands::through_serve::tests::{
+    Answer, END, Heard, ROW_BOUND, Rig, Served, book, machine, resident_key, scripted,
+};
+use crate::commands::through_serve::{Dial, ServeStopped, StandingEnded, ThisMachine};
 
 /// A fixed token, so a test can write the request a downloader sends to the printed URL.
 const TOKEN: &str = "00112233445566778899aabbccddeeff";
@@ -453,18 +460,18 @@ async fn exchange(
     cmd: &ProxyCmd,
     session: &Scripted,
     present: Option<&nauthy::Link>,
-) -> (eyre::Result<()>, String) {
+) -> (eyre::Result<ControlFlow<eyre::Report>>, String) {
     let node = bifrost::Node::new(session.clone(), bifrost::NoDiscovery);
     let peers = Peers::new(&node);
-    exchange_on(head, cmd, &exit(&peers, present)).await
+    exchange_on(head, cmd, &exit(&peers, cmd, present)).await
 }
 
 /// [`exchange`] through `exit`, whose owner the caller holds.
 async fn exchange_on(
     head: impl FnOnce(&Local) -> String,
     cmd: &ProxyCmd,
-    exit: &Exit<'_, '_, Scripted, bifrost::NoDiscovery>,
-) -> (eyre::Result<()>, String) {
+    exit: &impl Exit,
+) -> (eyre::Result<ControlFlow<eyre::Report>>, String) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let local = local_at(listener.local_addr().unwrap());
     let mut client = TcpStream::connect(local.addr).await.unwrap();
@@ -477,14 +484,17 @@ async fn exchange_on(
     (served, String::from_utf8_lossy(&response).into_owned())
 }
 
-/// The scripted machine as every request's exit, presenting `present` as this home's standing.
+/// The scripted machine as every request's exit for `cmd`'s service, presenting `present` as this
+/// home's standing.
 fn exit<'p, 'n>(
     peers: &'p Peers<'n, Scripted, bifrost::NoDiscovery>,
+    cmd: &ProxyCmd,
     present: Option<&nauthy::Link>,
-) -> Exit<'p, 'n, Scripted, bifrost::NoDiscovery> {
-    Exit {
+) -> OwnExit<'p, 'n, Scripted, bifrost::NoDiscovery> {
+    OwnExit {
         peers,
         key: bifrost::NodeId::from_ed25519_secret(&[0u8; 32]),
+        service: cmd.service.clone(),
         presents: Presents::Standing(present.cloned()),
     }
 }
@@ -587,7 +597,7 @@ async fn a_client_that_sends_no_head_is_let_go() {
 
     let served = tokio::time::timeout(
         HEAD_TIMEOUT * 6,
-        cmd.serve(server, &local, &exit(&peers, None)),
+        cmd.serve(server, &local, &exit(&peers, &cmd, None)),
     )
     .await
     .expect("the head timeout lets the connection go before the test's own bound");
@@ -611,7 +621,7 @@ async fn the_listener_holds_at_most_its_cap_of_connections() {
     let accepting = tokio::spawn(accept_each(listener, CAP, move |_tcp| {
         counted.fetch_add(1, Ordering::SeqCst);
         // Never ends, so every accepted connection stays held.
-        core::future::pending::<eyre::Result<()>>()
+        core::future::pending::<ControlFlow<eyre::Report>>()
     }));
 
     let mut clients = Vec::new();
@@ -711,12 +721,261 @@ async fn proxy_requests_ride_the_bulk_lane() {
             .await,
         Err(swoosh::peers::OpenError::Busy)
     ));
-    let (served, text) = exchange_on(printed, &proxy(&[]), &exit(&peers, None)).await;
+    let cmd = proxy(&[]);
+    let (served, text) = exchange_on(printed, &cmd, &exit(&peers, &cmd, None)).await;
     assert!(served.is_ok(), "{served:?}");
     assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
     assert_eq!(
         session.dials.load(Ordering::SeqCst),
         2,
         "one session per lane"
+    );
+}
+
+/// The status line and body of a whole HTTP response.
+fn status_and_body(response: &str) -> (&str, &str) {
+    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((response, ""));
+    (head.lines().next().unwrap_or_default(), body)
+}
+
+/// `requests` local clients, one at a time, each sending the GET `local` printed and reading its whole
+/// response: the responses, in order.
+fn requesting(local: &Local, requests: usize) -> tokio::task::JoinHandle<Vec<String>> {
+    let head = printed(local);
+    let addr = local.addr;
+    tokio::spawn(async move {
+        let mut responses = Vec::new();
+        for _ in 0..requests {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(head.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response).await;
+            responses.push(String::from_utf8_lossy(&response).into_owned());
+        }
+        responses
+    })
+}
+
+/// `proxy`'s listener for `me/nas` through a resident answering `answers`, while `requests` clients
+/// send the printed GET one at a time. Returns the line the run ended with, each response and the Opens
+/// the resident heard.
+async fn proxied(
+    tag: &str,
+    answers: Vec<Answer>,
+    requests: usize,
+) -> (eyre::Report, Vec<String>, Vec<Heard>) {
+    let mut served = Served::new(tag).await;
+    let rig = Rig::default();
+    let resident = scripted(&mut served, answers, &rig);
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let cmd = proxy(&[]);
+    let dial = Dial {
+        machine: &peer,
+        service: &cmd.service,
+        slip: None,
+        reach: &cmd.reach,
+        contacts: &contacts,
+    };
+    let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
+    let exit = ServeExit {
+        dial: &dial,
+        socket: &socket,
+    };
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let local = local_at(listener.local_addr().unwrap());
+    let clients = requesting(&local, requests);
+    let (ended, responses) = tokio::time::timeout(ROW_BOUND, async {
+        tokio::join!(
+            accept_each(listener, MAX_PIPES, |tcp| cmd.answer(tcp, &local, &exit)),
+            clients
+        )
+    })
+    .await
+    .expect("the run ended");
+    rig.stop.cancel();
+    let heard = tokio::time::timeout(ROW_BOUND, resident)
+        .await
+        .expect("the resident ended")
+        .unwrap();
+    (ended, responses.unwrap(), heard)
+}
+
+/// The `502` a request gets when `serve` is gone: one line, the serve-stopped line's head.
+const STOPPED_BODY: &str =
+    "proxy failed: swoosh serve stopped here and ended the connection to me/nas";
+
+/// `proxy` through `serve` proves admission on one Open on Bulk, unobserved, and ends that stream with
+/// End rather than dropping it, so the machine reads a clean empty upload, never a reset.
+#[tokio::test]
+async fn proxy_through_serve_admits_on_an_open_it_ends_with_end() {
+    use swoosh::serve::control_codec::{Observation, OpenLane};
+
+    let mut served = Served::new("proxy-admit").await;
+    let resident = scripted(&mut served, vec![Answer::Attach], &Rig::default());
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let cmd = proxy(&[]);
+    // The run listens on once admitted; the resident resolves once the admission stream has closed.
+    let heard = tokio::time::timeout(ROW_BOUND, async {
+        tokio::select! {
+            routed = cmd.through_serve(&served.home, &peer, None, &contacts) => {
+                panic!("the run ended before a request: {:?}", routed.map(|_| ()))
+            }
+            heard = resident => heard.unwrap(),
+        }
+    })
+    .await
+    .expect("the admission Open was made and closed");
+    let [admission] = heard.as_slice() else {
+        panic!("{} Opens, not the one admission", heard.len());
+    };
+    assert_eq!(admission.lane, OpenLane::Bulk);
+    assert_eq!(admission.observation, Observation::Unobserved);
+    assert_eq!(
+        admission.upload, END,
+        "the admission stream ends with End alone"
+    );
+}
+
+/// A request's own failure (`serve`'s `Busy`, the machine unavailable, a cut while `serve` still
+/// answers) keeps the listener up: its client gets a `502` whose body is one line, the head of the
+/// terminal's line with none of its detail, and the next request's Open is made.
+#[tokio::test]
+async fn a_requests_own_failure_keeps_the_proxy_up_and_its_502_is_one_line() {
+    let (ended, responses, heard) = proxied(
+        "proxy-own",
+        vec![
+            Answer::Refuse(OpenRefusal::Busy),
+            Answer::Refuse(OpenRefusal::Peer(PeerRefusal::Unavailable(
+                bifrost::RefusalDetail::bounded("down"),
+            ))),
+            Answer::Cut,
+            Answer::Refuse(OpenRefusal::Busy),
+        ],
+        5,
+    )
+    .await;
+    assert!(ended.is::<ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 4);
+    let answered: Vec<_> = responses.iter().map(|r| status_and_body(r)).collect();
+    let busy = "proxy failed: too many connections open through swoosh serve on this machine";
+    assert!(
+        answered
+            .iter()
+            .all(|(status, body)| *status == "HTTP/1.1 502 Bad Gateway" && !body.contains('\n')),
+        "{answered:?}"
+    );
+    assert_eq!(answered[0].1, busy);
+    assert_eq!(answered[3].1, busy);
+    assert_eq!(answered[4].1, STOPPED_BODY);
+}
+
+/// A refusal every later request would meet ends the run with its line once the client has its answer:
+/// `NotAdmitted` a `403` as by own bind, an ended standing and the machine being this one a `502`.
+#[tokio::test]
+async fn a_refusal_every_later_request_would_meet_ends_the_proxy_after_its_answer() {
+    for (tag, refusal, status, body) in [
+        (
+            "proxy-admitted",
+            OpenRefusal::Peer(PeerRefusal::NotAdmitted),
+            "HTTP/1.1 403 Forbidden",
+            format!("proxy service refused: {}", bifrost::Refusal::NotAdmitted),
+        ),
+        (
+            "proxy-standing",
+            OpenRefusal::StandingEnded,
+            "HTTP/1.1 502 Bad Gateway",
+            "proxy failed: this device's membership badge has ended, so a family-gated peer will \
+             refuse this dial"
+                .to_owned(),
+        ),
+        (
+            "proxy-here",
+            OpenRefusal::NotHere,
+            "HTTP/1.1 502 Bad Gateway",
+            "proxy failed: me/nas is this machine".to_owned(),
+        ),
+    ] {
+        let expected = refusal.clone();
+        let (ended, responses, heard) = proxied(tag, vec![Answer::Refuse(refusal)], 1).await;
+        assert_eq!(heard.len(), 1);
+        assert_eq!(
+            responses
+                .iter()
+                .map(|r| status_and_body(r))
+                .collect::<Vec<_>>(),
+            [(status, body.as_str())]
+        );
+        match expected {
+            OpenRefusal::Peer(_) => {
+                assert!(ended.is::<crate::commands::machine::Refused>(), "{ended:#}")
+            }
+            OpenRefusal::StandingEnded => assert!(ended.is::<StandingEnded>(), "{ended:#}"),
+            _ => assert!(ended.is::<ThisMachine>(), "{ended:#}"),
+        }
+    }
+}
+
+/// `serve` stopping under a request's stream ends the run at once: the broken request asks the socket,
+/// its client gets the serve-stopped `502`, and no next request is needed.
+#[tokio::test]
+async fn serve_stopping_under_a_request_ends_the_proxy_with_its_502() {
+    let (ended, responses, heard) = proxied("proxy-stop", vec![Answer::Stop], 1).await;
+    assert!(ended.is::<ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 1);
+    assert_eq!(
+        responses
+            .iter()
+            .map(|r| status_and_body(r))
+            .collect::<Vec<_>>(),
+        [("HTTP/1.1 502 Bad Gateway", STOPPED_BODY)]
+    );
+}
+
+/// A request through `serve` that attaches gets the machine's answer: a `200` and its body.
+#[tokio::test]
+async fn a_request_through_serve_gets_the_machines_200() {
+    let mut answer = Vec::new();
+    ::fetch::http::FetchResponse::Ok {
+        status: 200,
+        headers: vec![("Content-Type".to_owned(), "text/plain".to_owned())],
+    }
+    .write(&mut answer)
+    .await
+    .unwrap();
+    answer.extend_from_slice(b"body\n");
+    let (ended, responses, heard) = proxied("proxy-200", vec![Answer::Exchange(answer)], 2).await;
+    assert!(ended.is::<ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 1);
+    assert_eq!(
+        status_and_body(&responses[0]),
+        ("HTTP/1.1 200 OK", "body\n")
+    );
+}
+
+/// An ended standing refused while `serve` still answers its status: the `502` body is the terminal
+/// line's first line, which carries the remedy keyed to the key `serve` runs as, and the run ends.
+#[tokio::test]
+async fn an_ended_standing_with_serve_up_ends_the_proxy_after_a_502_with_its_remedy() {
+    let (ended, responses, heard) = proxied(
+        "proxy-remedy",
+        vec![Answer::Refuse(OpenRefusal::StandingEnded), Answer::Attach],
+        1,
+    )
+    .await;
+    assert!(ended.is::<StandingEnded>(), "{ended:#}");
+    assert_eq!(heard.len(), 1);
+    let body = format!(
+        "proxy failed: this device's membership badge has ended, so a family-gated peer will refuse \
+         this dial; {}",
+        swoosh::badge::remedy(resident_key())
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .map(|r| status_and_body(r))
+            .collect::<Vec<_>>(),
+        [("HTTP/1.1 502 Bad Gateway", body.as_str())]
     );
 }

@@ -1,9 +1,9 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! `forward <port>` takes the path through a running `swoosh serve`: the compiled binary serves a home, and
-//! the compiled binary runs the listener there with a reach flag that only the path through `serve`
-//! refuses, so its refusal shows which path the verb took.
+//! `forward <port>` and `proxy` take the path through a running `swoosh serve`: the compiled binary serves a
+//! home, and the compiled binary runs each listener there with a reach flag that only the path through
+//! `serve` refuses, so its refusal shows which path the verb took.
 
 use core::time::Duration;
 use std::io::{BufRead as _, BufReader};
@@ -111,8 +111,8 @@ fn swoosh(home: &Path, args: &[&str]) -> Output {
     child.wait_with_output().expect("the binary finishes")
 }
 
-/// With `serve` running, `forward <port>` takes its path: a `--relay` set for a bind it does not make is
-/// refused there, exit 1, before anything listens.
+/// With `serve` running, `forward <port>` and `proxy` take its path: a `--relay` set for a bind they do
+/// not make is refused there, exit 1, before anything listens.
 #[test]
 fn listeners_take_the_path_through_a_running_serve() {
     let scratch = Scratch::new("route");
@@ -126,6 +126,7 @@ fn listeners_take_the_path_through_a_running_serve() {
         .port()
         .to_string();
     refused_through_serve(&scratch.0, &["forward", &other, "ssh", &port]);
+    refused_through_serve(&scratch.0, &["proxy", &other, "http://example.com/x"]);
 }
 
 /// Run `verb` on `home` with a `--relay` for a bind it does not make: through the running `serve` that
