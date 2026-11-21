@@ -26,6 +26,9 @@ All notable changes to swoosh, newest first.
   `status` reads `me/nas, path: direct, rtt 12.031 ms`; `ping` prints the device, then a `path:` row from a
   reading taken after the run. If that fails, the path is left out, stderr says
   `warning: could not read the path of this run`, and the exit code is unchanged.
+- **`forward <port>` and `proxy` run through `swoosh serve` too.** If `serve` stops, both end with
+  `error: swoosh serve stopped here and ended the connection to me/nas`. A `proxy` request that fails gets a
+  `502` whose body is one line, `proxy failed: <what went wrong>`, and `proxy` still prints its URL first.
 - **`speed` runs through `swoosh serve` too, and its title drops `via iroh`.** It reads
   `speed test to <machine> (<mode>)` on both paths. The `path:` line comes from a reading taken after the
   run; if that fails, there is no `path:` line, stderr says `warning: could not read the path of this run`,
