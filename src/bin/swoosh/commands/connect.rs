@@ -16,12 +16,13 @@
 //! that a stdin that is not a terminal still finishes its upload after a clean end. A port through
 //! `serve` holds no session to watch, so it ends when a pipe finds the run over (`through_serve` names
 //! the outcomes that do); by own bind a pipe's `NotAdmitted` ends it too, the one refusal every later
-//! pipe would meet. Any other pipe's failure keeps the port listening. tightbeam's own stdio bridge and
-//! port forward end neither way yet: the bridge
+//! pipe would meet. Any other pipe's failure keeps the port listening, with one [`PipeFailures`] warning
+//! per run of them. tightbeam's own stdio bridge and port forward end neither way yet: the bridge
 //! waits on a stdin read before the process can exit, and the forward keeps listening on a session
 //! that is gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
 //! frames, until tightbeam's own end the same way.
 
+use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::ops::ControlFlow;
 use core::pin::Pin;
@@ -36,7 +37,7 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::escaped_report;
+use swoosh::escape::{Escaped, escaped_report};
 use swoosh::peer::Machine as PeerMachine;
 use swoosh::peers::{Hints, Lane, OpenError, Peers, Presents, SessionEnd};
 use tightbeam::protocol::{Request, Response};
@@ -251,7 +252,13 @@ impl<T: Transport, D: Discovery> OwnPipes<'_, '_, '_, T, D> {
         };
         let listener = TcpListener::bind(("127.0.0.1", port)).await?;
         forwarding(self.refused.service, machine, port);
-        Err(self.forward(listener, end).await)
+        Err(self
+            .forward(
+                listener,
+                end,
+                &PipeFailures::new(self.refused.machine, std::io::stderr()),
+            )
+            .await)
     }
 
     /// Forward each accepted local connection over its own stream until the run ends, and return the
@@ -261,11 +268,16 @@ impl<T: Transport, D: Discovery> OwnPipes<'_, '_, '_, T, D> {
     /// The watch follows the latest stream, starting from `first`'s ([`session_cut`]). A pipe's
     /// `NotAdmitted` breaks the loop at once, and one of your devices is asked why only after it, once
     /// per run: never a follow-up dial per refused pipe, and never one the cut can race.
-    async fn forward(&self, listener: TcpListener, first: SessionEnd<T::Session>) -> eyre::Report {
+    async fn forward(
+        &self,
+        listener: TcpListener,
+        first: SessionEnd<T::Session>,
+        failures: &PipeFailures<impl std::io::Write>,
+    ) -> eyre::Report {
         let (rode, latest) = mpsc::unbounded_channel();
         // The receiver is held below, so the send cannot fail.
         let _ = rode.send(first);
-        let pipes = accept_each(listener, MAX_PIPES, |tcp| self.carry(tcp, &rode));
+        let pipes = accept_each(listener, MAX_PIPES, |tcp| self.carry(tcp, &rode, failures));
         let ended = tokio::select! {
             // The cut first: a pipe that broke with its session is polled only after the run has
             // ended on `connection lost`, so no line of the pipe's carries the cut's reason.
@@ -281,27 +293,31 @@ impl<T: Transport, D: Discovery> OwnPipes<'_, '_, '_, T, D> {
 
     /// Carry one local connection over its own admitted stream, both ways, until both sides close, and
     /// tell `rode` which session it rode. A `NotAdmitted` breaks the run with [`NotAdmittedLater`], for
-    /// the run to word once; any other failure is this pipe's, for the log.
+    /// the run to word once; any other failure is this pipe's, for `failures`.
     async fn carry(
         &self,
         mut tcp: TcpStream,
         rode: &mpsc::UnboundedSender<SessionEnd<T::Session>>,
+        failures: &PipeFailures<impl std::io::Write>,
     ) -> ControlFlow<eyre::Report> {
         let (end, writer, reader) = match self.open().await {
             Ok(opened) => opened,
             Err(error) if ends_the_run(&error) => {
                 return ControlFlow::Break(NotAdmittedLater.into());
             }
-            // One connection's failure is not the forward's: it goes to the log, not to the person.
             Err(error) => {
-                tracing::warn!("connection failed: {error:#}");
+                let failure = Failure::of_open(&error);
+                failures.failed(Some(failure), &escaped_report(error.into()));
                 return ControlFlow::Continue(());
             }
         };
+        failures.carried();
         // A failed send means the run is over and nothing watches any more.
         let _ = rode.send(SessionEnd::clone(&end));
+        // A pipe that opened is carried, whatever ends it: a local client's reset or a browser's abort
+        // fails the copy the same way the machine's half does, so it goes to the log alone.
         if let Err(error) = io::copy_bidirectional(&mut tcp, &mut io::join(reader, writer)).await {
-            tracing::warn!("connection failed: {error:#}");
+            tracing::warn!("connection failed: {:#}", escaped_report(error.into()));
         }
         ControlFlow::Continue(())
     }
@@ -474,6 +490,107 @@ pub struct ConnectionLost;
 #[derive(Debug, thiserror::Error)]
 #[error("not admitted")]
 pub struct NotAdmittedLater;
+
+/// What a listener tells the person of its pipes' failures: one `warning:` for the first pipe whose Open
+/// fails after one carried, or after the start, then nothing until a pipe carries again, so a machine
+/// that went away prints one line rather than one per connection. Every failure still goes to the log.
+///
+/// A pipe carries once its stream opens, whatever ends it after. The line is written to `err`, stderr in
+/// a run, and a failed write is not the run's failure.
+pub struct PipeFailures<W> {
+    /// The machine as the line leads with it ([`machine::named`]).
+    machine: String,
+    since: Cell<Since>,
+    // A cell, as every pipe of a run is polled on its one task and none holds the borrow across an await.
+    err: RefCell<W>,
+}
+
+/// What happened since a listener last warned.
+#[derive(Clone, Copy)]
+enum Since {
+    /// A pipe carried, or the run just started: the next failure warns.
+    Carried,
+    /// The warning is out, and no pipe has carried since.
+    Warned,
+}
+
+impl<W: std::io::Write> PipeFailures<W> {
+    /// A run's warnings for the pipes to `machine`, written to `err`.
+    pub fn new(machine: &PeerMachine, err: W) -> Self {
+        Self {
+            machine: machine::named(machine),
+            since: Cell::new(Since::Carried),
+            err: RefCell::new(err),
+        }
+    }
+
+    /// A pipe's stream opened: the next failure warns again.
+    pub fn carried(&self) {
+        self.since.set(Since::Carried);
+    }
+
+    /// A pipe's Open failed and the run listens on: `error`, its peer text already escaped, goes to the
+    /// log, and `failure` into the warning when this is the first failure since a pipe carried. A
+    /// failure the warning has no words for (`None`) goes to the log alone.
+    pub fn failed(&self, failure: Option<Failure>, error: &eyre::Report) {
+        tracing::warn!("connection failed: {error:#}");
+        let Some(failure) = failure else {
+            return;
+        };
+        if let Since::Warned = self.since.replace(Since::Warned) {
+            return;
+        }
+        let _ = writeln!(
+            self.err.borrow_mut(),
+            "warning: a connection to {} failed: {failure}\n  Still listening for new connections.",
+            self.machine
+        );
+    }
+}
+
+/// Why a pipe's Open failed, as its warning says it: one clause per kind of failure, the same on both
+/// paths, with the machine's text escaped as it is built.
+pub enum Failure {
+    /// The machine answered and refused (`Unavailable`, `BadRequest`, or a kind this build cannot name):
+    /// the refusal as the wire words it, escaped.
+    Refused(String),
+    /// No session reached the machine, or the dial or the Open ran out of time.
+    Unreachable,
+    /// The stream broke while it opened: with the wire's escaped detail through `serve`, and none by own
+    /// bind, where the cause can carry the host's reason for a cut.
+    Interrupted(Option<String>),
+    /// The lane, or `serve`, holds as many streams as it takes, here on this machine.
+    Busy,
+}
+
+impl Failure {
+    /// The machine's `refusal`.
+    pub fn refused(refusal: &Refusal) -> Self {
+        Self::Refused(Escaped(&refusal.to_string()).to_string())
+    }
+
+    /// An own-bind Open's `error`: a refusal by its kind, and a stream that failed to open interrupted.
+    pub fn of_open(error: &OpenError) -> Self {
+        match error {
+            OpenError::Busy => Self::Busy,
+            OpenError::Timeout | OpenError::Unreachable(_) => Self::Unreachable,
+            OpenError::Open(bifrost::Error::Refused(refusal)) => Self::refused(refusal),
+            OpenError::Open(_) => Self::Interrupted(None),
+        }
+    }
+}
+
+impl core::fmt::Display for Failure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Refused(refusal) => write!(f, "reached, but refused ({refusal})"),
+            Self::Unreachable => f.write_str("unreachable"),
+            Self::Interrupted(Some(detail)) => write!(f, "interrupted ({detail})"),
+            Self::Interrupted(None) => f.write_str("interrupted"),
+            Self::Busy => f.write_str("too many connections here"),
+        }
+    }
+}
 
 /// Reach the service over one stream and pipe it against this process's stdin and stdout: the bridge
 /// `swoosh ssh` runs as its `ProxyCommand`.
@@ -1693,13 +1810,14 @@ mod tests {
 
     /// `forward <port>` by own bind for `me/nas`'s `ssh`, on `node` and its run's `peers`: admitted on
     /// one stream, then listening while `clients` connect, with the owner's sweep driven beside it as a
-    /// run drives it, for at most `idle` past a row's bound. Returns the line the run ended with.
+    /// run drives it, for at most `idle` past a row's bound. Returns the line the run ended with and what
+    /// it wrote to stderr.
     async fn ported<'n>(
         node: &'n bifrost::Node<swoosh::testkit::ScriptedPeer, bifrost::NoDiscovery>,
         peers: &swoosh::peers::Peers<'n, swoosh::testkit::ScriptedPeer, bifrost::NoDiscovery>,
         idle: core::time::Duration,
         clients: impl AsyncFnOnce(core::net::SocketAddr),
-    ) -> eyre::Report {
+    ) -> (eyre::Report, String) {
         let contacts = crate::commands::through_serve::tests::book();
         let machine = crate::commands::through_serve::tests::machine(&contacts, "me/nas");
         let service = "ssh".parse().expect("a service");
@@ -1715,6 +1833,8 @@ mod tests {
             refused: &refused,
             presents: swoosh::peers::Presents::Standing(None),
         };
+        let mut err = Vec::new();
+        let failures = super::PipeFailures::new(&machine, &mut err);
         let (end, _, _) = pipes.open().await.expect("admitted");
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1725,15 +1845,16 @@ mod tests {
             core::future::pending::<()>().await;
         };
         let bound = crate::commands::through_serve::tests::ROW_BOUND + idle;
-        tokio::time::timeout(bound, async {
+        let ended = tokio::time::timeout(bound, async {
             tokio::select! {
-                ended = pipes.forward(listener, end) => ended,
+                ended = pipes.forward(listener, end, &failures) => ended,
                 never = peers.sweep() => match never {},
                 () = connecting => unreachable!(),
             }
         })
         .await
-        .expect("the run ended")
+        .expect("the run ended");
+        (ended, String::from_utf8(err).expect("utf-8"))
     }
 
     /// A peer at `me/nas`'s key whose gate answers `script`.
@@ -1781,12 +1902,13 @@ mod tests {
                     .expect("below the Main cap"),
             );
         }
-        let ended = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
+        let (ended, err) = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
             client(local).await;
             peer.cut();
         })
         .await;
         assert!(ended.is::<super::ConnectionLost>(), "{ended:#}");
+        assert_eq!(err, "", "the pipe carried");
         assert_eq!(peer.dials(), 2, "one session per lane");
     }
 
@@ -1802,7 +1924,7 @@ mod tests {
         let peers = swoosh::peers::Peers::new(&node);
         // Past the owner's five idle minutes and its next sweep.
         let idle = core::time::Duration::from_secs(7 * 60);
-        let ended = ported(&node, &peers, idle, async |local| {
+        let (ended, err) = ported(&node, &peers, idle, async |local| {
             tokio::time::sleep(idle).await;
             // Real time from here: a paused clock idling on the loopback connect below would jump
             // straight to the row's bound.
@@ -1820,10 +1942,12 @@ mod tests {
         })
         .await;
         assert!(ended.is::<super::ConnectionLost>(), "{ended:#}");
+        assert_eq!(err, "");
     }
 
     /// A host cut ends a port by own bind with `connection lost` while a pipe rides the session, as a
-    /// lease end that cuts it does.
+    /// lease end that cuts it does. (That the pipe cut with it warns nothing first is `reach_cut`'s
+    /// row: this double's cut leaves its streams up.)
     #[tokio::test]
     async fn a_host_cut_ends_a_port_by_own_bind_with_connection_lost() {
         use swoosh::testkit::Script;
@@ -1831,7 +1955,7 @@ mod tests {
         let peer = nas(vec![Script::Holds, Script::Holds]);
         let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
         let peers = swoosh::peers::Peers::new(&node);
-        let ended = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
+        let (ended, err) = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
             let _held = tokio::net::TcpStream::connect(local)
                 .await
                 .expect("connect");
@@ -1843,10 +1967,11 @@ mod tests {
         })
         .await;
         assert!(ended.is::<super::ConnectionLost>(), "{ended:#}");
+        assert_eq!(err, "");
     }
 
     /// A later pipe's `NotAdmitted` ends a port by own bind with the dial refusal, one of your devices
-    /// asked why, as the admission's refusal would.
+    /// asked why, as the admission's refusal would, and with no warning first.
     #[tokio::test]
     async fn a_later_not_admitted_ends_a_port_by_own_bind_with_the_dial_refusal() {
         use swoosh::testkit::Script;
@@ -1858,7 +1983,7 @@ mod tests {
         ]);
         let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
         let peers = swoosh::peers::Peers::new(&node);
-        let ended = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
+        let (ended, err) = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
             client(local).await
         })
         .await;
@@ -1866,6 +1991,186 @@ mod tests {
             format!("{ended:#}"),
             "me/nas does not serve ssh\n  Only nas can add it; on nas, run:\n    swoosh service add ssh"
         );
+        assert_eq!(err, "");
+    }
+
+    /// By own bind the first pipe to fail after the start warns, by its kind, the failures after it do
+    /// not, and a pipe whose stream opened is carried whatever ends it: one whose stream broke under its
+    /// upload warns nothing, and the next pipe refused warns again.
+    #[tokio::test]
+    async fn a_port_by_own_bind_warns_once_per_run_of_failed_pipes() {
+        use swoosh::testkit::Script;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let down = || {
+            Script::Refuse(bifrost::Refusal::Unavailable {
+                detail: bifrost::RefusalDetail::bounded("down"),
+            })
+        };
+        // The fourth pipe's gate admits it, sends an empty list and lets go of its stream.
+        let peer = nas(vec![
+            Script::Holds,
+            down(),
+            down(),
+            Script::Lists(vec![]),
+            down(),
+        ]);
+        let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+        let peers = swoosh::peers::Peers::new(&node);
+        let (ended, err) = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
+            client(local).await;
+            client(local).await;
+            let mut broken = tokio::net::TcpStream::connect(local)
+                .await
+                .expect("connect");
+            let mut list = [0; 4];
+            broken.read_exact(&mut list).await.expect("the list");
+            // Room for the gate to let go, so the upload below meets a stream nobody reads.
+            tokio::time::sleep(core::time::Duration::from_millis(50)).await;
+            let _ = broken.write_all(b"ping").await;
+            let _ = broken.shutdown().await;
+            let _ = broken.read_to_end(&mut Vec::new()).await;
+            client(local).await;
+            peer.cut();
+        })
+        .await;
+        assert!(ended.is::<super::ConnectionLost>(), "{ended:#}");
+        let down = crate::commands::through_serve::tests::warning(
+            "reached, but refused (unavailable: down)",
+        );
+        assert_eq!(err, format!("{down}{down}"));
+    }
+
+    /// A local client that resets its connection once its stream opened warns nothing: the pipe carried,
+    /// and the copy's failure, the client's own act, goes to the log alone.
+    #[tokio::test]
+    async fn a_local_client_reset_after_its_stream_opened_warns_nothing() {
+        use swoosh::testkit::Script;
+        use tokio::io::AsyncWriteExt as _;
+
+        let peer = nas(vec![Script::Holds, Script::ReadsThenHolds]);
+        let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+        let peers = swoosh::peers::Peers::new(&node);
+        let (ended, err) = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
+            let mut reset = tokio::net::TcpStream::connect(local)
+                .await
+                .expect("connect");
+            reset.write_all(b"ping").await.expect("the upload");
+            while peer.received() != b"ping" {
+                tokio::time::sleep(core::time::Duration::from_millis(10)).await;
+            }
+            reset.set_zero_linger().expect("a reset on close");
+            drop(reset);
+            // Room for the pipe to meet the reset before the cut ends the run.
+            tokio::time::sleep(core::time::Duration::from_millis(50)).await;
+            peer.cut();
+        })
+        .await;
+        assert!(ended.is::<super::ConnectionLost>(), "{ended:#}");
+        assert_eq!(err, "");
+    }
+
+    /// A pipe's warning says why its Open failed by kind, the same on both paths, with the machine's text
+    /// escaped: own bind and through `serve`, each row's clause.
+    #[test]
+    fn a_failed_open_reads_by_its_kind() {
+        use swoosh::peers::OpenError;
+        use swoosh::serve::control_codec::{OpenRefusal, PeerRefusal};
+
+        use super::Failure;
+        use crate::commands::through_serve::Unattached;
+
+        let detail = || bifrost::RefusalDetail::bounded("busy\u{1b}[2K");
+        let own = [
+            (
+                Failure::of_open(&OpenError::Open(bifrost::Error::Refused(
+                    bifrost::Refusal::Unavailable { detail: detail() },
+                ))),
+                r"reached, but refused (unavailable: busy\u{1b}[2K)",
+            ),
+            (
+                Failure::of_open(&OpenError::Open(bifrost::Error::Refused(
+                    bifrost::Refusal::BadRequest { detail: detail() },
+                ))),
+                r"reached, but refused (bad request: busy\u{1b}[2K)",
+            ),
+            (Failure::of_open(&OpenError::Timeout), "unreachable"),
+            (
+                Failure::of_open(&OpenError::Open(bifrost::Error::Stream(
+                    "closed: secret-sentinel".into(),
+                ))),
+                "interrupted",
+            ),
+            (
+                Failure::of_open(&OpenError::Busy),
+                "too many connections here",
+            ),
+        ];
+        let through = [
+            (
+                OpenRefusal::Peer(PeerRefusal::Unavailable(detail())),
+                r"reached, but refused (unavailable: busy\u{1b}[2K)",
+            ),
+            (
+                OpenRefusal::Peer(PeerRefusal::BadRequest(detail())),
+                r"reached, but refused (bad request: busy\u{1b}[2K)",
+            ),
+            (OpenRefusal::Unreachable(detail()), "unreachable"),
+            (OpenRefusal::Timeout, "unreachable"),
+            (
+                OpenRefusal::Broken(detail()),
+                r"interrupted (busy\u{1b}[2K)",
+            ),
+            (OpenRefusal::PeerUnreadable(detail()), "interrupted"),
+            (OpenRefusal::Busy, "too many connections here"),
+        ]
+        .map(|(refusal, clause)| {
+            let failure = Unattached::Refused(refusal)
+                .failure()
+                .expect("a row of the table");
+            (failure, clause)
+        });
+        for (failure, clause) in own.into_iter().chain(through) {
+            assert_eq!(failure.to_string(), clause);
+        }
+        let failed = Unattached::Failed(eyre::eyre!("control")).failure();
+        assert_eq!(
+            failed.map(|failure| failure.to_string()).as_deref(),
+            Some("interrupted")
+        );
+    }
+
+    /// The warning leads with the machine as a refusal does: its name; `that machine` for a key with no
+    /// name; `the link's machine` for a link with no name, so a whole key never breaks the line.
+    #[test]
+    fn a_warning_names_the_machine_as_a_refusal_does() {
+        let contacts = crate::commands::through_serve::tests::book();
+        let key = bifrost::NodeId::from_ed25519_secret(&[0x63; 32]).to_string();
+        let slip = swoosh::testkit::TestNode::seeded(1)
+            .fleet_slip(
+                &"ssh".parse().expect("a service"),
+                swoosh::testkit::TestRoot::seeded(2).verify_key(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("a slip");
+        let link = swoosh::link::Link::from(slip).to_string();
+        for (typed, named) in [
+            ("me/nas", "me/nas"),
+            (key.as_str(), "that machine"),
+            (link.as_str(), "the link's machine"),
+        ] {
+            let machine = crate::commands::through_serve::tests::machine(&contacts, typed);
+            let mut err = Vec::new();
+            super::PipeFailures::new(&machine, &mut err)
+                .failed(Some(super::Failure::Unreachable), &eyre::eyre!("down"));
+            assert_eq!(
+                String::from_utf8(err).expect("utf-8"),
+                format!(
+                    "warning: a connection to {named} failed: unreachable\n  Still listening for new \
+                     connections.\n"
+                )
+            );
+        }
     }
 
     /// A later pipe's `NotAdmitted` breaks the run's loop before one of your devices is asked why, so a
@@ -1882,7 +2187,7 @@ mod tests {
         ]);
         let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
         let peers = swoosh::peers::Peers::new(&node);
-        let ended = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
+        let (ended, err) = ported(&node, &peers, core::time::Duration::ZERO, async |local| {
             let _refused = tokio::net::TcpStream::connect(local)
                 .await
                 .expect("connect");
@@ -1895,6 +2200,7 @@ mod tests {
         .await;
         assert!(ended.is::<crate::commands::machine::Refused>(), "{ended:#}");
         assert_eq!(peer.dials(), 2, "the run's session and one follow-up");
+        assert_eq!(err, "");
     }
 
     /// A machine prints as this home's name for its key, else the whole key: a short key is accepted by no

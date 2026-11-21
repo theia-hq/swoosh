@@ -213,13 +213,19 @@ pub fn refused(machine: &Machine, service: &Service, diagnosis: Option<Diagnosis
 #[error("{0}")]
 pub struct Refused(String);
 
-/// The words of [`refused`].
-fn refusal(machine: &Machine, service: &Service, diagnosis: Option<Diagnosis>) -> String {
-    let named = match (machine.name(), machine.kind()) {
+/// How a line that leads with a dialed machine names it: its name; `the link's machine` for a link
+/// with no name; `that machine` for a key with no name, whose whole key would break the line.
+pub fn named(machine: &Machine) -> String {
+    match (machine.name(), machine.kind()) {
         (Some(name), _) => name.to_string(),
         (None, Kind::Link) => "the link's machine".to_owned(),
         (None, _) => "that machine".to_owned(),
-    };
+    }
+}
+
+/// The words of [`refused`].
+fn refusal(machine: &Machine, service: &Service, diagnosis: Option<Diagnosis>) -> String {
+    let named = named(machine);
     let device = machine
         .name()
         .and_then(|name| name.device())

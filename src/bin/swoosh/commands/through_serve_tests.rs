@@ -900,6 +900,8 @@ pub(crate) enum Answer {
     Deaf,
     /// Reply as a `serve` of another control version.
     Version,
+    /// Reply with the resident's own error, this reason.
+    Error(&'static str),
     /// Refuse it so.
     Refuse(OpenRefusal),
 }
@@ -974,6 +976,12 @@ pub(crate) fn scripted(
                 }
                 // Another control version's magic: the client reads no further.
                 Answer::Version => conn.write_all(b"SWC2").await.unwrap(),
+                Answer::Error(reason) => {
+                    Response::Error(reason.to_owned())
+                        .write(&mut conn)
+                        .await
+                        .unwrap();
+                }
                 attach => {
                     Response::Attached(Attached::from(direct()))
                         .write(&mut conn)
@@ -1071,6 +1079,17 @@ async fn forwarded(
     slip: Option<nauthy::Link>,
     clients: impl AsyncFnOnce(core::net::SocketAddr, &Rig),
 ) -> (eyre::Report, Vec<Heard>) {
+    let (ended, heard, _) = warned(tag, answers, slip, clients).await;
+    (ended, heard)
+}
+
+/// [`forwarded`], with what the run wrote to stderr as it ran.
+async fn warned(
+    tag: &str,
+    answers: Vec<Answer>,
+    slip: Option<nauthy::Link>,
+    clients: impl AsyncFnOnce(core::net::SocketAddr, &Rig),
+) -> (eyre::Report, Vec<Heard>, String) {
     let mut served = Served::new(tag).await;
     let rig = Rig::default();
     let resident = scripted(&mut served, answers, &rig);
@@ -1094,9 +1113,11 @@ async fn forwarded(
         clients(local, &rig).await;
         core::future::pending::<()>().await;
     };
+    let mut err = Vec::new();
+    let failures = crate::commands::connect::PipeFailures::new(&peer, &mut err);
     let ended = tokio::time::timeout(ROW_BOUND, async {
         tokio::select! {
-            ended = dial.carry_each(&socket, listener) => ended,
+            ended = dial.carry_each(&socket, listener, &failures) => ended,
             () = connecting => unreachable!(),
         }
     })
@@ -1107,7 +1128,7 @@ async fn forwarded(
         .await
         .expect("the resident ended")
         .unwrap();
-    (ended, heard)
+    (ended, heard, String::from_utf8(err).unwrap())
 }
 
 /// `n` clients, one at a time, each uploading nothing.
@@ -1235,6 +1256,55 @@ async fn a_pipes_own_failure_keeps_the_port_listening() {
     .await;
     assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
     assert_eq!(heard.len(), 4);
+}
+
+/// The warning a run of failed pipes to `me/nas` prints for the first of them, with that pipe's clause.
+pub(crate) fn warning(clause: &str) -> String {
+    format!(
+        "warning: a connection to me/nas failed: {clause}\n  Still listening for new connections.\n"
+    )
+}
+
+/// The first pipe to fail after the start warns, the failures after it do not, and a pipe that opened is
+/// carried whatever ends it: one cut after it attached, while `serve` still answers, warns nothing, and
+/// the next Open refused warns again.
+#[tokio::test]
+async fn a_port_through_serve_warns_once_per_run_of_failed_pipes() {
+    let (ended, heard, err) = warned(
+        "port-warn",
+        vec![
+            Answer::Refuse(OpenRefusal::Busy),
+            Answer::Refuse(OpenRefusal::Peer(PeerRefusal::Unavailable(
+                RefusalDetail::bounded("down"),
+            ))),
+            Answer::Attach,
+            Answer::Cut,
+            Answer::Refuse(OpenRefusal::Busy),
+        ],
+        None,
+        one_at_a_time(6),
+    )
+    .await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 5);
+    let busy = warning("too many connections here");
+    assert_eq!(err, format!("{busy}{busy}"));
+}
+
+/// A later pipe whose Open gets the resident's own error reply warns as a stream that failed to open:
+/// `interrupted`, the resident's reason the log's alone.
+#[tokio::test]
+async fn a_resident_error_on_a_later_pipe_warns_interrupted() {
+    let (ended, heard, err) = warned(
+        "port-error",
+        vec![Answer::Error("disk full\u{1b}[2K")],
+        None,
+        one_at_a_time(2),
+    )
+    .await;
+    assert!(ended.is::<super::ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 1);
+    assert_eq!(err, warning("interrupted"));
 }
 
 /// A pipe's refusal that every later Open would repeat ends the run with its line, as the first Open's

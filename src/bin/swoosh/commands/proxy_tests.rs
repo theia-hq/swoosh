@@ -22,7 +22,7 @@ use super::{
     BadHead, Client, Exit, HEAD_TIMEOUT, Head, Local, OwnExit, Parsed, ProxyCmd, Refused,
     ServeExit, accept_each, origin_url,
 };
-use crate::commands::connect;
+use crate::commands::connect::{self, PipeFailures};
 use crate::commands::through_serve::tests::{
     Answer, END, Heard, ROW_BOUND, Rig, Served, book, machine, resident_key, scripted,
 };
@@ -331,6 +331,8 @@ enum Script {
     Silent,
     /// Admit the request, read the origin request, and answer with this head and a one-line body.
     Answer(u16, &'static str, &'static str),
+    /// Fail every stream as it opens, the transport's cause carrying this text.
+    Fails(&'static str),
 }
 
 /// A machine whose sessions' streams are in-memory pipes, with the far half driven by a [`Script`].
@@ -389,6 +391,9 @@ impl Session for Scripted {
 
     async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
         self.opened.fetch_add(1, Ordering::SeqCst);
+        if let Script::Fails(cause) = self.script {
+            return Err(bifrost::Error::Stream(cause.into()));
+        }
         let (near, mut far) = tokio::io::duplex(64 * 1024);
         if let Script::Answer(status, name, value) = self.script {
             tokio::spawn(async move {
@@ -481,12 +486,23 @@ async fn exchange_on(
     let (server, _) = listener.accept().await.unwrap();
     client.write_all(head(&local).as_bytes()).await.unwrap();
 
+    let failures = PipeFailures::new(&scripted_machine(), Vec::new());
     let served = cmd
-        .serve(Client::new(server, &OnceCell::new()), &local, exit)
+        .serve(
+            Client::new(server, &OnceCell::new()),
+            &local,
+            exit,
+            &failures,
+        )
         .await;
     let mut response = Vec::new();
     client.read_to_end(&mut response).await.unwrap();
     (served, String::from_utf8_lossy(&response).into_owned())
+}
+
+/// A run's warnings, kept unread: for a row that pins something else.
+fn quiet() -> PipeFailures<Vec<u8>> {
+    PipeFailures::new(&machine(&book(), "me/nas"), Vec::new())
 }
 
 /// The scripted machines' key, as the one machine a run dials.
@@ -614,6 +630,7 @@ async fn a_client_that_sends_no_head_is_let_go() {
     let peers = Peers::new(&node);
     let cmd = proxy(&[]);
     let machine = scripted_machine();
+    let failures = PipeFailures::new(&machine, Vec::new());
 
     let served = tokio::time::timeout(
         HEAD_TIMEOUT * 6,
@@ -621,6 +638,7 @@ async fn a_client_that_sends_no_head_is_let_go() {
             Client::new(server, &OnceCell::new()),
             &local,
             &exit(&node, &peers, &machine, &cmd, None),
+            &failures,
         ),
     )
     .await
@@ -790,6 +808,16 @@ async fn proxied(
     answers: Vec<Answer>,
     requests: usize,
 ) -> (eyre::Report, Vec<String>, Vec<Heard>) {
+    let (ended, responses, heard, _) = proxied_warning(tag, answers, requests).await;
+    (ended, responses, heard)
+}
+
+/// [`proxied`], with what the run wrote to stderr as it ran.
+async fn proxied_warning(
+    tag: &str,
+    answers: Vec<Answer>,
+    requests: usize,
+) -> (eyre::Report, Vec<String>, Vec<Heard>, String) {
     let mut served = Served::new(tag).await;
     let rig = Rig::default();
     let resident = scripted(&mut served, answers, &rig);
@@ -808,34 +836,37 @@ async fn proxied(
         dial: &dial,
         socket: &socket,
     };
-    let (ended, responses) = listened(&cmd, &exit, requests).await;
+    let (ended, responses, err) = listened(&cmd, &exit, requests).await;
     rig.stop.cancel();
     let heard = tokio::time::timeout(ROW_BOUND, resident)
         .await
         .expect("the resident ended")
         .unwrap();
-    (ended, responses, heard)
+    (ended, responses, heard, err)
 }
 
-/// `cmd`'s listener answering through `exit` while `requests` clients send the printed GET one at a
-/// time, until the run ends: the line it ended with, and each response.
+/// `cmd`'s listener answering through `exit`, which leaves for `me/nas`, while `requests` clients send
+/// the printed GET one at a time, until the run ends: the line it ended with, each response, and what
+/// it wrote to stderr.
 async fn listened(
     cmd: &ProxyCmd,
     exit: &impl Exit,
     requests: usize,
-) -> (eyre::Report, Vec<String>) {
+) -> (eyre::Report, Vec<String>, String) {
+    let mut err = Vec::new();
+    let failures = PipeFailures::new(&machine(&book(), "me/nas"), &mut err);
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let local = local_at(listener.local_addr().unwrap());
     let clients = requesting(&local, requests);
     let (ended, responses) = tokio::time::timeout(ROW_BOUND, async {
         tokio::join!(
-            cmd.answer_each(listener, &local, exit, core::future::pending()),
+            cmd.answer_each(listener, &local, exit, &failures, core::future::pending()),
             clients
         )
     })
     .await
     .expect("the run ended");
-    (ended, responses.unwrap())
+    (ended, responses.unwrap(), String::from_utf8(err).unwrap())
 }
 
 /// The `502` a request gets when `serve` is gone: one line, the serve-stopped line's head.
@@ -1017,6 +1048,47 @@ async fn an_ended_standing_with_serve_up_ends_the_proxy_after_a_502_with_its_rem
     );
 }
 
+/// A machine's answer to an origin request: a `200` and a one-line body.
+async fn answered_200() -> Vec<u8> {
+    let mut answer = Vec::new();
+    ::fetch::http::FetchResponse::Ok {
+        status: 200,
+        headers: vec![("Content-Type".to_owned(), "text/plain".to_owned())],
+    }
+    .write(&mut answer)
+    .await
+    .unwrap();
+    answer.extend_from_slice(b"body\n");
+    answer
+}
+
+/// Through `serve`, the first request to fail after the start warns, the failures after it do not, and
+/// once a request's stream attaches the next failure warns again.
+#[tokio::test]
+async fn proxy_through_serve_warns_once_per_run_of_failed_requests() {
+    let (ended, responses, heard, err) = proxied_warning(
+        "proxy-warn",
+        vec![
+            Answer::Refuse(OpenRefusal::Busy),
+            Answer::Refuse(OpenRefusal::Peer(PeerRefusal::Unavailable(
+                bifrost::RefusalDetail::bounded("down"),
+            ))),
+            Answer::Exchange(answered_200().await),
+            Answer::Refuse(OpenRefusal::Busy),
+        ],
+        5,
+    )
+    .await;
+    assert!(ended.is::<ServeStopped>(), "{ended:#}");
+    assert_eq!(heard.len(), 4);
+    assert_eq!(
+        status_and_body(&responses[2]),
+        ("HTTP/1.1 200 OK", "body\n")
+    );
+    let busy = crate::commands::through_serve::tests::warning("too many connections here");
+    assert_eq!(err, format!("{busy}{busy}"));
+}
+
 /// `me/nas` by own bind, its gate answering `script`, as every request's exit.
 fn own_nas(
     script: Vec<swoosh::testkit::Script>,
@@ -1031,7 +1103,7 @@ fn own_nas(
 }
 
 /// By own bind a later request's `NotAdmitted` ends the run with the dial refusal, one of your devices
-/// asked why, once its client has its `403`.
+/// asked why, once its client has its `403`; it prints no warning first.
 #[tokio::test]
 async fn a_later_not_admitted_ends_the_proxy_by_own_bind_after_its_403() {
     use swoosh::testkit::Script;
@@ -1043,7 +1115,7 @@ async fn a_later_not_admitted_ends_the_proxy_by_own_bind_after_its_403() {
     let peers = Peers::new(&node);
     let nas = machine(&book(), "me/nas");
     let cmd = proxy(&[]);
-    let (ended, responses) = listened(&cmd, &exit(&node, &peers, &nas, &cmd, None), 1).await;
+    let (ended, responses, err) = listened(&cmd, &exit(&node, &peers, &nas, &cmd, None), 1).await;
     assert_eq!(
         format!("{ended:#}"),
         "me/nas does not serve proxy\n  Only nas can add it; on nas, run:\n    swoosh service add proxy:<url>"
@@ -1055,6 +1127,76 @@ async fn a_later_not_admitted_ends_the_proxy_by_own_bind_after_its_403() {
             .map(|r| status_and_body(r))
             .collect::<Vec<_>>(),
         [("HTTP/1.1 403 Forbidden", not_admitted.as_str())]
+    );
+    assert_eq!(err, "");
+}
+
+/// By own bind the first request to fail after the start warns, by its kind, the failures after it do
+/// not, and a request whose stream opened is carried whatever ends it: one broken before its answer
+/// warns nothing, and the next request refused warns again.
+#[tokio::test]
+async fn proxy_by_own_bind_warns_once_per_run_of_failed_requests() {
+    use swoosh::testkit::Script;
+
+    let down = || {
+        Script::Refuse(bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded("down"),
+        })
+    };
+    let (_peer, node) = own_nas(vec![
+        down(),
+        down(),
+        Script::Ends,
+        down(),
+        Script::Refuse(bifrost::Refusal::NotAdmitted),
+        Script::Lists(vec!["proxy"]),
+    ]);
+    let peers = Peers::new(&node);
+    let nas = machine(&book(), "me/nas");
+    let cmd = proxy(&[]);
+    let (ended, _, err) = listened(&cmd, &exit(&node, &peers, &nas, &cmd, None), 5).await;
+    assert!(ended.is::<crate::commands::machine::Refused>(), "{ended:#}");
+    let down =
+        crate::commands::through_serve::tests::warning("reached, but refused (unavailable: down)");
+    assert_eq!(err, format!("{down}{down}"));
+}
+
+/// The bodies a local client reads carry the machine's text escaped, as every line of it is: a refusal's
+/// detail, an origin's error and a stream's failure, none of them able to write a control byte or a line
+/// of their own into a terminal that prints the body.
+#[tokio::test]
+async fn a_machines_text_in_a_proxy_body_is_escaped() {
+    const HOSTILE: &str = "\u{1b}[2Kforged\r\nline";
+    const SHOWN: &str = r"\u{1b}[2Kforged\r\nline";
+    let mut origin = Vec::new();
+    ::fetch::http::FetchResponse::Error(HOSTILE.to_owned())
+        .write(&mut origin)
+        .await
+        .unwrap();
+    let (_peer, node) = own_nas(vec![
+        swoosh::testkit::Script::Refuse(bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded(HOSTILE),
+        }),
+        swoosh::testkit::Script::Says(origin),
+    ]);
+    let peers = Peers::new(&node);
+    let nas = machine(&book(), "me/nas");
+    let cmd = proxy(&[]);
+    let exit = exit(&node, &peers, &nas, &cmd, None);
+    let mut bodies = Vec::new();
+    for _ in 0..2 {
+        let (_, response) = exchange_on(printed, &cmd, &exit).await;
+        bodies.push(status_and_body(&response).1.to_owned());
+    }
+    let (_, response) = exchange(printed, &cmd, &Scripted::new(Script::Fails(HOSTILE)), None).await;
+    bodies.push(status_and_body(&response).1.to_owned());
+    assert_eq!(
+        bodies,
+        [
+            format!("proxy service refused: unavailable: {SHOWN}"),
+            format!("origin error: {SHOWN}"),
+            format!("proxy failed: stream: {SHOWN}"),
+        ]
     );
 }
 
@@ -1114,6 +1256,7 @@ async fn cut_in_flight(
         connect::session_cut(latest).await;
         connect::ConnectionLost.into()
     };
+    let failures = quiet();
     let client = async {
         let mut client = TcpStream::connect(local.addr).await.unwrap();
         client.write_all(printed(&local).as_bytes()).await.unwrap();
@@ -1133,7 +1276,10 @@ async fn cut_in_flight(
         (read, ended)
     };
     let (ended, (read, how)) = tokio::time::timeout(ROW_BOUND, async {
-        tokio::join!(cmd.answer_each(listener, &local, &exit, cut), client)
+        tokio::join!(
+            cmd.answer_each(listener, &local, &exit, &failures, cut),
+            client
+        )
     })
     .await
     .expect("the cut ended the run");
@@ -1196,7 +1342,8 @@ async fn a_later_not_admitted_answers_its_403_before_asking_why() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let local = local_at(listener.local_addr().unwrap());
     let clients = requesting(&local, 1);
-    let run = cmd.answer_each(listener, &local, &exit, core::future::pending());
+    let failures = quiet();
+    let run = cmd.answer_each(listener, &local, &exit, &failures, core::future::pending());
     tokio::pin!(run);
     let responses = tokio::time::timeout(ROW_BOUND, async {
         tokio::select! {

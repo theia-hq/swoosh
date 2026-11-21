@@ -23,6 +23,7 @@ use bifrost::{Discovery, Node, Refusal, Session, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::{Escaped, escaped_report};
 use swoosh::home::Home;
 use swoosh::node_client::UidSocket;
 use swoosh::peer::{Machine, Peer};
@@ -34,7 +35,7 @@ use swoosh::unbound::Unbound;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::commands::connect::{self, MAX_PIPES, accept_each, press_ctrl_c};
+use crate::commands::connect::{self, Failure, MAX_PIPES, PipeFailures, accept_each, press_ctrl_c};
 use crate::commands::machine;
 use crate::commands::through_serve::{self, Dial, Routed, Unattached, Unpiped};
 
@@ -184,8 +185,14 @@ impl ProxyCmd {
             connect::session_cut(latest).await;
             connect::ConnectionLost.into()
         };
-        self.listen(&exit, &connect::Machine::of(contacts, machine.key()), cut)
-            .await
+        let failures = PipeFailures::new(machine, std::io::stderr());
+        self.listen(
+            &exit,
+            &connect::Machine::of(contacts, machine.key()),
+            &failures,
+            cut,
+        )
+        .await
     }
 
     /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
@@ -223,7 +230,10 @@ impl ProxyCmd {
         let named = connect::Machine::of(contacts, machine.key());
         // Through `serve` there is no session to watch: the run ends when a request finds it over.
         let never = core::future::pending();
-        Ok(Routed::Ran(self.listen(&exit, &named, never).await))
+        let failures = PipeFailures::new(machine, std::io::stderr());
+        Ok(Routed::Ran(
+            self.listen(&exit, &named, &failures, never).await,
+        ))
     }
 
     /// Bind the loopback listener, print the local URL and the start lines naming `machine`, then answer
@@ -232,6 +242,7 @@ impl ProxyCmd {
         &self,
         exit: &impl Exit,
         machine: &connect::Machine,
+        failures: &PipeFailures<impl std::io::Write>,
         cut: impl Future<Output = eyre::Report>,
     ) -> eyre::Result<()> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
@@ -239,7 +250,9 @@ impl ProxyCmd {
         println!("{local}");
         eprintln!("Proxying {} through {machine}.", self.url);
         press_ctrl_c();
-        Err(self.answer_each(listener, &local, exit, cut).await)
+        Err(self
+            .answer_each(listener, &local, exit, failures, cut)
+            .await)
     }
 
     /// Answer each request `listener` accepts through `exit` until a request finds the run over, or
@@ -252,6 +265,7 @@ impl ProxyCmd {
         listener: TcpListener,
         local: &Local,
         exit: &impl Exit,
+        failures: &PipeFailures<impl std::io::Write>,
         cut: impl Future<Output = eyre::Report>,
     ) -> eyre::Report {
         let unanswered = OnceCell::new();
@@ -263,7 +277,7 @@ impl ProxyCmd {
             line
         };
         let answering = accept_each(listener, MAX_PIPES, |tcp| {
-            self.answer(tcp, local, exit, &unanswered)
+            self.answer(tcp, local, exit, failures, &unanswered)
         });
         let ended = tokio::select! {
             // The cut first: a request that broke with its session is polled only after the run has
@@ -276,15 +290,20 @@ impl ProxyCmd {
     }
 
     /// Answer one local connection: its failure goes to the log and the listener stays up, unless the
-    /// request found the run over ([`Unopened`] says when), which ends it with that line.
+    /// request found the run over ([`Unopened`] says when), which ends it with that line. A request whose
+    /// stream did not open also goes to `failures`.
     async fn answer(
         &self,
         tcp: TcpStream,
         local: &Local,
         exit: &impl Exit,
+        failures: &PipeFailures<impl std::io::Write>,
         unanswered: &OnceCell<String>,
     ) -> ControlFlow<eyre::Report> {
-        match self.serve(Client::new(tcp, unanswered), local, exit).await {
+        match self
+            .serve(Client::new(tcp, unanswered), local, exit, failures)
+            .await
+        {
             Ok(flow) => flow,
             Err(error) => {
                 tracing::warn!(%error, "proxy request ended");
@@ -303,9 +322,10 @@ impl ProxyCmd {
         mut client: Client<'_>,
         local: &Local,
         exit: &impl Exit,
+        failures: &PipeFailures<impl std::io::Write>,
     ) -> eyre::Result<ControlFlow<eyre::Report>> {
         let relayed = self
-            .relay(&mut client.tcp, local, exit, &mut client.reply)
+            .relay(&mut client.tcp, local, exit, failures, &mut client.reply)
             .await;
         if let Err(error) = &relayed
             && client.reply == Reply::None
@@ -324,12 +344,15 @@ impl ProxyCmd {
     /// again once an origin's body has ended cleanly.
     ///
     /// The local checks ([`Local::admit`]) run before the stream opens, so a request this run did not
-    /// print the URL for never reaches the machine or carries the credential.
+    /// print the URL for never reaches the machine or carries the credential. A stream that opened is a
+    /// carried pipe to `failures`, whatever ends it; one that did not open is a failed one, unless it
+    /// ends the run.
     async fn relay(
         &self,
         tcp: &mut TcpStream,
         local: &Local,
         exit: &impl Exit,
+        failures: &PipeFailures<impl std::io::Write>,
         reply: &mut Reply,
     ) -> eyre::Result<ControlFlow<eyre::Report>> {
         let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(tcp))
@@ -349,7 +372,10 @@ impl ProxyCmd {
         } = parsed;
 
         let (mut writer, mut reader) = match exit.open().await {
-            Ok(halves) => halves,
+            Ok(halves) => {
+                failures.carried();
+                halves
+            }
             Err(Unopened::Refused { refusal, ends }) => {
                 *reply = Reply::Whole;
                 // `NotAdmitted` is an AUTHORIZATION failure (the exit node refused YOU): serve `403`.
@@ -382,12 +408,18 @@ impl ProxyCmd {
                         Status::BadGateway
                     }
                 };
-                let answered =
-                    respond_error(tcp, status, &format!("proxy service refused: {refusal}")).await;
+                // The machine's text, escaped as every line of it is, whoever reads the body.
+                let body = format!("proxy service refused: {}", Escaped(&refusal.to_string()));
+                let answered = respond_error(tcp, status, &body).await;
                 // A run-ending refusal ends the run even when its client went before the answer.
                 return match ends {
                     Some(line) => Ok(ControlFlow::Break(line)),
-                    None => answered.map(|()| ControlFlow::Continue(())),
+                    None => {
+                        let failure = Failure::refused(&refusal);
+                        let error = escaped_report(bifrost::Error::Refused(refusal).into());
+                        failures.failed(Some(failure), &error);
+                        answered.map(|()| ControlFlow::Continue(()))
+                    }
                 };
             }
             Err(Unopened::Over(line)) => {
@@ -395,7 +427,10 @@ impl ProxyCmd {
                 let _ = respond_error(tcp, Status::BadGateway, &failed(&line)).await;
                 return Ok(ControlFlow::Break(line));
             }
-            Err(Unopened::Failed(error)) => return Err(error),
+            Err(Unopened::Failed { error, failure }) => {
+                failures.failed(failure, &error);
+                return Err(error);
+            }
         };
         // Once the stream opened, a failure may be `serve` stopping under it.
         let fetched: eyre::Result<()> = async {
@@ -420,8 +455,8 @@ impl ProxyCmd {
                 }
                 FetchResponse::Error(message) => {
                     *reply = Reply::Whole;
-                    respond_error(tcp, Status::BadGateway, &format!("origin error: {message}"))
-                        .await?;
+                    let body = format!("origin error: {}", Escaped(&message));
+                    respond_error(tcp, Status::BadGateway, &body).await?;
                 }
             }
             Ok(())
@@ -439,7 +474,9 @@ impl ProxyCmd {
                     }
                     Ok(ControlFlow::Break(stopped))
                 }
-                None => Err(error),
+                // A request whose stream opened is carried, whatever ends it: the log alone. Escaped
+                // here, as its cause can carry the machine's text into the fallback's `502`.
+                None => Err(escaped_report(error)),
             },
         }
     }
@@ -477,8 +514,12 @@ enum Unopened {
     /// The run is over ([`Unpiped::Ends`] for anything but the machine's refusal): the local client gets a
     /// `502` saying why, then the run ends with this line.
     Over(eyre::Report),
-    /// Anything else: the local client gets a `502` saying so, and the listener stays up.
-    Failed(eyre::Report),
+    /// Anything else: the local client gets a `502` saying so, `error` escaped, and the listener stays
+    /// up, warning as `failure` says ([`PipeFailures::failed`]).
+    Failed {
+        error: eyre::Report,
+        failure: Option<Failure>,
+    },
 }
 
 /// The body of a failed request's `502`: one line, `proxy failed: ` and the first line of the error,
@@ -552,7 +593,10 @@ impl<T: Transport, D: Discovery> Exit for OwnExit<'_, '_, T, D> {
                 refusal,
                 ends: None,
             }),
-            Err(error) => Err(Unopened::Failed(error.into())),
+            Err(error) => Err(Unopened::Failed {
+                failure: Some(Failure::of_open(&error)),
+                error: escaped_report(error.into()),
+            }),
         }
     }
 
@@ -587,9 +631,10 @@ impl Exit for ServeExit<'_> {
                     ends: None,
                 })
             }
-            Err(Unpiped::Pipe(unattached)) => Err(Unopened::Failed(
-                self.dial.unattached(unattached, self.socket).await,
-            )),
+            Err(Unpiped::Pipe(unattached)) => Err(Unopened::Failed {
+                failure: unattached.failure(),
+                error: self.dial.unattached(unattached, self.socket).await,
+            }),
             Err(Unpiped::Ends(Unattached::Refused(OpenRefusal::Peer(refusal)))) => {
                 let ends = self
                     .dial

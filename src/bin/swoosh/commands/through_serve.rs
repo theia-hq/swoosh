@@ -13,7 +13,9 @@
 //! no reader. A pipe's outcome that every later Open would repeat ends the run with its line: `serve`
 //! gone, under the pipe or at its Open (its lock free, or a `serve` of another version answering), the
 //! machine's `NotAdmitted`, an ended standing, or the machine being this one. Any other (`Busy`, the
-//! machine unavailable or unreachable, a cut) ends that pipe alone, and goes to the log.
+//! machine unavailable or unreachable, a stream broken as it opened) ends that pipe alone: it goes to the
+//! log, and the first of a run of them to a [`PipeFailures`] warning, as by own bind. A pipe that attached
+//! is carried, whatever ends it: the log alone.
 //!
 //! The lines a resident's outcome prints are the own bind's, so one line has one shape on both paths;
 //! only a busy `serve`, a `serve` that stopped under the pipe, a different `serve` version and a reach
@@ -28,7 +30,7 @@ use std::rc::Rc;
 use bifrost::{ConnInfo, NodeId, PathChanges, Refusal, WriteEnd};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::escaped_report;
+use swoosh::escape::{Escaped, escaped_report};
 use swoosh::home::ResidentPresence;
 use swoosh::node_client::{Connected, NodeClient, Opened, UidSocket};
 use swoosh::observation::{Observed, Observer, PathSource, Receipt};
@@ -43,7 +45,8 @@ use tokio::io::{self, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::commands::connect::{
-    self, ConnectionLost, MAX_PIPES, Machine, Stdin, Stdout, accept_each, pump_stdio,
+    self, ConnectionLost, Failure, MAX_PIPES, Machine, PipeFailures, Stdin, Stdout, accept_each,
+    pump_stdio,
 };
 use crate::commands::machine;
 
@@ -323,36 +326,49 @@ impl Dial<'_> {
             &Machine::of(self.contacts, self.machine.key()),
             port,
         );
-        Err(self.carry_each(socket, listener).await)
+        let failures = PipeFailures::new(self.machine, std::io::stderr());
+        Err(self.carry_each(socket, listener, &failures).await)
     }
 
     /// Carry each connection `listener` accepts over its own Open, at most [`MAX_PIPES`] at once, until
     /// a pipe ends the run ([`Unpiped::Ends`], or `serve` gone under it): the line the run ends with.
-    pub async fn carry_each(&self, socket: &UidSocket, listener: TcpListener) -> eyre::Report {
-        accept_each(listener, MAX_PIPES, |tcp| self.carry(socket, tcp)).await
+    pub async fn carry_each(
+        &self,
+        socket: &UidSocket,
+        listener: TcpListener,
+        failures: &PipeFailures<impl std::io::Write>,
+    ) -> eyre::Report {
+        accept_each(listener, MAX_PIPES, |tcp| self.carry(socket, tcp, failures)).await
     }
 
     /// Carry one local connection over its own Open, both ways. A failure that is the pipe's own goes
-    /// to the log, as the own bind's does, and the listener stays up.
-    async fn carry(&self, socket: &UidSocket, tcp: TcpStream) -> ControlFlow<eyre::Report> {
+    /// to `failures`, as the own bind's does, and the listener stays up.
+    async fn carry(
+        &self,
+        socket: &UidSocket,
+        tcp: TcpStream,
+        failures: &PipeFailures<impl std::io::Write>,
+    ) -> ControlFlow<eyre::Report> {
         let stream = match self.pipe(socket).await {
             Ok(stream) => stream,
             Err(Unpiped::Ends(unattached)) => {
                 return ControlFlow::Break(self.unattached(unattached, socket).await);
             }
             Err(Unpiped::Pipe(unattached)) => {
-                let error = self.unattached(unattached, socket).await;
-                tracing::warn!("connection failed: {error:#}");
+                let failure = unattached.failure();
+                failures.failed(failure, &self.unattached(unattached, socket).await);
                 return ControlFlow::Continue(());
             }
         };
+        failures.carried();
         if let Err(error) = splice(tcp, stream).await {
             // A pipe cut under it may be `serve` stopping: asked now, so the run ends here rather than
             // at the next connection's Open.
             if let Some(stopped) = self.stopped(socket).await {
                 return ControlFlow::Break(stopped);
             }
-            tracing::warn!("connection failed: {error:#}");
+            // A pipe that opened is carried, whatever ends it: the log alone.
+            tracing::warn!("connection failed: {:#}", escaped_report(error));
         }
         ControlFlow::Continue(())
     }
@@ -468,6 +484,31 @@ pub enum Unattached {
     Refused(OpenRefusal),
     /// The Open failed some other way: the line it prints.
     Failed(eyre::Report),
+}
+
+impl Unattached {
+    /// What a listener's warning says of this failed Open, by the same rows as the own bind's. `None`
+    /// only for an outcome that ends the run, which never asks.
+    pub fn failure(&self) -> Option<Failure> {
+        match self {
+            Self::Refused(OpenRefusal::Peer(refusal)) => {
+                Some(Failure::refused(&Refusal::from(refusal.clone())))
+            }
+            Self::Refused(OpenRefusal::Unreachable(_) | OpenRefusal::Timeout) => {
+                Some(Failure::Unreachable)
+            }
+            Self::Refused(OpenRefusal::Broken(detail)) => Some(Failure::Interrupted(Some(
+                Escaped(detail.as_str()).to_string(),
+            ))),
+            // A refusal this build cannot read carries no detail the person can use.
+            Self::Refused(OpenRefusal::PeerUnreadable(_)) => Some(Failure::Interrupted(None)),
+            Self::Refused(OpenRefusal::Busy) => Some(Failure::Busy),
+            Self::Refused(OpenRefusal::StandingEnded | OpenRefusal::NotHere) => None,
+            // A stream that failed to open, as by own bind: the resident's error reply, a control
+            // connection that failed or was cut before its reply. Its reason is the log's.
+            Self::Failed(_) => Some(Failure::Interrupted(None)),
+        }
+    }
 }
 
 /// The lane a listener's Opens ride: its pipes are a fan-out, so they never take the slots the person's
