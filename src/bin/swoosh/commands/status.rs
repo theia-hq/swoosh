@@ -193,7 +193,7 @@ impl StatusCmd {
         };
         let asked = Probe::of(machine.kind());
         let service: Service = asked.service().parse()?;
-        let mut dial = Dial {
+        let dial = Dial {
             machine,
             service: &service,
             slip,

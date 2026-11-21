@@ -12,13 +12,16 @@
 //! `tightbeam` binary on PATH), so the bridge an operator debugs by hand is the one ssh runs.
 //!
 //! The own bind ends when the host cuts the session (on a revoke or an expiry), whatever the local
-//! side is doing. Through `serve` only the stdout sink is routed, and it ends the same way:
-//! [`pump_stdio`] says how, including that a stdin that is not a terminal still finishes its upload
-//! after a clean end. tightbeam's own stdio bridge and port forward end neither way yet: the bridge
+//! side is doing. Through `serve` the stdout sink ends the same way: [`pump_stdio`] says how, including
+//! that a stdin that is not a terminal still finishes its upload after a clean end. A port through
+//! `serve` holds no session to watch, so it ends when a pipe finds the run over (`through_serve` names
+//! the outcomes that do). tightbeam's own stdio bridge and port forward end neither way yet: the bridge
 //! waits on a stdin read before the process can exit, and the forward keeps listening on a session
 //! that is gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
 //! frames, until tightbeam's own end the same way.
 
+use core::future::Future;
+use core::ops::ControlFlow;
 use core::pin::Pin;
 use core::str::FromStr;
 use core::task::{Context, Poll};
@@ -204,12 +207,14 @@ async fn forward_port<T: Transport, D: Discovery>(
         return Err(refused.on(&session, refusal).await);
     }
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    eprintln!(
-        "Forwarding {} on {machine} to 127.0.0.1:{port}.",
-        request.service
-    );
-    press_ctrl_c();
+    forwarding(&request.service, &machine, port);
     forward(&session, request, listener).await
+}
+
+/// The start lines of a forwarded port, on stderr, once admission is proven: one shape on both paths.
+pub fn forwarding(service: &impl core::fmt::Display, machine: &Machine, port: u16) {
+    eprintln!("Forwarding {service} on {machine} to 127.0.0.1:{port}.");
+    press_ctrl_c();
 }
 
 /// The second start line of a long-running local end, on stderr, at a terminal only: a supervisor or a
@@ -251,6 +256,43 @@ pub const MAX_PIPES: usize = 128;
 /// How long a local listener waits before accepting again after an accept fails. An error such as running
 /// out of descriptors repeats on every attempt until something frees, so retrying at once would spin.
 pub const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+/// Accept each local connection and hand it to `carry`, all carried concurrently, until one of them
+/// breaks the run: its line is what this returns.
+///
+/// At most `cap` are held at once ([`MAX_PIPES`] in a run; past it, new connections wait in the kernel's
+/// backlog), and a failed accept pauses for [`ACCEPT_RETRY`] rather than spinning. One failed accept or
+/// pipe never tears down the ones in flight: a pipe logs its own failure and continues the run.
+pub async fn accept_each<F, Fut>(listener: TcpListener, cap: usize, mut carry: F) -> eyre::Report
+where
+    F: FnMut(TcpStream) -> Fut,
+    Fut: Future<Output = ControlFlow<eyre::Report>>,
+{
+    let mut pipes = FuturesUnordered::new();
+    // Set after a failed accept: accepting resumes once `retry` fires.
+    let retry = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(retry);
+    let mut paused = false;
+    loop {
+        tokio::select! {
+            () = &mut retry, if paused => paused = false,
+            // Accept only below the cap: a connection waiting for its stream holds a descriptor.
+            accepted = listener.accept(), if !paused && pipes.len() < cap => match accepted {
+                Ok((tcp, _)) => pipes.push(carry(tcp)),
+                Err(error) => {
+                    tracing::warn!(%error, "local accept failed; still listening");
+                    retry.as_mut().reset(tokio::time::Instant::now() + ACCEPT_RETRY);
+                    paused = true;
+                }
+            },
+            Some(flow) = pipes.next(), if !pipes.is_empty() => {
+                if let ControlFlow::Break(report) = flow {
+                    return report;
+                }
+            }
+        }
+    }
+}
 
 /// Forward each accepted local connection over its own stream, until the session ends: then the forward
 /// is over, and every connection it carried has already ended with it.

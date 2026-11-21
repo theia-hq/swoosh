@@ -15,7 +15,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
-use crate::home::{Home, ProcessId};
+use crate::home::{Home, LockError, ProcessId, ResidentPresence};
 use crate::serve::control_codec::{
     ControlError, LocalServiceSnapshot, Observation, OpenRead, OpenRefusal, OpenRequest, OpenWrite,
     PathRef, PathReply, PathRequest, Request, Response, ServiceMenu, StatusReply,
@@ -200,6 +200,17 @@ impl UidSocket {
             .await?
             .into_local_snapshot()?;
         Ok((snapshot, pid))
+    }
+
+    /// Whether the selected home's `serve.lock` is held, probed without changing its record. A refused
+    /// connect alone does not show the resident gone: on macOS a live listener whose accept queue is
+    /// full refuses connects too, while it still holds the lock.
+    ///
+    /// # Errors
+    ///
+    /// As [`Home::resident_presence`].
+    pub async fn resident_presence(&self) -> Result<ResidentPresence, LockError> {
+        self.home.resident_presence().await
     }
 
     /// Read local status and return the kernel-reported listener PID checked on that connection against the

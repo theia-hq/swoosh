@@ -228,7 +228,7 @@ impl PingCmd {
             return Ok(Routed::OwnBind);
         };
         let service: Service = reach::PING_SERVICE.parse()?;
-        let mut dial = Dial {
+        let dial = Dial {
             machine,
             service: &service,
             slip,

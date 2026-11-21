@@ -971,11 +971,14 @@ async fn run() -> eyre::Result<()> {
         })
         .transpose()?;
 
-    // `forward <machine> <service> -` while `serve` runs here: one Open on its socket, before any key is
-    // read, so nothing is bound and no passphrase asked. An `anyone` link never rides it: it dials under a
-    // throwaway key of its own.
+    // `forward <machine> <service> -` or `<port>` while `serve` runs here: Opens on its socket, before any
+    // key is read, so nothing is bound and no passphrase asked. An `anyone` link never rides it: it dials
+    // under a throwaway key of its own.
     if let Outward::Forward(cmd) = &reach
-        && cmd.to == commands::connect::To::Stdout
+        && matches!(
+            cmd.to,
+            commands::connect::To::Stdout | commands::connect::To::Port(_)
+        )
         && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
@@ -987,9 +990,13 @@ async fn run() -> eyre::Result<()> {
             reach: &cmd.reach,
             contacts: store.contacts(),
         };
-        if let commands::through_serve::Routed::Ran(ended) =
-            commands::through_serve::forward(&home, dial).await?
-        {
+        let routed = match cmd.to {
+            commands::connect::To::Port(port) => {
+                commands::through_serve::forward_port(&home, dial, port).await?
+            }
+            _ => commands::through_serve::forward(&home, dial).await?,
+        };
+        if let commands::through_serve::Routed::Ran(ended) = routed {
             return ended.map_err(|report| {
                 match report.downcast_ref::<commands::through_serve::ThisMachine>() {
                     Some(this) => usage_error(&["forward"], &this.to_string()),

@@ -220,7 +220,7 @@ impl SpeedCmd {
             return Ok(Routed::OwnBind);
         };
         let service: Service = reach::SPEED_SERVICE.parse()?;
-        let mut dial = Dial {
+        let dial = Dial {
             machine,
             service: &service,
             slip,
