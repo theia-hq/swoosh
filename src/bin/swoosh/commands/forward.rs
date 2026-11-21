@@ -90,7 +90,7 @@ impl swoosh::reaching::Reaching for ForwardCmd {
         self,
         node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
-        _peers: &'p swoosh::peers::Peers<'n, T, D>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         <T::Session as bifrost::Session>::Write: Send + 'static,
@@ -103,13 +103,21 @@ impl swoosh::reaching::Reaching for ForwardCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `forward` ran without its machine resolved (root-dispatch bug)");
         };
+        // A port's streams key their held session by what they present, read off the peer as typed.
+        let presents = swoosh::peers::Presents::resolved(
+            &self.peer,
+            Option::clone(&ctx.present),
+            Option::clone(&ctx.membership),
+        );
         connect(
             node,
+            peers,
             ctx.contacts,
             machine,
             self.service,
             ctx.present,
             ctx.membership,
+            presents,
             self.to,
         )
         .await

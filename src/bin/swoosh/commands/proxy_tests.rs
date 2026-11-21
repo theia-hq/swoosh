@@ -1,6 +1,7 @@
 //! `swoosh proxy`'s local half: the URL it composes, the requests its loopback listener answers, the
 //! response heads it passes on, and the bounds it keeps on local connections.
 
+use core::cell::OnceCell;
 use core::net::SocketAddr;
 use core::ops::ControlFlow;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -18,9 +19,10 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::{
-    BadHead, Exit, HEAD_TIMEOUT, Head, Local, MAX_PIPES, OwnExit, Parsed, ProxyCmd, Refused,
+    BadHead, Client, Exit, HEAD_TIMEOUT, Head, Local, OwnExit, Parsed, ProxyCmd, Refused,
     ServeExit, accept_each, origin_url,
 };
+use crate::commands::connect;
 use crate::commands::through_serve::tests::{
     Answer, END, Heard, ROW_BOUND, Rig, Served, book, machine, resident_key, scripted,
 };
@@ -463,7 +465,8 @@ async fn exchange(
 ) -> (eyre::Result<ControlFlow<eyre::Report>>, String) {
     let node = bifrost::Node::new(session.clone(), bifrost::NoDiscovery);
     let peers = Peers::new(&node);
-    exchange_on(head, cmd, &exit(&peers, cmd, present)).await
+    let machine = scripted_machine();
+    exchange_on(head, cmd, &exit(&node, &peers, &machine, cmd, present)).await
 }
 
 /// [`exchange`] through `exit`, whose owner the caller holds.
@@ -478,24 +481,40 @@ async fn exchange_on(
     let (server, _) = listener.accept().await.unwrap();
     client.write_all(head(&local).as_bytes()).await.unwrap();
 
-    let served = cmd.serve(server, &local, exit).await;
+    let served = cmd
+        .serve(Client::new(server, &OnceCell::new()), &local, exit)
+        .await;
     let mut response = Vec::new();
     client.read_to_end(&mut response).await.unwrap();
     (served, String::from_utf8_lossy(&response).into_owned())
 }
 
-/// The scripted machine as every request's exit for `cmd`'s service, presenting `present` as this
-/// home's standing.
-fn exit<'p, 'n>(
-    peers: &'p Peers<'n, Scripted, bifrost::NoDiscovery>,
+/// The scripted machines' key, as the one machine a run dials.
+fn scripted_machine() -> swoosh::peer::Machine {
+    machine(
+        &book(),
+        &bifrost::NodeId::from_ed25519_secret(&[0u8; 32]).to_string(),
+    )
+}
+
+/// `machine` as every request's exit for `cmd`'s service, reached on `node`, presenting `present` as
+/// this home's standing.
+fn exit<'p, 'n, T: bifrost::Transport>(
+    node: &'n bifrost::Node<T, bifrost::NoDiscovery>,
+    peers: &'p Peers<'n, T, bifrost::NoDiscovery>,
+    machine: &'p swoosh::peer::Machine,
     cmd: &ProxyCmd,
     present: Option<&nauthy::Link>,
-) -> OwnExit<'p, 'n, Scripted, bifrost::NoDiscovery> {
+) -> OwnExit<'p, 'n, T, bifrost::NoDiscovery> {
     OwnExit {
+        node,
         peers,
-        key: bifrost::NodeId::from_ed25519_secret(&[0u8; 32]),
+        rode: tokio::sync::mpsc::unbounded_channel().0,
+        machine,
         service: cmd.service.clone(),
         presents: Presents::Standing(present.cloned()),
+        present: present.cloned(),
+        membership: None,
     }
 }
 
@@ -594,10 +613,15 @@ async fn a_client_that_sends_no_head_is_let_go() {
     let node = bifrost::Node::new(session.clone(), bifrost::NoDiscovery);
     let peers = Peers::new(&node);
     let cmd = proxy(&[]);
+    let machine = scripted_machine();
 
     let served = tokio::time::timeout(
         HEAD_TIMEOUT * 6,
-        cmd.serve(server, &local, &exit(&peers, &cmd, None)),
+        cmd.serve(
+            Client::new(server, &OnceCell::new()),
+            &local,
+            &exit(&node, &peers, &machine, &cmd, None),
+        ),
     )
     .await
     .expect("the head timeout lets the connection go before the test's own bound");
@@ -722,7 +746,9 @@ async fn proxy_requests_ride_the_bulk_lane() {
         Err(swoosh::peers::OpenError::Busy)
     ));
     let cmd = proxy(&[]);
-    let (served, text) = exchange_on(printed, &cmd, &exit(&peers, &cmd, None)).await;
+    let machine = scripted_machine();
+    let (served, text) =
+        exchange_on(printed, &cmd, &exit(&node, &peers, &machine, &cmd, None)).await;
     assert!(served.is_ok(), "{served:?}");
     assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
     assert_eq!(
@@ -782,23 +808,34 @@ async fn proxied(
         dial: &dial,
         socket: &socket,
     };
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let local = local_at(listener.local_addr().unwrap());
-    let clients = requesting(&local, requests);
-    let (ended, responses) = tokio::time::timeout(ROW_BOUND, async {
-        tokio::join!(
-            accept_each(listener, MAX_PIPES, |tcp| cmd.answer(tcp, &local, &exit)),
-            clients
-        )
-    })
-    .await
-    .expect("the run ended");
+    let (ended, responses) = listened(&cmd, &exit, requests).await;
     rig.stop.cancel();
     let heard = tokio::time::timeout(ROW_BOUND, resident)
         .await
         .expect("the resident ended")
         .unwrap();
-    (ended, responses.unwrap(), heard)
+    (ended, responses, heard)
+}
+
+/// `cmd`'s listener answering through `exit` while `requests` clients send the printed GET one at a
+/// time, until the run ends: the line it ended with, and each response.
+async fn listened(
+    cmd: &ProxyCmd,
+    exit: &impl Exit,
+    requests: usize,
+) -> (eyre::Report, Vec<String>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let local = local_at(listener.local_addr().unwrap());
+    let clients = requesting(&local, requests);
+    let (ended, responses) = tokio::time::timeout(ROW_BOUND, async {
+        tokio::join!(
+            cmd.answer_each(listener, &local, exit, core::future::pending()),
+            clients
+        )
+    })
+    .await
+    .expect("the run ended");
+    (ended, responses.unwrap())
 }
 
 /// The `502` a request gets when `serve` is gone: one line, the serve-stopped line's head.
@@ -978,4 +1015,206 @@ async fn an_ended_standing_with_serve_up_ends_the_proxy_after_a_502_with_its_rem
             .collect::<Vec<_>>(),
         [("HTTP/1.1 502 Bad Gateway", body.as_str())]
     );
+}
+
+/// `me/nas` by own bind, its gate answering `script`, as every request's exit.
+fn own_nas(
+    script: Vec<swoosh::testkit::Script>,
+) -> (
+    swoosh::testkit::ScriptedPeer,
+    bifrost::Node<swoosh::testkit::ScriptedPeer, bifrost::NoDiscovery>,
+) {
+    let key = machine(&book(), "me/nas").key();
+    let peer = swoosh::testkit::ScriptedPeer::new(key, script);
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    (peer, node)
+}
+
+/// By own bind a later request's `NotAdmitted` ends the run with the dial refusal, one of your devices
+/// asked why, once its client has its `403`.
+#[tokio::test]
+async fn a_later_not_admitted_ends_the_proxy_by_own_bind_after_its_403() {
+    use swoosh::testkit::Script;
+
+    let (_peer, node) = own_nas(vec![
+        Script::Refuse(bifrost::Refusal::NotAdmitted),
+        Script::Lists(vec!["ping"]),
+    ]);
+    let peers = Peers::new(&node);
+    let nas = machine(&book(), "me/nas");
+    let cmd = proxy(&[]);
+    let (ended, responses) = listened(&cmd, &exit(&node, &peers, &nas, &cmd, None), 1).await;
+    assert_eq!(
+        format!("{ended:#}"),
+        "me/nas does not serve proxy\n  Only nas can add it; on nas, run:\n    swoosh service add proxy:<url>"
+    );
+    let not_admitted = format!("proxy service refused: {}", bifrost::Refusal::NotAdmitted);
+    assert_eq!(
+        responses
+            .iter()
+            .map(|r| status_and_body(r))
+            .collect::<Vec<_>>(),
+        [("HTTP/1.1 403 Forbidden", not_admitted.as_str())]
+    );
+}
+
+/// By own bind a host cut ends the proxy with `connection lost`, as it ends `forward`'s port, while
+/// no request is in flight to see it.
+#[tokio::test]
+async fn a_host_cut_ends_the_proxy_by_own_bind_with_connection_lost() {
+    use swoosh::testkit::Script;
+
+    let (peer, node) = own_nas(vec![Script::Holds]);
+    let peers = Peers::new(&node);
+    let contacts = book();
+    let nas = machine(&contacts, "me/nas");
+    let cmd = proxy(&[]);
+    let bound = swoosh::transport::Bound {
+        local: false,
+        reach: swoosh::transport::Reach::default(),
+    };
+    let cutting = async {
+        while peer.requests().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        peer.cut();
+        core::future::pending::<()>().await;
+    };
+    let ended = tokio::time::timeout(ROW_BOUND, async {
+        tokio::select! {
+            ended = cmd.run_proxy(&node, &peers, &contacts, &nas, &bound, None, None) => ended,
+            () = cutting => unreachable!(),
+        }
+    })
+    .await
+    .expect("the cut ended the run")
+    .expect_err("a cut run exits non-zero");
+    assert!(ended.is::<connect::ConnectionLost>(), "{ended:#}");
+}
+
+/// A `proxy` run by own bind for `me/nas`, its gate answering `script`, with one client that sends the
+/// printed GET and reads until what it has holds `until`; the host then cuts the session. Returns the
+/// line the run ended with, what the client read, and how its read ended.
+async fn cut_in_flight(
+    script: Vec<swoosh::testkit::Script>,
+    until: &[u8],
+) -> (eyre::Report, Vec<u8>, std::io::Result<usize>) {
+    let (peer, node) = own_nas(script);
+    let peers = Peers::new(&node);
+    let nas = machine(&book(), "me/nas");
+    let cmd = proxy(&[]);
+    let (rode, latest) = tokio::sync::mpsc::unbounded_channel();
+    let exit = OwnExit {
+        rode,
+        ..exit(&node, &peers, &nas, &cmd, None)
+    };
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let local = local_at(listener.local_addr().unwrap());
+    let cut = async {
+        connect::session_cut(latest).await;
+        connect::ConnectionLost.into()
+    };
+    let client = async {
+        let mut client = TcpStream::connect(local.addr).await.unwrap();
+        client.write_all(printed(&local).as_bytes()).await.unwrap();
+        let mut read = Vec::new();
+        while !until.is_empty() && !read.windows(until.len()).any(|seen| seen == until) {
+            let mut chunk = [0; 512];
+            let n = client.read(&mut chunk).await.unwrap();
+            assert_ne!(n, 0, "the answer ended before the cut");
+            read.extend_from_slice(&chunk[..n]);
+        }
+        // The request's stream is open at the gate, so the cut lands on a request in flight.
+        while peer.requests().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        peer.cut();
+        let ended = client.read_to_end(&mut read).await;
+        (read, ended)
+    };
+    let (ended, (read, how)) = tokio::time::timeout(ROW_BOUND, async {
+        tokio::join!(cmd.answer_each(listener, &local, &exit, cut), client)
+    })
+    .await
+    .expect("the cut ended the run");
+    (ended, read, how)
+}
+
+/// A host cut by own bind leaves a client still waiting for its answer a `502` naming the cut, not an
+/// empty reply.
+#[tokio::test]
+async fn a_host_cut_answers_a_waiting_proxy_client_with_its_502() {
+    let (ended, read, how) = cut_in_flight(vec![swoosh::testkit::Script::Holds], b"").await;
+    assert!(ended.is::<connect::ConnectionLost>(), "{ended:#}");
+    how.expect("a clean end after the 502");
+    let response = String::from_utf8(read).expect("utf-8");
+    assert_eq!(
+        status_and_body(&response),
+        ("HTTP/1.1 502 Bad Gateway", "proxy failed: connection lost")
+    );
+}
+
+/// A host cut by own bind resets a client mid-body, so a body framed by the connection's end never reads
+/// as whole.
+#[tokio::test]
+async fn a_host_cut_resets_a_proxy_client_mid_body() {
+    let mut said = Vec::new();
+    ::fetch::http::FetchResponse::Ok {
+        status: 200,
+        headers: vec![("Content-Type".to_owned(), "text/plain".to_owned())],
+    }
+    .write(&mut said)
+    .await
+    .unwrap();
+    said.extend_from_slice(b"the first half");
+    let (ended, read, how) =
+        cut_in_flight(vec![swoosh::testkit::Script::Says(said)], b"the first half").await;
+    assert!(ended.is::<connect::ConnectionLost>(), "{ended:#}");
+    let error = how.expect_err("a reset, never a clean end");
+    assert_eq!(
+        error.kind(),
+        tokio::io::ErrorKind::ConnectionReset,
+        "{error}"
+    );
+    assert!(String::from_utf8_lossy(&read).starts_with("HTTP/1.1 200 OK"));
+}
+
+/// By own bind a later request's `NotAdmitted` answers its client's `403` before one of your devices
+/// is asked why, never after: here the follow-up gets no answer, and the `403` is already out.
+#[tokio::test]
+async fn a_later_not_admitted_answers_its_403_before_asking_why() {
+    use swoosh::testkit::Script;
+
+    let (peer, node) = own_nas(vec![
+        Script::Refuse(bifrost::Refusal::NotAdmitted),
+        Script::Silent,
+    ]);
+    let peers = Peers::new(&node);
+    let nas = machine(&book(), "me/nas");
+    let cmd = proxy(&[]);
+    let exit = exit(&node, &peers, &nas, &cmd, None);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let local = local_at(listener.local_addr().unwrap());
+    let clients = requesting(&local, 1);
+    let run = cmd.answer_each(listener, &local, &exit, core::future::pending());
+    tokio::pin!(run);
+    let responses = tokio::time::timeout(ROW_BOUND, async {
+        tokio::select! {
+            biased;
+            responses = clients => responses.unwrap(),
+            ended = &mut run => panic!("the run ended before its client had the 403: {ended:#}"),
+        }
+    })
+    .await
+    .expect("the client had its answer");
+    assert_eq!(
+        status_and_body(&responses[0]).0,
+        "HTTP/1.1 403 Forbidden",
+        "{responses:?}"
+    );
+    let ended = tokio::time::timeout(ROW_BOUND, run)
+        .await
+        .expect("the run ended");
+    assert!(ended.is::<crate::commands::machine::Refused>(), "{ended:#}");
+    assert_eq!(peer.dials(), 2, "the run's session and one follow-up");
 }

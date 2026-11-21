@@ -862,6 +862,8 @@ pub enum Script {
     Holds,
     /// Read the request, admit it, end its own side of the stream at once, and never read what follows.
     Ends,
+    /// Read the request, admit it, send these bytes, then hold the stream open and say nothing more.
+    Says(Vec<u8>),
     /// Read the request, admit it, then read the stream to its end, keeping what it read, and end.
     Reads,
     /// Read the request, admit it, then read the stream to its end, keeping what it read, and hold its
@@ -882,6 +884,8 @@ pub struct ScriptedPeer {
     state: std::sync::Arc<std::sync::Mutex<Scripted>>,
     /// Whether the host has cut its sessions, for every session's `wait_closed`.
     cut: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+    /// Whether the host has cut this session alone: each dial gets one of its own.
+    cut_one: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
     /// This session's own path report, which a test may change mid-run: each dial gets one of its own.
     path: std::sync::Arc<std::sync::Mutex<bifrost::ConnInfo>>,
 }
@@ -894,6 +898,8 @@ struct Scripted {
     dials: u32,
     /// Each dialed session's path report, in dial order.
     paths: Vec<std::sync::Arc<std::sync::Mutex<bifrost::ConnInfo>>>,
+    /// Each dialed session's own cut, in dial order.
+    cuts: Vec<std::sync::Arc<tokio::sync::watch::Sender<bool>>>,
     received: Vec<u8>,
     closes: u32,
 }
@@ -908,6 +914,7 @@ impl ScriptedPeer {
                 ..Scripted::default()
             })),
             cut: std::sync::Arc::new(tokio::sync::watch::Sender::new(false)),
+            cut_one: std::sync::Arc::new(tokio::sync::watch::Sender::new(false)),
             path: std::sync::Arc::default(),
         }
     }
@@ -928,6 +935,15 @@ impl ScriptedPeer {
     /// resolves. Its streams are left as they are, so only a watch on the session can see the cut.
     pub fn cut(&self) {
         self.cut.send_replace(true);
+    }
+
+    /// Cut the session dialed `nth`, counting from 0, and no other: its `wait_closed` resolves.
+    ///
+    /// # Panics
+    ///
+    /// Fewer than `nth + 1` sessions were dialed.
+    pub fn cut_nth(&self, nth: usize) {
+        self.lock().cuts[nth].send_replace(true);
     }
 
     /// Every request its gate has read, in order.
@@ -1043,6 +1059,13 @@ impl ScriptedPeer {
                 core::future::pending::<()>().await;
                 Ok(())
             }
+            Script::Says(bytes) => {
+                tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                to.write_all(&bytes).await?;
+                let _held = (from, to);
+                core::future::pending::<()>().await;
+                Ok(())
+            }
             Script::Reads => {
                 tightbeam::protocol::Response::Ok.write(&mut to).await?;
                 self.keep_reading(&mut from, None, read_to_end).await?;
@@ -1084,11 +1107,14 @@ impl bifrost::Transport for ScriptedPeer {
 
     async fn connect(&self, _addr: bifrost::Addr) -> Result<Self, bifrost::Error> {
         let path = std::sync::Arc::<std::sync::Mutex<bifrost::ConnInfo>>::default();
+        let cut_one = std::sync::Arc::new(tokio::sync::watch::Sender::new(false));
         let mut state = self.lock();
         state.dials += 1;
         state.paths.push(std::sync::Arc::clone(&path));
+        state.cuts.push(std::sync::Arc::clone(&cut_one));
         Ok(Self {
             path,
+            cut_one,
             ..self.clone()
         })
     }
@@ -1130,11 +1156,15 @@ impl bifrost::Session for ScriptedPeer {
         Err(bifrost::Error::Closed)
     }
 
-    /// Open until [`cut`](Self::cut), so an owner holding it reuses it rather than redialing a closed
-    /// session.
+    /// Open until [`cut`](Self::cut), or [`cut_nth`](Self::cut_nth) for this session, so an owner
+    /// holding it reuses it rather than redialing a closed session.
     async fn wait_closed(&self) {
-        // The sender lives as long as `self`, so the wait ends only at the cut.
-        let _ = self.cut.subscribe().wait_for(|cut| *cut).await;
+        // The senders live as long as `self`, so the wait ends only at a cut.
+        let (mut all, mut one) = (self.cut.subscribe(), self.cut_one.subscribe());
+        tokio::select! {
+            _ = all.wait_for(|cut| *cut) => {}
+            _ = one.wait_for(|cut| *cut) => {}
+        }
     }
 
     /// Counted, so a [`Script::EndsThenReads`] stream keeps nothing it reads after a close.
