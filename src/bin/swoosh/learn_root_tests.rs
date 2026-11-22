@@ -33,7 +33,7 @@ use tightbeam::tunnel::{
 use tokio::io::AsyncWriteExt as _;
 
 use crate::commands::learning::{self, Asking};
-use crate::{Cli, Outward, Verb, run_verb};
+use crate::{Beside, Cli, Outward, Verb, run_verb};
 
 /// Alice's root, which vouches for the machine dialed.
 const ALICE_ROOT: u8 = 0x81;
@@ -305,7 +305,22 @@ where
         let peers = swoosh::peers::Peers::new(node);
         tokio::time::timeout(
             Duration::from_secs(30),
-            run_verb(outward, node, ctx, &peers, &Answering::with(Answer::Same)),
+            run_verb(
+                Beside::of(&outward, home, ctx.machine),
+                &Answering::with(Answer::Same),
+                async |admitted| {
+                    let ctx = swoosh::reaching::ReachCtx {
+                        contacts: ctx.contacts,
+                        machine: ctx.machine,
+                        bound: ctx.bound,
+                        present: ctx.present,
+                        membership: ctx.membership,
+                        home: ctx.home,
+                        admitted,
+                    };
+                    swoosh::reaching::Reaching::run(outward, node, ctx, &peers).await
+                },
+            ),
         )
         .await
         .expect("the verb ends")

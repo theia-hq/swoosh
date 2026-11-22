@@ -326,6 +326,21 @@ impl<'s> Admitted<'s> {
         }
     }
 
+    /// Give the signal for a stream opened through `source` to `key` that was just admitted: the question
+    /// is the root route to `key` through that same source ([`ask_through`]), and a failure is a miss,
+    /// logged.
+    pub fn asked_through<S: StreamSource + 's>(self, source: S, key: NodeId) {
+        self.ask(Box::pin(async move {
+            match ask_through(&source, key).await {
+                Ok(standing) => standing,
+                Err(error) => {
+                    tracing::debug!(%error, "the root lookup failed");
+                    None
+                }
+            }
+        }));
+    }
+
     /// `session`, gated through `connector` on every stream it opens, giving this signal the first time one
     /// is admitted.
     pub fn watch<S: Session + 'static>(self, session: S, connector: Connector) -> Watched<'s, S> {

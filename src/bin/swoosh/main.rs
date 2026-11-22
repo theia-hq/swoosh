@@ -1021,52 +1021,60 @@ async fn run() -> eyre::Result<()> {
         }
     }
 
-    // `speed`, `ping` and `status <machine>` while `serve` runs here, the same way: one observed Open
-    // there, its path read through `serve` after the run. `proxy` too, an unobserved Open per request,
-    // and `send`, one per file.
+    // `speed`, `ping`, `status <machine>` and `send` while `serve` runs here: each stream, the stale-list
+    // exchange beside it and the root question are each one Open there.
     if matches!(
         reach,
-        Outward::Speed(_)
-            | Outward::Ping(_)
-            | Outward::Status(_)
-            | Outward::Proxy(_)
-            | Outward::Send(_)
+        Outward::Speed(_) | Outward::Ping(_) | Outward::Status(_) | Outward::Send(_)
     ) && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
+        && let Some((socket, probe)) = commands::through_serve::serve(&home).await?
     {
-        let contacts = store.contacts();
-        let routed = match &reach {
-            Outward::Speed(cmd) => Some((
-                "speed",
-                cmd.through_serve(&home, machine, slip, contacts).await?,
-            )),
-            Outward::Ping(cmd) => Some((
-                "ping",
-                cmd.through_serve(&home, machine, slip, contacts).await?,
-            )),
-            Outward::Status(cmd) => Some((
-                "status",
-                cmd.through_serve(&home, machine, slip, contacts).await?,
-            )),
-            Outward::Proxy(cmd) => Some((
-                "proxy",
-                cmd.through_serve(&home, machine, slip, contacts).await?,
-            )),
-            Outward::Send(cmd) => Some((
-                "send",
-                cmd.through_serve(&home, machine, slip, contacts).await?,
-            )),
-            _ => None,
-        };
-        if let Some((verb, commands::through_serve::Routed::Ran(ended))) = routed {
-            return ended.map_err(|report| {
-                match report.downcast_ref::<commands::through_serve::ThisMachine>() {
-                    Some(this) => usage_error(&[verb], &this.to_string()),
-                    None => report,
-                }
-            });
-        }
+        // The connection that showed `serve` answers carries nothing: each Open takes one of its own.
+        drop(probe);
+        let hints = hints_or_usage(
+            &[verb_word.as_deref().unwrap_or_default()],
+            reach.reach_args(),
+        );
+        return dial_through_serve(
+            reach,
+            &home,
+            machine,
+            slip,
+            socket,
+            hints,
+            store.contacts(),
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )
+        .await
+        .map_err(|report| {
+            match report.downcast_ref::<commands::through_serve::ThisMachine>() {
+                Some(this) => usage_error(
+                    &[verb_word.as_deref().unwrap_or_default()],
+                    &this.to_string(),
+                ),
+                None => report,
+            }
+        });
+    }
+
+    // `proxy` while `serve` runs here, the same way: an unobserved Open per request.
+    if let Outward::Proxy(cmd) = &reach
+        && let BindRole::Dialing(credential) = reach.bind_role()
+        && let Some(slip) = credential.through_resident()
+        && let Some(machine) = machine.as_ref()
+        && let commands::through_serve::Routed::Ran(ended) = cmd
+            .through_serve(&home, machine, slip, store.contacts())
+            .await?
+    {
+        return ended.map_err(|report| {
+            match report.downcast_ref::<commands::through_serve::ThisMachine>() {
+                Some(this) => usage_error(&["proxy"], &this.to_string()),
+                None => report,
+            }
+        });
     }
 
     // `sync`, `invite`, `revoke`, `root restore` and `join`'s pull while `serve` runs here: each exchange,
@@ -1217,6 +1225,90 @@ fn hints_or_usage(
         .unwrap_or_else(|error| usage_error(path, &error.to_string()))
 }
 
+/// Run a dialing verb through the `serve` on `socket`: its streams, the stale-list exchange beside it and
+/// the root question are each one Open there, with `hints` riding the Opens to their own machine.
+///
+/// A reach flag `serve` makes moot refuses before anything is opened. What runs beside the verb ends with it and prints nothing of its own; a beside Open dropped unanswered is
+/// never asked about, so a slow machine never reads as `serve` stalled. Its lines go to `out` and `err`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the run's two writers ride beside what it dials"
+)]
+async fn dial_through_serve(
+    outward: Outward,
+    home: &Home,
+    machine: &Machine,
+    slip: Option<nauthy::Link>,
+    socket: swoosh::node_client::UidSocket,
+    hints: std::collections::HashMap<bifrost::NodeId, swoosh::peers::Hints>,
+    contacts: &Contacts,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> eyre::Result<()> {
+    use commands::through_serve::{Dial, Moot};
+
+    if let Some(moot) = Moot::first(outward.reach_args()) {
+        return Err(moot.into());
+    }
+    let socket = std::rc::Rc::new(socket);
+    let source = swoosh::streams::Tracked::new(
+        swoosh::streams::Resident::new(std::rc::Rc::clone(&socket)),
+        hints,
+    );
+    let service = match &outward {
+        Outward::Ping(_) => swoosh::reach::PING_SERVICE.parse()?,
+        Outward::Speed(_) => swoosh::reach::SPEED_SERVICE.parse()?,
+        Outward::Status(_) => status::StatusCmd::service(machine)?,
+        Outward::Send(cmd) => nauthy::Service::clone(&cmd.service),
+        _ => eyre::bail!(NOT_DIALING),
+    };
+    let dial = Dial {
+        machine,
+        service: &service,
+        slip,
+        reach: outward.reach_args(),
+        contacts,
+    };
+    let beside = Beside::of(&outward, home, Some(machine));
+    let (source, socket, dial) = (&source, &socket, &dial);
+    let verb = async |admitted| match &outward {
+        Outward::Ping(cmd) => {
+            cmd.through(source, dial, socket, machine, admitted, out, err)
+                .await
+        }
+        Outward::Speed(cmd) => {
+            cmd.through(source, dial, socket, machine, admitted, out, err)
+                .await
+        }
+        Outward::Status(cmd) => {
+            cmd.through(source, dial, socket, machine, admitted, out, err)
+                .await
+        }
+        Outward::Send(cmd) => {
+            cmd.through(source, dial, socket, machine, admitted, out, err)
+                .await
+        }
+        // Refused with the service above, before anything was opened.
+        _ => eyre::bail!(NOT_DIALING),
+    };
+    let (ended, shown) = run_verb(beside, &swoosh::sync::SourceDial::new(source, home), verb).await;
+    // Told once the run is done, as by own bind: a question at the terminal can wait on the person.
+    if let Some(shown) = shown {
+        learning::tell(
+            home,
+            &shown,
+            learning::Asking::here(),
+            &mut swoosh::passphrase::Terminal,
+            err,
+        )
+        .await;
+    }
+    ended
+}
+
+/// The internal error for a verb the dialing route does not run: a root-dispatch bug.
+const NOT_DIALING: &str = "internal: a verb that dials no stream of its own reached the dialing route (root-dispatch bug)";
+
 /// Run an exchange verb's exchanges through the `serve` on `socket`: each is one Open there, on Main with
 /// no slip, `hints` riding the Opens to their own machine. A reach flag `serve` makes moot refuses before
 /// the first Open. When `serve` went away or stopped answering during the run, the verb's own lines come
@@ -1362,50 +1454,57 @@ async fn stale_device(home: &Home, machine: &Machine) -> Option<bifrost::NodeId>
         .then_some(machine.key())
 }
 
-/// Run a reaching verb, and beside it, from the moment it starts, the stale-list exchange with the device
+/// What runs beside a dialing verb: the stale-list exchange with its machine, and the root question its
+/// first admitted stream lets it ask.
+struct Beside<'a> {
+    home: &'a Home,
+    /// The machine the verb dials, resolved before it runs; `None` for a verb that dials none of its own.
+    machine: Option<&'a Machine>,
+    /// Whether the verb dials under this home's key. One under a throwaway is none of your devices, so it
+    /// makes no exchange.
+    exchanges: bool,
+    /// Whether the verb may teach its machine's root ([`Outward::teaches_root`]).
+    asks_root: bool,
+}
+
+impl<'a> Beside<'a> {
+    /// What runs beside `outward` dialing `machine` from `home`, read before the verb is consumed.
+    fn of(outward: &Outward, home: &'a Home, machine: Option<&'a Machine>) -> Self {
+        Self {
+            home,
+            machine,
+            exchanges: outward.identity() != Identity::Ephemeral,
+            asks_root: outward.teaches_root(),
+        }
+    }
+}
+
+/// Run a dialing verb, and beside it, from the moment it starts, the stale-list exchange with the device
 /// it dials (through `dial`). The exchange never waits for the verb, never depends on it succeeding, and
 /// ends with it: whatever the exchange has not finished when the verb returns is dropped, before the node
-/// closes. It is never printed; a failure logs at debug.
+/// closes or the socket's run ends. It is never printed; a failure logs at debug.
 ///
 /// Beside it too, once the verb's first stream is admitted and never ahead of it, a verb that may teach a
-/// root asks the machine which root vouches for it ([`swoosh::learn`]), on the verb's own session and
-/// within [`swoosh::learn::DEADLINE`] of asking: a machine that never answers is dropped silently. What it
-/// showed comes back beside the verb's result, to be told once the node is closed.
-async fn run_verb<'n: 'p, 'p, T: Transport, D: Discovery>(
-    outward: Outward,
-    node: &'n Node<T, D>,
-    ctx: reaching::ReachCtx<'_>,
-    peers: &'p swoosh::peers::Peers<'n, T, D>,
+/// root asks the machine which root vouches for it ([`swoosh::learn`]), through what the verb opened its
+/// stream through and within [`swoosh::learn::DEADLINE`] of asking: a machine that never answers is
+/// dropped silently. `verb` gets the signal that stream gives. What it showed comes back beside the verb's
+/// result, to be told once the run has closed.
+async fn run_verb<'s>(
+    beside: Beside<'_>,
     dial: &impl swoosh::sync::Dial,
-) -> (eyre::Result<()>, Option<swoosh::learn::Shown>)
-where
-    T::Session: 'static,
-    <T::Session as bifrost::Session>::Write: Send + 'static,
-    <T::Session as bifrost::Session>::Read: Send + 'static,
-{
-    // A dial under a throwaway key is none of your devices, so it makes no exchange.
-    let device = match ctx.machine {
-        Some(machine) if outward.identity() != Identity::Ephemeral => {
-            stale_device(ctx.home, machine).await
-        }
+    verb: impl AsyncFnOnce(swoosh::learn::Admitted<'s>) -> eyre::Result<()>,
+) -> (eyre::Result<()>, Option<swoosh::learn::Shown>) {
+    let device = match beside.machine {
+        Some(machine) if beside.exchanges => stale_device(beside.home, machine).await,
         _ => None,
     };
     let (admitted, lookup) = lookup(
-        ctx.machine
-            .filter(|_| outward.teaches_root())
+        beside
+            .machine
+            .filter(|_| beside.asks_root)
             .and_then(swoosh::learn::Asked::of),
     );
-    // The question may borrow what the verb opens through, so the context is the run's for as long.
-    let ctx = reaching::ReachCtx {
-        contacts: ctx.contacts,
-        machine: ctx.machine,
-        bound: ctx.bound,
-        present: ctx.present,
-        membership: ctx.membership,
-        home: ctx.home,
-        admitted,
-    };
-    let verb = async { tokio::join!(outward.run(node, ctx, peers), lookup) };
+    let verb = async { tokio::join!(verb(admitted), lookup) };
     match device {
         None => verb.await,
         Some(device) => {
@@ -1486,14 +1585,22 @@ where
                     Err(error) => return (Err(error), None),
                 }
             }
-            run_verb(
-                outward,
-                node,
-                ctx,
-                &peers,
-                &swoosh::sync::SourceDial::new(&own, home),
-            )
-            .await
+            let beside = Beside::of(&outward, home, ctx.machine);
+            // The question may borrow what the verb opens through, so the context is the run's for as
+            // long.
+            let verb = async |admitted| {
+                let ctx = reaching::ReachCtx {
+                    contacts: ctx.contacts,
+                    machine: ctx.machine,
+                    bound: ctx.bound,
+                    present: ctx.present,
+                    membership: ctx.membership,
+                    home: ctx.home,
+                    admitted,
+                };
+                outward.run(node, ctx, &peers).await
+            };
+            run_verb(beside, &swoosh::sync::SourceDial::new(&own, home), verb).await
         };
         tokio::select! {
             result = run => result,
@@ -1526,6 +1633,9 @@ struct Renew {
 #[cfg(test)]
 #[path = "bearer_dial_tests.rs"]
 mod bearer_dial_tests;
+#[cfg(test)]
+#[path = "dial_route_tests.rs"]
+mod dial_route_tests;
 #[cfg(test)]
 #[path = "exchange_tests.rs"]
 mod exchange_tests;

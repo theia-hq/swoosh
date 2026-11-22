@@ -35,6 +35,107 @@ pub(crate) fn machine(contacts: &Contacts, typed: &str) -> PeerMachine {
     typed.parse::<Peer>().unwrap().machine(contacts).unwrap()
 }
 
+/// A dialing verb with one stream, parsed as the binary parses it.
+#[derive(clap::Parser)]
+pub(crate) enum Dialing {
+    Ping(crate::commands::ping::PingCmd),
+    Status(crate::commands::status::StatusCmd),
+    Speed(crate::commands::speed::SpeedCmd),
+}
+
+/// What a dialing verb's run through `serve` ended with, and what it printed.
+pub(crate) struct Ran {
+    pub(crate) ended: eyre::Result<()>,
+    pub(crate) out: String,
+    pub(crate) err: String,
+}
+
+impl Dialing {
+    /// `argv` (after a program name) as a verb.
+    pub(crate) fn of(argv: &[&str]) -> Self {
+        use clap::Parser as _;
+
+        Self::try_parse_from(core::iter::once("x").chain(argv.iter().copied())).unwrap()
+    }
+
+    /// Run the verb through the `serve` at `home` as the dialing route runs its stream, to `machine`,
+    /// with no hints, no slip and no question asked.
+    pub(crate) async fn through(
+        &self,
+        home: &swoosh::home::Home,
+        machine: &PeerMachine,
+        contacts: &Contacts,
+    ) -> Ran {
+        use swoosh::learn::Admitted;
+        use swoosh::streams::{Resident, Tracked};
+
+        let socket = Rc::new(swoosh::node_client::UidSocket::resolve(home).unwrap());
+        let source = Tracked::new(
+            Resident::new(Rc::clone(&socket)),
+            std::collections::HashMap::new(),
+        );
+        let (service, reach) = match self {
+            Self::Ping(cmd) => (swoosh::reach::PING_SERVICE.parse().unwrap(), &cmd.reach),
+            Self::Status(cmd) => (
+                crate::commands::status::StatusCmd::service(machine).unwrap(),
+                &cmd.reach,
+            ),
+            Self::Speed(cmd) => (swoosh::reach::SPEED_SERVICE.parse().unwrap(), &cmd.reach),
+        };
+        let dial = Dial {
+            machine,
+            service: &service,
+            slip: None,
+            reach,
+            contacts,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let ended = match self {
+            Self::Ping(cmd) => {
+                cmd.through(
+                    &source,
+                    &dial,
+                    &socket,
+                    machine,
+                    Admitted::unheard(),
+                    &mut out,
+                    &mut err,
+                )
+                .await
+            }
+            Self::Status(cmd) => {
+                cmd.through(
+                    &source,
+                    &dial,
+                    &socket,
+                    machine,
+                    Admitted::unheard(),
+                    &mut out,
+                    &mut err,
+                )
+                .await
+            }
+            Self::Speed(cmd) => {
+                cmd.through(
+                    &source,
+                    &dial,
+                    &socket,
+                    machine,
+                    Admitted::unheard(),
+                    &mut out,
+                    &mut err,
+                )
+                .await
+            }
+        };
+        Ran {
+            ended,
+            out: String::from_utf8(out).unwrap(),
+            err: String::from_utf8(err).unwrap(),
+        }
+    }
+}
+
 /// What a run through `serve` did, in order: each line it wrote to stderr, as `stderr: <line>`, and each
 /// query on its receipt, as `Sample` or `Finish`. A query reads the next of the replies it was given, or
 /// `Unavailable` once they run out.
@@ -527,7 +628,7 @@ impl swoosh::renewal::Fetch for NoRenewal {
 
 /// Drive `runs` on an 8 MiB thread, as the gated measure proof is: over mem both ends' transfer buffers
 /// share one thread's stack.
-fn on_a_big_stack(runs: impl AsyncFnOnce() + Send + 'static) {
+pub(crate) fn on_a_big_stack(runs: impl AsyncFnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -607,14 +708,6 @@ async fn through_the_resident(
 fn speed_runs_through_the_resident_against_measures_responder() {
     on_a_big_stack(async || {
         through_the_resident("speed", &["speed"], "me/nas", async |home, contacts| {
-            use clap::Parser as _;
-
-            #[derive(clap::Parser)]
-            struct Wrap {
-                #[command(flatten)]
-                speed: crate::commands::speed::SpeedCmd,
-            }
-
             // Byte-bounded runs end on the count, so only a time-bounded upload waits on the verb's End
             // for its reply: that leg runs a real 50 ms window, since measure reads the wall clock.
             for argv in [
@@ -623,21 +716,15 @@ fn speed_runs_through_the_resident_against_measures_responder() {
                 ["--bidir", "-n", "262144"],
                 ["--up", "-t", "0.05"],
             ] {
-                let cmd = Wrap::try_parse_from(["x", "me/nas"].into_iter().chain(argv))
-                    .unwrap()
-                    .speed;
-                let machine = cmd.peer.machine(contacts).unwrap();
-                let routed = tokio::time::timeout(
+                let cmd = Dialing::of(&[&["speed", "me/nas"][..], &argv].concat());
+                let machine = machine(contacts, "me/nas");
+                let ran = tokio::time::timeout(
                     core::time::Duration::from_secs(10),
-                    cmd.through_serve(home, &machine, None, contacts),
+                    cmd.through(home, &machine, contacts),
                 )
                 .await
-                .expect("the run never ended")
-                .unwrap();
-                assert!(
-                    matches!(routed, super::Routed::Ran(Ok(()))),
-                    "not a run through serve that measured"
-                );
+                .expect("the run never ended");
+                assert!(ran.ended.is_ok(), "not a run through serve that measured");
             }
         })
         .await;
@@ -651,43 +738,23 @@ fn speed_runs_through_the_resident_against_measures_responder() {
 fn ping_and_status_run_through_the_resident_on_its_held_session() {
     on_a_big_stack(async || {
         through_the_resident("ping", &["ping"], "bob/nas", async |home, contacts| {
-            use clap::Parser as _;
-
-            #[derive(clap::Parser)]
-            enum Verb {
-                Ping(crate::commands::ping::PingCmd),
-                Status(crate::commands::status::StatusCmd),
-            }
-
             for argv in [
-                &["x", "ping", "bob/nas", "-c", "2", "-i", "0.05"][..],
-                &["x", "ping", "bob/nas", "-v", "-c", "1"],
-                &["x", "status", "bob/nas"],
+                &["ping", "bob/nas", "-c", "2", "-i", "0.05"][..],
+                &["ping", "bob/nas", "-v", "-c", "1"],
+                &["status", "bob/nas"],
             ] {
                 // The open `ping` route admits one run a second per caller, and every run here is the
                 // resident's, so each waits out the last one's.
                 tokio::time::sleep(core::time::Duration::from_millis(1100)).await;
-                let routed = match Verb::try_parse_from(argv).unwrap() {
-                    Verb::Ping(cmd) => {
-                        let machine = cmd.peer.machine(contacts).unwrap();
-                        tokio::time::timeout(
-                            core::time::Duration::from_secs(10),
-                            cmd.through_serve(home, &machine, None, contacts),
-                        )
-                        .await
-                    }
-                    Verb::Status(cmd) => {
-                        let machine = cmd.peer.as_ref().unwrap().machine(contacts).unwrap();
-                        tokio::time::timeout(
-                            core::time::Duration::from_secs(10),
-                            cmd.through_serve(home, &machine, None, contacts),
-                        )
-                        .await
-                    }
-                };
-                let routed = routed.expect("the run never ended").unwrap();
+                let machine = machine(contacts, "bob/nas");
+                let ran = tokio::time::timeout(
+                    core::time::Duration::from_secs(10),
+                    Dialing::of(argv).through(home, &machine, contacts),
+                )
+                .await
+                .expect("the run never ended");
                 assert!(
-                    matches!(routed, super::Routed::Ran(Ok(()))),
+                    ran.ended.is_ok(),
                     "not a run through serve that answered: {argv:?}"
                 );
             }
@@ -700,20 +767,13 @@ fn ping_and_status_run_through_the_resident_on_its_held_session() {
 /// for the service the probe names: `control.services` for one of your devices.
 #[tokio::test]
 async fn ping_and_status_open_once_observed_on_main() {
-    use clap::Parser as _;
     use swoosh::serve::control_codec::{Observation, OpenLane, Request, Response};
 
-    #[derive(clap::Parser)]
-    enum Verb {
-        Ping(crate::commands::ping::PingCmd),
-        Status(crate::commands::status::StatusCmd),
-    }
-
     for (argv, service) in [
-        (["x", "ping", "me/nas"], "ping"),
-        (["x", "status", "me/nas"], "control.services"),
+        (["ping", "me/nas"], "ping"),
+        (["status", "me/nas"], "control.services"),
     ] {
-        let mut served = Served::new(&format!("open-{}", argv[1])).await;
+        let mut served = Served::new(&format!("open-{}", argv[0])).await;
         let listener = served.listener();
         listener.set_nonblocking(true).unwrap();
         let listener = tokio::net::UnixListener::from_std(listener).unwrap();
@@ -730,24 +790,14 @@ async fn ping_and_status_open_once_observed_on_main() {
                 .unwrap();
             (open.lane(), open.observation(), open.service().to_string())
         };
-        let run = async {
-            match Verb::try_parse_from(argv).unwrap() {
-                Verb::Ping(cmd) => {
-                    cmd.through_serve(&served.home, &peer, None, &contacts)
-                        .await
-                }
-                Verb::Status(cmd) => {
-                    cmd.through_serve(&served.home, &peer, None, &contacts)
-                        .await
-                }
-            }
-        };
-        let (routed, asked) = tokio::time::timeout(core::time::Duration::from_secs(10), async {
+        let cmd = Dialing::of(&argv);
+        let run = cmd.through(&served.home, &peer, &contacts);
+        let (ran, asked) = tokio::time::timeout(core::time::Duration::from_secs(10), async {
             tokio::join!(run, resident)
         })
         .await
         .expect("the Open was answered");
-        let super::Routed::Ran(Err(busy)) = routed.unwrap() else {
+        let Err(busy) = ran.ended else {
             panic!("not a run through serve that ended in its refusal");
         };
         assert!(busy.is::<Busy>(), "{busy:#}");
@@ -762,17 +812,10 @@ async fn ping_and_status_open_once_observed_on_main() {
 /// bind's outcome: an unreachable machine reads `could not reach`, with no reach hint.
 #[tokio::test]
 async fn an_unreachable_open_reaches_ping_and_status_as_their_own_line() {
-    use clap::Parser as _;
     use swoosh::serve::control_codec::{Request, Response};
 
-    #[derive(clap::Parser)]
-    enum Verb {
-        Ping(crate::commands::ping::PingCmd),
-        Status(crate::commands::status::StatusCmd),
-    }
-
-    for argv in [["x", "ping", "me/nas"], ["x", "status", "me/nas"]] {
-        let mut served = Served::new(&format!("unreached-{}", argv[1])).await;
+    for argv in [["ping", "me/nas"], ["status", "me/nas"]] {
+        let mut served = Served::new(&format!("unreached-{}", argv[0])).await;
         let listener = served.listener();
         listener.set_nonblocking(true).unwrap();
         let listener = tokio::net::UnixListener::from_std(listener).unwrap();
@@ -786,24 +829,14 @@ async fn an_unreachable_open_reaches_ping_and_status_as_their_own_line() {
                 .await
                 .unwrap();
         };
-        let run = async {
-            match Verb::try_parse_from(argv).unwrap() {
-                Verb::Ping(cmd) => {
-                    cmd.through_serve(&served.home, &peer, None, &contacts)
-                        .await
-                }
-                Verb::Status(cmd) => {
-                    cmd.through_serve(&served.home, &peer, None, &contacts)
-                        .await
-                }
-            }
-        };
-        let (routed, ()) = tokio::time::timeout(core::time::Duration::from_secs(10), async {
+        let cmd = Dialing::of(&argv);
+        let run = cmd.through(&served.home, &peer, &contacts);
+        let (ran, ()) = tokio::time::timeout(core::time::Duration::from_secs(10), async {
             tokio::join!(run, resident)
         })
         .await
         .expect("the Open was answered");
-        let super::Routed::Ran(Err(unreached)) = routed.unwrap() else {
+        let Err(unreached) = ran.ended else {
             panic!("not a run through serve that ended unreached");
         };
         assert_eq!(printed(&unreached), "error: could not reach me/nas\n");
@@ -1036,6 +1069,120 @@ pub(crate) fn scripted(
             heard[at].upload = holder.await.unwrap();
         }
         heard
+    })
+}
+
+/// What a [`routed`] resident heard, in the order it heard it.
+pub(crate) enum Event {
+    /// A status ask, answered as [`resident_key`].
+    Status,
+    /// An Open, and what it uploaded once its client hung up.
+    Open(Heard),
+}
+
+/// How a [`routed`] resident answers an Open.
+pub(crate) enum Reply {
+    /// Refuse it so.
+    Refuse(OpenRefusal),
+    /// Attach with a reference to sample its path by, end the download with End, and hold the
+    /// connection until the client hangs up: an observed Open that attached.
+    Observed,
+    /// Attach, send these bytes and End, and answer the client's End with Landed.
+    Exchange(Vec<u8>),
+    /// Reply as a `serve` of another control version.
+    Version,
+    /// Hear the Open and never reply, still serving every other connection.
+    Stall,
+    /// Hear the Open and drop its connection with no reply, still serving.
+    Hangup,
+}
+
+/// A resident on `served`'s socket that answers each Open by its service, as `reply` says, and every
+/// status ask as [`resident_key`], until `rig.stop`; its lock is held until then. A Path ask is dropped
+/// unanswered. Resolves to what it heard, in order, once every held client has hung up.
+pub(crate) fn routed(
+    served: &mut Served,
+    mut reply: impl FnMut(&str) -> Reply + Send + 'static,
+    rig: &Rig,
+) -> tokio::task::JoinHandle<Vec<Event>> {
+    use swoosh::serve::control_codec::{Attached, Request, Response};
+    use tokio::io::AsyncWriteExt as _;
+
+    let listener = served.listener();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let lock = served.lock();
+    let stop = rig.stop.clone();
+    let landed = std::sync::Arc::clone(&rig.landed);
+    tokio::spawn(async move {
+        let mut events = Vec::new();
+        let mut held = Vec::new();
+        loop {
+            let (mut conn, _) = tokio::select! {
+                accepted = listener.accept() => accepted.unwrap(),
+                () = stop.cancelled() => break,
+            };
+            let open = match Request::read(&mut conn).await {
+                Ok(Request::Open(open)) => open,
+                Ok(Request::Status) => {
+                    events.push(Event::Status);
+                    let _ = Response::Status(status_of(resident_key()))
+                        .write(&mut conn)
+                        .await;
+                    continue;
+                }
+                _ => continue,
+            };
+            let service = open.service().to_string();
+            events.push(Event::Open(Heard {
+                peer: open.peer(),
+                hints: open.hints().as_slice().to_vec(),
+                service: service.clone(),
+                lane: open.lane(),
+                observation: open.observation(),
+                slip: open.slip().map(|slip| slip.as_str().to_owned()),
+                upload: Vec::new(),
+            }));
+            let at = Some(events.len() - 1);
+            match reply(&service) {
+                Reply::Refuse(refusal) => {
+                    let _ = Response::OpenRefusal(refusal).write(&mut conn).await;
+                }
+                Reply::Version => {
+                    let _ = conn.write_all(b"SWC2").await;
+                }
+                Reply::Stall => held.push((at, tokio::spawn(hold_silent(conn)))),
+                Reply::Hangup => drop(conn),
+                Reply::Observed => {
+                    let attached = Attached {
+                        reference: Some(reference().await),
+                        info: direct(),
+                    };
+                    if Response::Attached(attached).write(&mut conn).await.is_ok() {
+                        held.push((at, tokio::spawn(hold(conn, None, None))));
+                    }
+                }
+                Reply::Exchange(download) => {
+                    if Response::Attached(Attached::from(direct()))
+                        .write(&mut conn)
+                        .await
+                        .is_ok()
+                    {
+                        let landed = Some(std::sync::Arc::clone(&landed));
+                        held.push((at, tokio::spawn(hold(conn, Some(download), landed))));
+                    }
+                }
+            }
+        }
+        drop(listener);
+        drop(lock);
+        for (at, holder) in held {
+            let upload = holder.await.unwrap();
+            if let Some(Event::Open(heard)) = at.map(|at| &mut events[at]) {
+                heard.upload = upload;
+            }
+        }
+        events
     })
 }
 
@@ -1477,4 +1624,26 @@ async fn a_port_through_serve_admits_on_an_open_it_ends_with_end() {
         admission.upload, END,
         "the admission stream ends with End alone"
     );
+}
+
+/// A live `serve` that refuses a connect while it holds its lock, as one whose accept queue is full does,
+/// is no `serve` gone: a dialing verb's Open there prints the cut's line, never that `serve` is not
+/// running.
+#[tokio::test]
+async fn a_refused_connect_under_a_held_lock_is_a_cut_for_a_dialing_verb() {
+    let mut served = Served::new("refused-held").await;
+    // The socket stays bound to no listener, and the lock stays held.
+    drop(served.listener());
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let ran = tokio::time::timeout(
+        ROW_BOUND,
+        Dialing::of(&["ping", "me/nas"]).through(&served.home, &peer, &contacts),
+    )
+    .await
+    .expect("the run ended");
+    let report = ran.ended.expect_err("no stream, no exit 0");
+    assert!(report.is::<ConnectionLost>(), "{report:#}");
+    assert_eq!(ran.out, "");
+    assert_eq!(ran.err, "", "the line is the run's error");
 }

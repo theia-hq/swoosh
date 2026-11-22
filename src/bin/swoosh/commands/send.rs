@@ -22,24 +22,22 @@ use clap::Args;
 use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
-use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
+use nauthy::Service;
 use swoosh::escape::{Escaped, EscapedPath, causes, escaped_report};
-use swoosh::home::Home;
 use swoosh::learn::Admitted;
 use swoosh::node_client::UidSocket;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::{Hints, OpenError};
 use swoosh::reach;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
-use swoosh::streams::{Ask, OwnBind, Resident, StreamSource, Unopened};
+use swoosh::streams::{Ask, OwnBind, Resident, StreamSource, Tracked, Unopened};
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
 use transfer::wire::{Blob, Transfer};
 
 use crate::commands::connect::ConnectionLost;
-use crate::commands::through_serve::{self, Busy, Dial, Routed, Skew, StandingEnded, ThisMachine};
-use crate::commands::{learning, machine};
+use crate::commands::machine;
+use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachine};
 
 /// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
@@ -147,63 +145,33 @@ impl SendCmd {
         swoosh::credential::Credential::dialing(&self.peer, self.service.as_str())
     }
 
-    /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
-    /// typed as it, if one was, and `contacts` to name it in a line. A root the machine shows is told
-    /// after the run, as by own bind.
+    /// Run through `serve` on `socket` as `dial` asks, each file one Open from `source`, printing on `out`
+    /// and `err`. The first admitted file gives `admitted` its question, asked through `source`.
     ///
     /// # Errors
     ///
-    /// The control socket cannot be trusted; never an own bind then.
-    pub async fn through_serve(
+    /// The run's line, or how many files could not be sent.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's two writers ride beside its source and socket"
+    )]
+    pub async fn through<'s>(
         &self,
-        home: &Home,
+        source: &'s Tracked<Resident>,
+        dial: &Dial<'_>,
+        socket: &Rc<UidSocket>,
         machine: &Machine,
-        slip: Option<Link>,
-        contacts: &Contacts,
-    ) -> eyre::Result<Routed> {
-        // Each file's Open takes a control connection of its own, so the one that showed `serve` answers
-        // carries nothing.
-        let Some((socket, _)) = through_serve::serve(home).await? else {
-            return Ok(Routed::OwnBind);
-        };
-        let dial = Dial {
-            machine,
-            service: &self.service,
-            slip,
-            reach: &self.reach,
-            contacts,
-        };
+        admitted: Admitted<'s>,
+        out: &mut impl std::io::Write,
+        err: &mut impl std::io::Write,
+    ) -> eyre::Result<()> {
         let ask = match dial.ask(SEND_LANE) {
             Ok(ask) => ask,
-            Err(unattached) => {
-                return Ok(Routed::Ran(Err(dial.unattached(unattached, &socket).await)));
-            }
+            Err(unattached) => return Err(dial.unattached(unattached, &**socket).await),
         };
-        let socket = Rc::new(socket);
-        let resident = Resident::new(Rc::clone(&socket));
-        let route = Route::Serve {
-            dial: &dial,
-            socket: &socket,
-        };
-        let (admitted, lookup) = crate::lookup(swoosh::learn::Asked::of(machine));
-        let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-        let (ended, shown) = tokio::join!(
-            self.run_send(
-                &resident, &route, machine, ask, admitted, &mut out, &mut err,
-            ),
-            lookup
-        );
-        if let Some(shown) = shown {
-            learning::tell(
-                home,
-                &shown,
-                learning::Asking::here(),
-                &mut swoosh::passphrase::Terminal,
-                &mut std::io::stderr(),
-            )
-            .await;
-        }
-        Ok(Routed::Ran(ended))
+        let route = Route::Serve { dial, socket };
+        self.run_send(source, &route, machine, ask, admitted, out, err)
+            .await
     }
 
     /// Push every named file to `machine`, each over its own stream from `source` as `ask` asks for it,
@@ -402,16 +370,7 @@ impl<'s, S: StreamSource + Copy + 's> First<'_, 's, S> {
         let Some(admitted) = self.admitted.take() else {
             return;
         };
-        let (source, key) = (self.source, self.key);
-        admitted.ask(Box::pin(async move {
-            match swoosh::learn::ask_through(&source, key).await {
-                Ok(standing) => standing,
-                Err(error) => {
-                    tracing::debug!(%error, "the root lookup failed");
-                    None
-                }
-            }
-        }));
+        admitted.asked_through(self.source, self.key);
     }
 }
 

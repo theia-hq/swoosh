@@ -31,7 +31,7 @@ use crate::commands::through_serve::tests::{
     Answer, Heard, ROW_BOUND, Rig, Served, book, machine as typed, nas, nas_slip, resident_key,
     scripted,
 };
-use crate::commands::through_serve::{self, Dial, Routed, ThisMachine};
+use crate::commands::through_serve::{self, Dial, ThisMachine};
 
 #[derive(clap::Parser)]
 struct Wrap {
@@ -232,17 +232,30 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
     let contacts = book();
     let peer = typed(&contacts, "me/nas");
 
-    let routed = tokio::time::timeout(
+    // As the dialing route runs it: the warning, the exchange and the lookup beside it read the home too.
+    let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let ended = tokio::time::timeout(
         ROW_BOUND,
-        cmd.through_serve(&served.home, &peer, None, &contacts),
+        crate::dial_through_serve(
+            crate::Outward::Send(cmd),
+            &served.home,
+            &peer,
+            None,
+            socket,
+            std::collections::HashMap::new(),
+            &contacts,
+            &mut out,
+            &mut err,
+        ),
     )
     .await
-    .expect("the run ended")
-    .unwrap();
+    .expect("the run ended");
     let _ = std::fs::remove_dir_all(dir);
     assert!(
-        matches!(routed, Routed::Ran(Ok(()))),
-        "not a run through serve that sent"
+        ended.is_ok(),
+        "not a run through serve that sent: {}",
+        String::from_utf8_lossy(&err)
     );
     let heard = tokio::time::timeout(ROW_BOUND, resident)
         .await
@@ -1300,4 +1313,23 @@ async fn a_refused_send_to_your_device_ends_with_one_refusal() {
         .map(|request| request.service)
         .collect();
     assert_eq!(asked, ["recv", "control.services"]);
+}
+
+/// A live `serve` that refuses a connect while it holds its lock skips each file with the cut's line,
+/// never that `serve` is not running.
+#[tokio::test]
+async fn a_refused_connect_under_a_held_lock_is_a_cut_for_send() {
+    let mut served = Served::new("send-refused-held").await;
+    drop(served.listener());
+    let (dir, paths) = files("refused-held", 1);
+    let cmd = send(&[paths[0].as_str(), "me/nas"]);
+    let contacts = book();
+    let peer = typed(&contacts, "me/nas");
+    let socket = Rc::new(swoosh::node_client::UidSocket::resolve(&served.home).unwrap());
+    let ran = through_socket(&cmd, socket, &peer, None, &contacts).await;
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(ran.ended.is_err());
+    let skipped = skips(&ran.err);
+    assert_eq!(skipped.len(), 1, "{}", ran.err);
+    assert_eq!(skipped[0].1, "connection lost");
 }

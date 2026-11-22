@@ -17,7 +17,7 @@ use swoosh::roster::{Epoch, RosterDoc};
 use swoosh::sync::Answer;
 use swoosh::testkit::{Answering, STANDING_UNTIL, TestNode, TestRoot};
 
-use crate::{Cli, Outward, Verb, run_verb};
+use crate::{Beside, Cli, Outward, Verb, run_verb};
 
 /// The root both devices belong to.
 const ROOT: u8 = 0x51;
@@ -112,7 +112,22 @@ async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
         let peers = swoosh::peers::Peers::new(&node);
         tokio::time::timeout(
             Duration::from_secs(30),
-            run_verb(outward, &node, ctx, &peers, dial),
+            run_verb(
+                Beside::of(&outward, home, ctx.machine),
+                dial,
+                async |admitted| {
+                    let ctx = swoosh::reaching::ReachCtx {
+                        contacts: ctx.contacts,
+                        machine: ctx.machine,
+                        bound: ctx.bound,
+                        present: ctx.present,
+                        membership: ctx.membership,
+                        home: ctx.home,
+                        admitted,
+                    };
+                    swoosh::reaching::Reaching::run(outward, &node, ctx, &peers).await
+                },
+            ),
         )
         .await
         .expect("the verb ends")

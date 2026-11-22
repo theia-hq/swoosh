@@ -25,27 +25,28 @@
 //! machine, and the path is read by a Finish after the probe rather than from a session of this run's.
 
 use core::time::Duration;
-use std::io::{self, Write};
+use std::io::Write;
 use std::rc::Rc;
 
 use bifrost::{Discovery, Node, Path, Session, Transport};
 use clap::Args;
 use measure::{Ping, ProtocolError};
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
 use swoosh::learn::Admitted;
+use swoosh::node_client::UidSocket;
 use swoosh::observation::{Observer, PathSource};
 use swoosh::peer::{Kind, Machine, Peer};
 use swoosh::reach;
 use swoosh::serve::CONTROL_SERVICES_SERVICE;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
+use swoosh::streams::{Resident, Tracked};
 use swoosh::transport::{self, ReachArgs};
 use tokio::io::AsyncWriteExt as _;
 
 use crate::commands::machine;
-use crate::commands::through_serve::{self, Dial, Routed, Unattached};
+use crate::commands::through_serve::{self, Dial, Unattached};
 
 pub mod report;
 
@@ -170,69 +171,71 @@ impl StatusCmd {
         line.outcome().into_result(&peer, bound)
     }
 
-    /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
-    /// typed as it, if one was, and `contacts` to name it in a cut's line.
+    /// The service `status <machine>` asks of `machine`: what it serves, of one of your devices, else a
+    /// ping.
     ///
     /// # Errors
     ///
-    /// The control socket cannot be trusted; never an own bind then.
-    pub async fn through_serve(
+    /// The probe's service name does not parse.
+    pub fn service(machine: &Machine) -> eyre::Result<Service> {
+        Ok(Probe::of(machine.kind()).service().parse()?)
+    }
+
+    /// Run through `serve` on `socket` as `dial` asks, printing on `out` and `err`. Once the Open
+    /// attaches, `admitted` gets its question, asked through `source`.
+    ///
+    /// # Errors
+    ///
+    /// The run's line: a refusal, a cut, or `serve` gone.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's two writers ride beside its source and socket"
+    )]
+    pub async fn through<'s>(
         &self,
-        home: &Home,
+        source: &'s Tracked<Resident>,
+        dial: &Dial<'_>,
+        socket: &Rc<UidSocket>,
         machine: &Machine,
-        slip: Option<Link>,
-        contacts: &Contacts,
-    ) -> eyre::Result<Routed> {
+        admitted: Admitted<'s>,
+        out: &mut impl Write,
+        err: &mut impl Write,
+    ) -> eyre::Result<()> {
         let Some(peer) = &self.peer else {
             eyre::bail!(
                 "internal: `status` reached the reach path without a peer (root-dispatch bug)"
             );
         };
-        let Some((socket, connected)) = through_serve::serve(home).await? else {
-            return Ok(Routed::OwnBind);
-        };
         let asked = Probe::of(machine.kind());
-        let service: Service = asked.service().parse()?;
-        let dial = Dial {
-            machine,
-            service: &service,
-            slip,
-            reach: &self.reach,
-            contacts,
-        };
         // Main: the held session the rest of this home's traffic through `serve` rides to the machine,
         // so the path is the one that traffic gets.
-        let socket = Rc::new(socket);
-        let (session, observer) = match dial.observed(&socket, connected, OpenLane::Main).await {
+        let (session, observer) = match dial.observed(socket, OpenLane::Main).await {
             Ok(opened) => opened,
             Err(Unattached::Refused(refusal)) => match own_line(&machine.label(), asked, refusal) {
                 Ok(line) => {
-                    writeln!(io::stdout(), "{line}")?;
-                    return Ok(Routed::Ran(line.outcome().unbound_result(peer)));
+                    writeln!(out, "{line}")?;
+                    return line.outcome().unbound_result(peer);
                 }
                 Err(refusal) => {
-                    let report = dial
-                        .unattached(Unattached::Refused(refusal), &*socket)
-                        .await;
-                    return Ok(Routed::Ran(Err(report)));
+                    return Err(dial
+                        .unattached(Unattached::Refused(refusal), &**socket)
+                        .await);
                 }
             },
-            Err(failed) => {
-                return Ok(Routed::Ran(Err(dial.unattached(failed, &*socket).await)));
-            }
+            Err(failed) => return Err(dial.unattached(failed, &**socket).await),
         };
-        let ended = observed(
+        admitted.asked_through(source, machine.key());
+        observed(
             &session,
             observer,
             asked,
             &machine.label(),
             peer,
-            async || dial.stopped(&socket).await,
-            &mut io::stdout(),
-            &mut io::stderr(),
+            async || dial.stopped(socket).await,
+            out,
+            err,
         )
-        .await;
-        Ok(Routed::Ran(ended))
+        .await
     }
 
     /// The bare (no-peer) path: this machine, from its own files. Runs BEFORE any transport is composed
