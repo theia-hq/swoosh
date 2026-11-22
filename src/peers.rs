@@ -278,7 +278,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
 
     /// [`open`](Self::open), with the path report of the session the stream rides, read as it attached,
     /// and a watch on that session's closing.
-    pub(crate) async fn open_attached(
+    pub async fn open_attached(
         &self,
         peer: NodeId,
         hints: Hints,
@@ -716,11 +716,15 @@ impl<S: Session> Drop for Active<S> {
 /// while nothing reads or writes the stream, and the session an observed stream's path is read from. It
 /// keeps the session as the stream's halves do, but counts toward no lane and leaves the idle clock
 /// alone, so holding it past the stream keeps the session open without keeping it busy.
-pub(crate) struct SessionEnd<S: Session>(Rc<Entry<S>>);
+///
+/// It does not keep the session in the owner: an idle sweep or an eviction can drop it from there while
+/// this holds it open, and the next open then dials a session of its own. A caller watching the run's
+/// session watches the one its latest open rode.
+pub struct SessionEnd<S: Session>(Rc<Entry<S>>);
 
 impl<S: Session> SessionEnd<S> {
     /// Resolve once the session has closed: the host ended it, or the path to it failed.
-    pub(crate) async fn closed(&self) {
+    pub async fn closed(&self) {
         self.0.session.wait_closed().await;
     }
 

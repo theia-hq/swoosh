@@ -12,20 +12,21 @@
 //! comes back from the machine is checked before it reaches a local client, and the listener holds at most
 //! [`MAX_PIPES`] connections, each with [`HEAD_TIMEOUT`] to send its request.
 
+use core::cell::OnceCell;
 use core::future::Future;
 use core::net::{Ipv4Addr, SocketAddr};
 use core::ops::ControlFlow;
 use core::time::Duration;
 
 use ::fetch::http::{FetchRequest, FetchResponse};
-use bifrost::{Discovery, Node, NodeId, Refusal, Session, Transport};
+use bifrost::{Discovery, Node, Refusal, Session, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::home::Home;
 use swoosh::node_client::UidSocket;
 use swoosh::peer::{Machine, Peer};
-use swoosh::peers::{Hints, Lane, OpenError, Peers, Presents};
+use swoosh::peers::{Hints, Lane, OpenError, Peers, Presents, SessionEnd};
 use swoosh::reach;
 use swoosh::serve::control_codec::OpenRefusal;
 use swoosh::transport::{self, ReachArgs};
@@ -153,15 +154,20 @@ impl ProxyCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
+        let (rode, latest) = tokio::sync::mpsc::unbounded_channel();
         let exit = OwnExit {
+            node,
             peers,
-            key: machine.key(),
+            rode,
+            machine,
             service: Service::clone(&self.service),
             presents: Presents::resolved(
                 &self.peer,
                 Option::clone(&present),
                 Option::clone(&membership),
             ),
+            present,
+            membership,
         };
         // Admission is proven on one stream before the URL prints, so a refusal is one line and a
         // non-zero exit rather than a URL that answers every request with a 403. The stream is dropped
@@ -169,14 +175,16 @@ impl ProxyCmd {
         match exit.held().await {
             Ok(_admitted) => {}
             Err(OpenError::Open(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))) => {
-                // The held Bulk session carries only proxy streams, so the follow-up asks on its own.
-                let diagnosis =
-                    reach::diagnose_over(node, machine, &self.service, present, membership).await;
-                return Err(machine::refused(machine, &self.service, diagnosis));
+                return Err(exit.refused().await);
             }
             Err(error) => return Err(reach::open_failed(&self.peer, error, bound)),
         }
-        self.listen(&exit, &connect::Machine::of(contacts, exit.key))
+        // By own bind a host cut ends the run, as it ends `forward`'s port.
+        let cut = async {
+            connect::session_cut(latest).await;
+            connect::ConnectionLost.into()
+        };
+        self.listen(&exit, &connect::Machine::of(contacts, machine.key()), cut)
             .await
     }
 
@@ -213,18 +221,58 @@ impl ProxyCmd {
             socket: &socket,
         };
         let named = connect::Machine::of(contacts, machine.key());
-        Ok(Routed::Ran(self.listen(&exit, &named).await))
+        // Through `serve` there is no session to watch: the run ends when a request finds it over.
+        let never = core::future::pending();
+        Ok(Routed::Ran(self.listen(&exit, &named, never).await))
     }
 
     /// Bind the loopback listener, print the local URL and the start lines naming `machine`, then answer
-    /// each request through `exit` until a request finds the run over.
-    async fn listen(&self, exit: &impl Exit, machine: &connect::Machine) -> eyre::Result<()> {
+    /// each request through `exit` until the run ends ([`answer_each`](Self::answer_each)).
+    async fn listen(
+        &self,
+        exit: &impl Exit,
+        machine: &connect::Machine,
+        cut: impl Future<Output = eyre::Report>,
+    ) -> eyre::Result<()> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
         let local = Local::new(listener.local_addr()?);
         println!("{local}");
         eprintln!("Proxying {} through {machine}.", self.url);
         press_ctrl_c();
-        Err(accept_each(listener, MAX_PIPES, |tcp| self.answer(tcp, &local, exit)).await)
+        Err(self.answer_each(listener, &local, exit, cut).await)
+    }
+
+    /// Answer each request `listener` accepts through `exit` until a request finds the run over, or
+    /// `cut` resolves to the line the run ends with: the line it ends with, worded by `exit`.
+    ///
+    /// A cut drops the requests in flight: a client still waiting for its answer gets a `502` naming the
+    /// cut as it goes, if the write needs no wait, and one mid-body is reset ([`Client`]).
+    async fn answer_each(
+        &self,
+        listener: TcpListener,
+        local: &Local,
+        exit: &impl Exit,
+        cut: impl Future<Output = eyre::Report>,
+    ) -> eyre::Report {
+        let unanswered = OnceCell::new();
+        let cut = async {
+            let line = cut.await;
+            // Set as the cut resolves, before the select drops the requests in flight, so each client
+            // still waiting reads it as it goes.
+            let _ = unanswered.set(failed(&line));
+            line
+        };
+        let answering = accept_each(listener, MAX_PIPES, |tcp| {
+            self.answer(tcp, local, exit, &unanswered)
+        });
+        let ended = tokio::select! {
+            // The cut first: a request that broke with its session is polled only after the run has
+            // ended on `connection lost`, so no line of the request's carries the cut's reason.
+            biased;
+            ended = cut => ended,
+            ended = answering => ended,
+        };
+        exit.ended(ended).await
     }
 
     /// Answer one local connection: its failure goes to the log and the listener stays up, unless the
@@ -234,8 +282,9 @@ impl ProxyCmd {
         tcp: TcpStream,
         local: &Local,
         exit: &impl Exit,
+        unanswered: &OnceCell<String>,
     ) -> ControlFlow<eyre::Report> {
-        match self.serve(tcp, local, exit).await {
+        match self.serve(Client::new(tcp, unanswered), local, exit).await {
             Ok(flow) => flow,
             Err(error) => {
                 tracing::warn!(%error, "proxy request ended");
@@ -246,29 +295,33 @@ impl ProxyCmd {
 
     /// Serve one inbound HTTP request. A failure BEFORE any response bytes are written serves a `502` so
     /// a downloader sees a real HTTP error, not a bare connection reset; a failure once the response has
-    /// begun just closes the socket (a second HTTP response into the body would corrupt it). Breaks with
+    /// begun only ends the connection, with a reset mid-body (a second HTTP response into the body would
+    /// corrupt it, and a clean close would pass a short body as whole). Breaks with
     /// the line the run ends with once the request's client has its answer.
     async fn serve(
         &self,
-        mut tcp: TcpStream,
+        mut client: Client<'_>,
         local: &Local,
         exit: &impl Exit,
     ) -> eyre::Result<ControlFlow<eyre::Report>> {
-        let mut responded = false;
-        let relayed = self.relay(&mut tcp, local, exit, &mut responded).await;
+        let relayed = self
+            .relay(&mut client.tcp, local, exit, &mut client.reply)
+            .await;
         if let Err(error) = &relayed
-            && !responded
+            && client.reply == Reply::None
         {
             // A failure before any response (an open, a parse, a stream drop) is a bad-gateway
             // condition, not an authorization one, so `502`. The refusal path inside `relay` serves its
             // own `403`/`502` before returning, so a refusal never reaches this fallback.
-            let _ = respond_error(&mut tcp, Status::BadGateway, &failed(error)).await;
+            client.reply = Reply::Whole;
+            let _ = respond_error(&mut client.tcp, Status::BadGateway, &failed(error)).await;
         }
         relayed
     }
 
-    /// Relay one request to the `proxy:` service and stream the response back, setting `responded` the
-    /// moment any HTTP response has begun (so the caller knows a `502` is no longer safe to send).
+    /// Relay one request to the `proxy:` service and stream the response back, setting `reply` the
+    /// moment any HTTP response has begun (so the caller knows a `502` is no longer safe to send), and
+    /// again once an origin's body has ended cleanly.
     ///
     /// The local checks ([`Local::admit`]) run before the stream opens, so a request this run did not
     /// print the URL for never reaches the machine or carries the credential.
@@ -277,7 +330,7 @@ impl ProxyCmd {
         tcp: &mut TcpStream,
         local: &Local,
         exit: &impl Exit,
-        responded: &mut bool,
+        reply: &mut Reply,
     ) -> eyre::Result<ControlFlow<eyre::Report>> {
         let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(tcp))
             .await
@@ -286,7 +339,7 @@ impl ProxyCmd {
         let origin = match local.admit(&parsed, &self.url) {
             Ok(origin) => origin,
             Err(refused) => {
-                *responded = true;
+                *reply = Reply::Whole;
                 respond_error(tcp, refused.status(), refused.body()).await?;
                 return Ok(ControlFlow::Continue(()));
             }
@@ -298,7 +351,7 @@ impl ProxyCmd {
         let (mut writer, mut reader) = match exit.open().await {
             Ok(halves) => halves,
             Err(Unopened::Refused { refusal, ends }) => {
-                *responded = true;
+                *reply = Reply::Whole;
                 // `NotAdmitted` is an AUTHORIZATION failure (the exit node refused YOU): serve `403`.
                 // `BadRequest` and `Unavailable` are the node's own failure to serve the request and rule on
                 // nothing about this caller, so they keep `502`, like a genuine origin error below. A
@@ -338,7 +391,7 @@ impl ProxyCmd {
                 };
             }
             Err(Unopened::Over(line)) => {
-                *responded = true;
+                *reply = Reply::Whole;
                 let _ = respond_error(tcp, Status::BadGateway, &failed(&line)).await;
                 return Ok(ControlFlow::Break(line));
             }
@@ -358,14 +411,15 @@ impl ProxyCmd {
                     // Checked before a byte of it is written, so a head the machine sent malformed is a
                     // `502` from the fallback rather than lines injected into the local response.
                     let head = Head::checked(status, headers)?;
-                    *responded = true;
+                    *reply = Reply::Body;
                     head.write(tcp).await?;
                     // The body follows on the same stream; stream it to the client until the node closes.
                     tokio::io::copy(&mut reader, tcp).await?;
                     tcp.shutdown().await?;
+                    *reply = Reply::Whole;
                 }
                 FetchResponse::Error(message) => {
-                    *responded = true;
+                    *reply = Reply::Whole;
                     respond_error(tcp, Status::BadGateway, &format!("origin error: {message}"))
                         .await?;
                 }
@@ -379,8 +433,8 @@ impl ProxyCmd {
                 // `serve` stopped under the request: its client's `502` says so, if none has begun, and
                 // the run ends here rather than at the next request's Open.
                 Some(stopped) => {
-                    if !*responded {
-                        *responded = true;
+                    if *reply == Reply::None {
+                        *reply = Reply::Whole;
                         let _ = respond_error(tcp, Status::BadGateway, &failed(&stopped)).await;
                     }
                     Ok(ControlFlow::Break(stopped))
@@ -404,6 +458,11 @@ trait Exit {
     /// `serve`'s own line when it is gone, asked after a request's open stream broke: `None` while it
     /// answers, and always by own bind, which holds no `serve`.
     fn stopped(&self) -> impl Future<Output = Option<eyre::Report>>;
+
+    /// The line the run ends with, from the one its loop broke with: by own bind a later
+    /// `NotAdmitted` ([`connect::NotAdmittedLater`]) is worded only now, once per run, after its client
+    /// had its `403`.
+    fn ended(&self, line: eyre::Report) -> impl Future<Output = eyre::Report>;
 }
 
 /// Why a request's stream did not open, and whether the run goes on.
@@ -430,26 +489,52 @@ fn failed(error: &eyre::Report) -> String {
     format!("proxy failed: {}", error.lines().next().unwrap_or_default())
 }
 
-/// The machine every request leaves from by own bind, and what each request's stream presents to it.
+/// The machine every request leaves from by own bind, and what each request's stream presents to it:
+/// `presents` keys the held session, and `present` and `membership` are the same two slots, for the
+/// follow-up a `NotAdmitted` asks. Each stream's session watch goes to `rode`, for the run's
+/// [`session_cut`](connect::session_cut).
 struct OwnExit<'p, 'n, T: Transport, D: Discovery> {
+    node: &'n Node<T, D>,
     peers: &'p Peers<'n, T, D>,
-    key: NodeId,
+    rode: tokio::sync::mpsc::UnboundedSender<SessionEnd<T::Session>>,
+    machine: &'p Machine,
     service: Service,
     presents: Presents,
+    present: Option<Link>,
+    membership: Option<Link>,
 }
 
 impl<T: Transport, D: Discovery> OwnExit<'_, '_, T, D> {
-    /// One admitted stream on the held Bulk session, its failure as the lane gives it.
+    /// One admitted stream on the held Bulk session, its failure as the lane gives it, its session's
+    /// watch sent to `rode`.
     async fn held(&self) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), OpenError> {
-        self.peers
-            .open(
-                self.key,
+        let (_, end, writer, reader) = self
+            .peers
+            .open_attached(
+                self.machine.key(),
                 Hints::NONE,
                 Service::clone(&self.service),
                 Lane::Bulk,
                 Presents::clone(&self.presents),
             )
-            .await
+            .await?;
+        // A failed send means nothing watches: a test's exit, or a run already over.
+        let _ = self.rode.send(end);
+        Ok((writer, reader))
+    }
+
+    /// The dial refusal a `NotAdmitted` ends the run with, the first request's and a later one's alike.
+    /// The follow-up asks over a connection of its own, once per run, after the loop.
+    async fn refused(&self) -> eyre::Report {
+        let diagnosis = reach::diagnose_over(
+            self.node,
+            self.machine,
+            &self.service,
+            Option::clone(&self.present),
+            Option::clone(&self.membership),
+        )
+        .await;
+        machine::refused(self.machine, &self.service, diagnosis)
     }
 }
 
@@ -457,7 +542,12 @@ impl<T: Transport, D: Discovery> Exit for OwnExit<'_, '_, T, D> {
     async fn open(&self) -> Result<(impl AsyncWrite + Unpin, impl AsyncRead + Unpin), Unopened> {
         match self.held().await {
             Ok(halves) => Ok(halves),
-            // By own bind a later refusal is that request's alone.
+            // A later `NotAdmitted` ends the run, as through `serve`; any other refusal is that
+            // request's alone.
+            Err(error) if connect::ends_the_run(&error) => Err(Unopened::Refused {
+                refusal: Refusal::NotAdmitted,
+                ends: Some(connect::NotAdmittedLater.into()),
+            }),
             Err(OpenError::Open(bifrost::Error::Refused(refusal))) => Err(Unopened::Refused {
                 refusal,
                 ends: None,
@@ -468,6 +558,13 @@ impl<T: Transport, D: Discovery> Exit for OwnExit<'_, '_, T, D> {
 
     async fn stopped(&self) -> Option<eyre::Report> {
         None
+    }
+
+    async fn ended(&self, line: eyre::Report) -> eyre::Report {
+        if line.is::<connect::NotAdmittedLater>() {
+            return self.refused().await;
+        }
+        line
     }
 }
 
@@ -514,6 +611,61 @@ impl Exit for ServeExit<'_> {
 
     async fn stopped(&self) -> Option<eyre::Report> {
         self.dial.stopped(self.socket).await
+    }
+
+    async fn ended(&self, line: eyre::Report) -> eyre::Report {
+        line
+    }
+}
+
+/// One local client's connection, and how far its answer got, so that a client dropped mid-answer
+/// (a cut ended the run under it, or its body broke) never reads a cut answer as a whole one.
+struct Client<'u> {
+    tcp: TcpStream,
+    reply: Reply,
+    /// The `502` body for a client the run ended under before its answer began: set by the cut alone.
+    unanswered: &'u OnceCell<String>,
+}
+
+/// How far a client's answer got.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reply {
+    /// Nothing written yet: a `502` is still safe.
+    None,
+    /// An origin's head is out and its body, framed by the connection's end, is still coming.
+    Body,
+    /// A whole answer: an error framed by its length, or a body that ended cleanly.
+    Whole,
+}
+
+impl<'u> Client<'u> {
+    fn new(tcp: TcpStream, unanswered: &'u OnceCell<String>) -> Self {
+        Self {
+            tcp,
+            reply: Reply::None,
+            unanswered,
+        }
+    }
+}
+
+impl Drop for Client<'_> {
+    /// A body framed by the connection's end is cut with a reset, never a clean close, so a downloader
+    /// does not keep a short file as whole. A client the cut left unanswered gets its `502` if the socket
+    /// takes it at once: no wait, so no clock, and a client that reads nothing gets the close alone.
+    fn drop(&mut self) {
+        match (self.reply, self.unanswered.get()) {
+            (Reply::Body, _) => {
+                if let Err(error) = self.tcp.set_zero_linger() {
+                    tracing::debug!(%error, "a broken answer's reset could not be set");
+                }
+            }
+            (Reply::None, Some(body)) => {
+                let _ = self
+                    .tcp
+                    .try_write(error_response(Status::BadGateway, body).as_bytes());
+            }
+            (Reply::None, None) | (Reply::Whole, _) => {}
+        }
     }
 }
 
@@ -813,16 +965,19 @@ impl Status {
 /// status), not a hang. An unadmitted dial serves `403`; a node that could not serve the request, or a
 /// genuine origin failure, serves `502`.
 async fn respond_error(tcp: &mut TcpStream, status: Status, message: &str) -> eyre::Result<()> {
-    let (code, reason) = status.parts();
-    let body = message.as_bytes();
-    let head = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    tcp.write_all(head.as_bytes()).await?;
-    tcp.write_all(body).await?;
+    tcp.write_all(error_response(status, message).as_bytes())
+        .await?;
     tcp.shutdown().await?;
     Ok(())
+}
+
+/// An error status and its one-line body as a whole response, framed by its length.
+fn error_response(status: Status, message: &str) -> String {
+    let (code, reason) = status.parts();
+    format!(
+        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message}",
+        message.len()
+    )
 }
 
 /// A reason phrase for the common statuses; empty for the rest (clients ignore it, but the frame stays
