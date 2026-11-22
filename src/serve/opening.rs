@@ -18,7 +18,6 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use bifrost::{Discovery, NodeId, RefusalDetail, Session as _, Transport, WriteEnd};
-use nauthy::Service;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{
     self, AsyncBufRead, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Interest,
@@ -26,7 +25,6 @@ use tokio::io::{
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
-use super::PROVEN_ROUTES;
 pub use super::observing::TERMINAL_RETENTION;
 use super::observing::{Carrier, Observations, Observing};
 use super::socket::splice::{DataLen, FramedWriter, UploadCut, upload};
@@ -34,12 +32,12 @@ use super::socket::{
     Attached, Epoch, EpochError, Observation, OpenLane, OpenRefusal, OpenRequest, PathReply,
     PathRequest, Response,
 };
-use crate::credential::{Credential, admits_anyone_at};
+use crate::credential::admits_anyone_at;
 use crate::home::Home;
 use crate::peers::{
-    DIAL_TIMEOUT, DialFailure, Lane, MAIN_OPEN_TIMEOUT, OPEN_TIMEOUT, OpenError, Peers, Presents,
+    DIAL_TIMEOUT, DialFailure, Lane, MAIN_OPEN_TIMEOUT, OPEN_TIMEOUT, OpenError, Peers,
+    Unpresentable, presents,
 };
-use crate::reaching::ResolveError;
 use crate::renewal::{Fetch, OPEN_RENEWAL, OpenRenewal};
 
 /// The most streams the run's Opens hold at once, across every peer and lane.
@@ -177,42 +175,6 @@ impl<'r, 'a, 'n, T: Transport, D: Discovery, F: Fetch> Opener<'r, 'a, 'n, T, D, 
             _beyond_main: beyond_main,
         })
     }
-
-    /// What the stream presents: the slip when there is one, nothing on a proven-only route, else this
-    /// home's standing as it reads now. An ended badge ends the Open with `StandingEnded`; a home that
-    /// cannot be read ends it with the one fixed Error, since it says nothing about the standing.
-    // `core::io::sink` is still unstable, so the sink for the warning comes from `std`.
-    #[allow(clippy::std_instead_of_core)]
-    async fn presents(
-        &self,
-        service: &Service,
-        slip: Option<nauthy::Link>,
-    ) -> Result<Presents, Response> {
-        if slip.is_none() && PROVEN_ROUTES.contains(&service.as_str()) {
-            return Ok(Presents::Standing(None));
-        }
-        let slipped = slip.is_some();
-        // The expiring-badge line is the verb's to print, never the run's, once per Open.
-        let mut no_warning = std::io::sink();
-        let resolved = crate::reaching::resolve_to(
-            Credential::Family { present: slip },
-            self.this,
-            self.home,
-            &mut no_warning,
-        )
-        .await
-        .map_err(|error| {
-            tracing::debug!(error = %error, "an open's standing could not be presented");
-            match error {
-                ResolveError::Ended { .. } => Response::OpenRefusal(OpenRefusal::StandingEnded),
-                ResolveError::Unreadable(_) => Response::Error(UNREADABLE_HOME.to_owned()),
-            }
-        })?;
-        Ok(match (slipped, resolved.into_slots()) {
-            (true, (Some(slip), membership)) => Presents::Slip { slip, membership },
-            (_, (grant, _)) => Presents::Standing(grant),
-        })
-    }
 }
 
 /// Why a run could not start answering Opens.
@@ -324,7 +286,12 @@ impl<T: Transport, D: Discovery, F: Fetch> Opens for Opener<'_, '_, '_, T, D, F>
             // The Open goes on with whatever standing the home holds after this, renewed or not.
             let _ = self.renewal.before(&open).await;
             let (hints, service) = (open.hints().clone(), open.service().clone());
-            let presents = self.presents(&service, open.into_slip()).await?;
+            let presents = presents(self.home, self.this, &service, open.into_slip())
+                .await
+                .map_err(|unpresentable| match unpresentable {
+                    Unpresentable::Ended => Response::OpenRefusal(OpenRefusal::StandingEnded),
+                    Unpresentable::Unreadable(_) => Response::Error(UNREADABLE_HOME.to_owned()),
+                })?;
             Ok((hints, service, presents))
         })
         .await;

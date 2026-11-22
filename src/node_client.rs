@@ -37,6 +37,10 @@ const OPEN_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 // Derived from the resident's own bounds, so a slower renewal, dial or open cannot outgrow the wait.
 const _: () = assert!(crate::serve::OPEN_REPLY_BOUND.as_millis() < OPEN_REPLY_TIMEOUT.as_millis());
 
+/// How long a run waits to learn whether the resident is gone, after a refused connect or a broken run.
+/// A resident that is there answers in a local round trip; one that is gone refuses at once.
+pub const STOPPED_ASK: Duration = Duration::from_secs(1);
+
 /// What an Open got back from the resident.
 #[derive(Debug)]
 pub enum Opened {
@@ -211,6 +215,29 @@ impl UidSocket {
     /// As [`Home::resident_presence`].
     pub async fn resident_presence(&self) -> Result<ResidentPresence, LockError> {
         self.home.resident_presence().await
+    }
+
+    /// Whether `serve.lock` is free, so a refused connect means the resident is gone. A refused connect
+    /// alone does not: on macOS a live resident whose accept queue is full refuses one too, while it
+    /// holds the lock. A held lock, a probe that failed or one past [`STOPPED_ASK`] shows nothing gone.
+    pub async fn lock_free(&self) -> bool {
+        match timeout(STOPPED_ASK, self.resident_presence()).await {
+            Ok(Ok(presence)) => presence == ResidentPresence::Free,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "serve.lock could not be probed after a refused connect");
+                false
+            }
+            Err(_elapsed) => false,
+        }
+    }
+
+    /// Whether the resident is gone, asked after a cut: a status bounded by [`STOPPED_ASK`] finds none,
+    /// and `serve.lock` is free. Anything else, an answer, a reset or a stall, says something is there.
+    pub async fn gone(&self) -> bool {
+        matches!(
+            timeout(STOPPED_ASK, self.status_attributed()).await,
+            Ok(Err(ControlError::NoResident))
+        ) && self.lock_free().await
     }
 
     /// Read local status and return the kernel-reported listener PID checked on that connection against the

@@ -17,11 +17,11 @@ use swoosh::serve::control_codec::{
 };
 use swoosh::transport::ReachArgs;
 
-use super::{Busy, Dial, Moot, OneStream, Skew, StandingEnded, Stream, ThisMachine, serve_gone};
+use super::{Busy, Dial, Moot, OneStream, Skew, StandingEnded, Stream, ThisMachine};
 use crate::commands::connect::{ConnectionLost, Machine};
 
 /// The key of `me/nas`.
-fn nas() -> NodeId {
+pub(crate) fn nas() -> NodeId {
     NodeId::from_ed25519_secret(&[0x61; 32])
 }
 
@@ -229,33 +229,20 @@ fn serve_lines_keep_their_ruled_words() {
     );
 }
 
+/// The two lines a cut prints: `serve`'s own when it is gone, else the own bind's. Which one is
+/// [`UidSocket::gone`](swoosh::node_client::UidSocket::gone)'s call, held by
+/// `send_ends_when_serve_stops_before_an_open_is_answered` against a resident that went and one still up.
 #[test]
 fn a_cut_names_serve_only_when_it_is_gone_and_otherwise_is_connection_lost() {
     let contacts = book();
     let named = Machine::of(&contacts, nas());
-    // The line a cut prints: `serve`'s own when it is gone, else the own bind's.
-    let after_a_cut =
-        |asked, named, own: eyre::Report| serve_gone(asked, named).map_or(own, eyre::Report::new);
-    let stopped = after_a_cut(Err(ControlError::NoResident), &named, ConnectionLost.into());
+    let stopped: eyre::Report = super::ServeStopped(named.to_string()).into();
     assert_eq!(
         printed(&stopped),
         "error: swoosh serve stopped here and ended the connection to me/nas\n  Commands here \
          connect through it while it runs.\n  Run this command again to reconnect.\n"
     );
-    // Something is there, if stalled or broken: the break is the run's own, and the line must not
-    // claim `serve` stopped.
-    for there in [
-        ControlError::Io(tokio::io::ErrorKind::ConnectionReset.into()),
-        ControlError::Timeout {
-            phase: "response read",
-        },
-    ] {
-        let lost = after_a_cut(Err(there), &named, ConnectionLost.into());
-        assert!(lost.is::<ConnectionLost>(), "{lost:#}");
-    }
-    // `serve` still answers: the cut was the pipe's, and the line is the own bind's.
-    let lost = after_a_cut(Ok(()), &named, ConnectionLost.into());
-    assert!(lost.is::<ConnectionLost>());
+    let lost: eyre::Report = ConnectionLost.into();
     assert_eq!(printed(&lost), "error: connection lost\n");
 }
 
@@ -417,7 +404,7 @@ impl Served {
 
     /// The held `serve.lock`, for a resident that stops: dropping it unlinks the socket and frees the
     /// lock, as `serve` exiting does.
-    fn lock(&mut self) -> swoosh::serve::InstanceLock {
+    pub(crate) fn lock(&mut self) -> swoosh::serve::InstanceLock {
         self.lock.take().unwrap()
     }
 }
@@ -968,19 +955,17 @@ pub(crate) fn scripted(
             });
             let at = heard.len() - 1;
             match answers.pop_front().unwrap() {
+                // A client that gave up on its Open has closed the connection: nothing reads the reply.
                 Answer::Refuse(refusal) => {
-                    Response::OpenRefusal(refusal)
-                        .write(&mut conn)
-                        .await
-                        .unwrap();
+                    let _ = Response::OpenRefusal(refusal).write(&mut conn).await;
                 }
                 // Another control version's magic: the client reads no further.
-                Answer::Version => conn.write_all(b"SWC2").await.unwrap(),
+                Answer::Version => {
+                    let _ = conn.write_all(b"SWC2").await;
+                }
+                // As a refusal: a client whose run already ended reads no reply.
                 Answer::Error(reason) => {
-                    Response::Error(reason.to_owned())
-                        .write(&mut conn)
-                        .await
-                        .unwrap();
+                    let _ = Response::Error(reason.to_owned()).write(&mut conn).await;
                 }
                 attach => {
                     Response::Attached(Attached::from(direct()))
@@ -1141,7 +1126,7 @@ fn one_at_a_time(n: usize) -> impl AsyncFnOnce(core::net::SocketAddr, &Rig) {
 }
 
 /// A slip the machine `me/nas` issued for `ssh`, so an Open may present it.
-fn nas_slip() -> nauthy::Link {
+pub(crate) fn nas_slip() -> nauthy::Link {
     swoosh::testkit::TestNode::seeded(0x61)
         .slip(
             &"ssh".parse().unwrap(),

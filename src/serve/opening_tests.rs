@@ -1373,6 +1373,145 @@ fn a_failed_open_carries_only_fixed_words() {
     );
 }
 
+/// One `presents` on both paths: a proven-only route presents nothing, a slip presents itself, and any
+/// other service presents this home's standing as it reads at that open. The resident and a run's own
+/// bind send the same slots for each, from the same home.
+#[tokio::test]
+async fn a_proven_route_presents_nothing_on_both_paths() {
+    use crate::credential::Credential;
+    use crate::serve::{LOOKUP_ROOT_SERVICE, RENEWAL_SERVICE};
+    use crate::streams::{Ask, OwnBind, StreamSource as _, Unopened};
+
+    let family = Credential::Family { present: None };
+
+    let ends = now() + 90 * DAY;
+    let slip = TestNode::seeded(PEER)
+        .slip(&"ssh".parse().unwrap(), until())
+        .unwrap()
+        .link()
+        .unwrap();
+    let cases = [
+        (LOOKUP_ROOT_SERVICE, None),
+        (RENEWAL_SERVICE, None),
+        (LOOKUP_ROOT_SERVICE, Some(slip.clone())),
+        ("ssh", None),
+    ];
+    let slots = |scripted: &ScriptedPeer| -> Vec<(Option<String>, Option<String>)> {
+        scripted
+            .requests()
+            .into_iter()
+            .map(|request| (request.capability, request.membership))
+            .collect()
+    };
+
+    let home = device("presents", LAPTOP, ends).await;
+    let fixture = Fixture::over(
+        home.clone(),
+        node(LAPTOP),
+        Asks::default(),
+        cases.iter().map(|_| Script::Holds),
+    );
+    fixture
+        .run(async |socket| {
+            let mut held = Vec::new();
+            for (service, slip) in &cases {
+                let request = OpenRequest::new(
+                    fixture.peer,
+                    Hints::NONE,
+                    service.parse().unwrap(),
+                    OpenLane::Main,
+                    slip.clone(),
+                )
+                .unwrap();
+                let mut client = open(socket, request).await;
+                attached(&mut client).await;
+                held.push(client);
+            }
+        })
+        .await;
+    let through_serve = slots(&fixture.scripted);
+
+    let scripted = ScriptedPeer::new(fixture.peer, cases.iter().map(|_| Script::Holds));
+    let own = Node::new(scripted.clone(), NoDiscovery);
+    let peers = Peers::new(&own);
+    let source = OwnBind::new(&peers, &home, node(LAPTOP), &family);
+    let mut held = Vec::new();
+    for (service, slip) in &cases {
+        let ask = Ask {
+            peer: fixture.peer,
+            hints: Hints::NONE,
+            service: service.parse().unwrap(),
+            lane: OpenLane::Main,
+            slip: slip.clone(),
+        };
+        held.push(source.open(&ask).await.expect("the stream opened"));
+    }
+    let own_bind = slots(&scripted);
+
+    assert_eq!(own_bind, through_serve, "the two paths present alike");
+    let standing = crate::config::load_badge(&home).await.unwrap().unwrap();
+    assert_eq!(
+        through_serve,
+        [
+            (None, None),
+            (None, None),
+            (Some(slip.as_str().to_owned()), None),
+            (Some(standing.as_str().to_owned()), None),
+        ]
+    );
+
+    // An `anyone` run's own bind presents its slip alone, or nothing, from a home it never reads: one
+    // whose revocations cannot be read stops neither.
+    let unreadable = device("presents-alone", LAPTOP, ends).await;
+    std::fs::create_dir_all(unreadable.revoked()).unwrap();
+    let alone = [("ssh", None), ("ssh", Some(slip.clone()))];
+    let scripted = ScriptedPeer::new(fixture.peer, alone.iter().map(|_| Script::Holds));
+    let own = Node::new(scripted.clone(), NoDiscovery);
+    let peers = Peers::new(&own);
+    let anyone = Credential::Anyone(slip.clone());
+    let source = OwnBind::new(&peers, &unreadable, node(LAPTOP), &anyone);
+    let mut held = Vec::new();
+    for (service, slip) in &alone {
+        let ask = Ask {
+            peer: fixture.peer,
+            hints: Hints::NONE,
+            service: service.parse().unwrap(),
+            lane: OpenLane::Main,
+            slip: slip.clone(),
+        };
+        held.push(source.open(&ask).await.expect("the stream opened"));
+    }
+    assert_eq!(
+        slots(&scripted),
+        [(None, None), (Some(slip.as_str().to_owned()), None)]
+    );
+
+    // A run that presents this home maps what the home says: a lapsed badge is an ended standing, as
+    // the resident's refusal names it, and a home that cannot be read is the home's.
+    let ask = Ask {
+        peer: fixture.peer,
+        hints: Hints::NONE,
+        service: "ssh".parse().unwrap(),
+        lane: OpenLane::Main,
+        slip: None,
+    };
+    let lapsed = lapsed_laptop("presents-lapsed").await;
+    let opened = OwnBind::new(&peers, &lapsed, node(LAPTOP), &family)
+        .open(&ask)
+        .await;
+    assert!(
+        matches!(opened, Err(Unopened::Refused(OpenRefusal::StandingEnded))),
+        "a lapsed badge is not an ended standing"
+    );
+    let opened = OwnBind::new(&peers, &unreadable, node(LAPTOP), &family)
+        .open(&ask)
+        .await;
+    assert!(
+        matches!(opened, Err(Unopened::Home(_))),
+        "an unreadable home is not the home's"
+    );
+}
+
 #[tokio::test]
 async fn an_open_with_an_ended_badge_is_standing_ended() {
     let home = lapsed_laptop("open-ended").await;

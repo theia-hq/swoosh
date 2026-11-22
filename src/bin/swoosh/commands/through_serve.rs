@@ -23,25 +23,22 @@
 
 use core::cell::RefCell;
 use core::ops::ControlFlow;
-use core::pin::Pin;
-use core::task::{Context, Poll};
 use std::rc::Rc;
 
-use bifrost::{ConnInfo, NodeId, PathChanges, Refusal, WriteEnd};
+use bifrost::{ConnInfo, NodeId, PathChanges, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, escaped_report};
-use swoosh::home::ResidentPresence;
-use swoosh::node_client::{Connected, NodeClient, Opened, UidSocket};
-use swoosh::observation::{Observed, Observer, PathSource, Receipt};
+use swoosh::node_client::{Connected, NodeClient, UidSocket};
+use swoosh::observation::{Observed, Observer, PathSource};
 use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::{
-    ControlError, Observation, OpenLane, OpenRead, OpenRefusal, OpenRequest, OpenWrite, PathRef,
-    PeerRefusal,
+    ControlError, Observation, OpenLane, OpenRead, OpenRefusal, OpenWrite, PeerRefusal,
 };
+use swoosh::streams::{Ask, Opened, Resident, Unopened, Upload};
 use swoosh::transport::ReachArgs;
-use tokio::io::{self, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{self, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::commands::connect::{
@@ -124,18 +121,9 @@ pub async fn forward_port(
     ))
 }
 
-/// A stream the resident attached: the path it rode as it attached, the reference to observe it by
-/// when the Open asked for one, and its two halves.
-pub struct Stream {
-    /// The connection's path report, read as the stream attached.
-    pub info: ConnInfo,
-    /// Present exactly when the Open was observed.
-    pub reference: Option<PathRef>,
-    /// The peer's bytes.
-    pub read: OpenRead,
-    /// The bytes toward the peer.
-    pub write: OpenWrite,
-}
+/// A stream the resident attached: the path it rode as it attached, and its two halves as the socket
+/// gives them.
+pub type Stream = Opened<OpenWrite, OpenRead>;
 
 impl Dial<'_> {
     async fn forward(self, socket: &UidSocket, connected: Connected) -> eyre::Result<()> {
@@ -179,6 +167,16 @@ impl Dial<'_> {
         lane: OpenLane,
         observation: Observation,
     ) -> Result<Stream, Unattached> {
+        let ask = self.ask(lane)?;
+        match Resident::attach(connected, &ask, observation).await {
+            Ok((stream, _reference)) => Ok(stream),
+            Err(unopened) => Err(self.unopened(unopened, socket).await),
+        }
+    }
+
+    /// The Open this dial makes on `lane`, or the line for a reach flag `serve` makes moot or for more
+    /// hints than one Open carries.
+    pub(crate) fn ask(&self, lane: OpenLane) -> Result<Ask, Unattached> {
         if let Some(moot) = Moot::first(self.reach) {
             return Err(Unattached::Failed(moot.into()));
         }
@@ -191,36 +189,34 @@ impl Dial<'_> {
                 .flat_map(|hint| hint.addrs().iter().copied()),
         )
         .map_err(|error| Unattached::Failed(error.into()))?;
-        // Cloned, never taken: a listener opens once per pipe, and an Open without the slip is refused
-        // by a peer that admits only the link.
-        let slip = Option::clone(&self.slip);
-        let request = OpenRequest::new(key, hints, self.service.clone(), lane, slip)
-            .map_err(|error| Unattached::Failed(error.into()))?;
-        let request = match observation {
-            Observation::Unobserved => request,
-            Observation::Observed => request.observed(),
-        };
-        match connected.open(request).await {
-            Ok(Opened::Attached {
-                info,
-                reference,
-                read,
-                write,
-            }) => Ok(Stream {
-                info,
-                reference,
-                read,
-                write,
-            }),
-            Ok(Opened::Refused(refusal)) => Err(Unattached::Refused(refusal)),
-            Ok(Opened::Error(reason)) => {
-                Err(Unattached::Failed(escaped_report(eyre::eyre!(reason))))
-            }
-            Err(ControlError::Version { .. }) => Err(Unattached::Failed(Skew.into())),
-            Err(error) => {
+        Ok(Ask {
+            peer: key,
+            hints,
+            service: self.service.clone(),
+            lane,
+            // Cloned, never taken: a listener opens once per pipe, and an Open without the slip is
+            // refused by a peer that admits only the link.
+            slip: Option::clone(&self.slip),
+        })
+    }
+
+    /// What an Open that attached nothing means to this dial: the resident's or the peer's refusal kept
+    /// typed, else the line it prints. A control connection that failed before its reply is `serve`'s
+    /// own line when `serve` is gone, else a cut.
+    pub(crate) async fn unopened(&self, unopened: Unopened, socket: &UidSocket) -> Unattached {
+        match unopened {
+            Unopened::Refused(refusal) => Unattached::Refused(refusal),
+            Unopened::ServeError(reason) => Unattached::Failed(escaped_report(eyre::eyre!(reason))),
+            Unopened::Skew => Unattached::Failed(Skew.into()),
+            Unopened::ServeGone => Unattached::Failed(self.serve_stopped()),
+            Unopened::Malformed(malformed) => Unattached::Failed(malformed.into()),
+            Unopened::Control(error) => {
                 tracing::debug!(%error, "an open through serve failed before its reply");
-                Err(Unattached::Failed(self.cut(socket).await))
+                Unattached::Failed(self.cut(socket).await)
             }
+            // The own bind's outcomes, which an Open through `serve` never gives.
+            Unopened::Own(error) => Unattached::Failed(error.into()),
+            Unopened::Home(report) => Unattached::Failed(report),
         }
     }
 
@@ -249,19 +245,15 @@ impl Dial<'_> {
         connected: Connected,
         lane: OpenLane,
     ) -> Result<(OneStream, Observer), Unattached> {
-        let stream = self
-            .attach(socket, connected, lane, Observation::Observed)
-            .await?;
-        let Some(reference) = stream.reference else {
-            return Err(Unattached::Failed(eyre::eyre!(
-                "internal: an observed open through serve came back without its reference"
-            )));
+        let ask = self.ask(lane)?;
+        let (opened, observer) = match Resident::new(Rc::clone(socket))
+            .observed(connected, &ask)
+            .await
+        {
+            Ok(observed) => observed,
+            Err(unopened) => return Err(self.unopened(unopened, socket).await),
         };
-        let observer = Observer::new(
-            Receipt::new(reference, Rc::clone(socket)),
-            stream.info.clone(),
-        );
-        let session = OneStream::new(self.machine.key(), stream.info, stream.read, stream.write);
+        let session = OneStream::new(self.machine.key(), opened.info, opened.read, opened.write);
         Ok((session, observer))
     }
 
@@ -291,7 +283,7 @@ impl Dial<'_> {
     pub async fn pipe(&self, socket: &UidSocket) -> Result<Stream, Unpiped> {
         let connected = match socket.connected().await {
             Ok(connected) => connected,
-            Err(ControlError::NoResident) if lock_free(socket).await => {
+            Err(ControlError::NoResident) if socket.lock_free().await => {
                 return Err(Unpiped::of(Unattached::Failed(self.serve_stopped())));
             }
             Err(error) => return Err(Unpiped::of(Unattached::Failed(error.into()))),
@@ -374,13 +366,17 @@ impl Dial<'_> {
     }
 
     /// The line the run ends with when `serve` is gone.
-    fn serve_stopped(&self) -> eyre::Report {
+    pub(crate) fn serve_stopped(&self) -> eyre::Report {
         ServeStopped(Machine::of(self.contacts, self.machine.key()).to_string()).into()
     }
 
     /// The line a refusal prints: the own bind's for the same outcome, except `Busy` and `NotHere`.
     /// `serve` is asked its status only for an ended standing, whose remedy names this machine's key.
-    async fn refused(&self, refusal: OpenRefusal, serve: &impl NodeClient) -> eyre::Report {
+    pub(crate) async fn refused(
+        &self,
+        refusal: OpenRefusal,
+        serve: &impl NodeClient,
+    ) -> eyre::Report {
         match refusal {
             // No session to ask one of your devices why, so the line names no cause it cannot tell.
             OpenRefusal::Peer(PeerRefusal::NotAdmitted) => {
@@ -425,32 +421,15 @@ impl Dial<'_> {
     }
 
     /// `serve`'s own line when it is gone, asked after a run broke: `None` while anything answers, or
-    /// stalls, there, and the break is the run's own. The ask is bounded by [`STOPPED_ASK`], so a
-    /// resident that accepts and stalls cannot hold a failed run's exit.
+    /// stalls, there, and the break is the run's own, so the line never claims `serve` stopped when it
+    /// did not. The ask is bounded ([`UidSocket::gone`]), so a resident that accepts and stalls cannot
+    /// hold a failed run's exit.
     pub async fn stopped(&self, socket: &UidSocket) -> Option<eyre::Report> {
         let named = Machine::of(self.contacts, self.machine.key());
-        let asked = match tokio::time::timeout(STOPPED_ASK, socket.status_attributed()).await {
-            Ok(asked) => asked.map(drop),
-            Err(_elapsed) => Err(ControlError::Timeout {
-                phase: "status after a cut",
-            }),
-        };
-        let gone = serve_gone(asked, &named)?;
-        lock_free(socket).await.then(|| gone.into())
-    }
-}
-
-/// Whether `serve.lock` is free, so a refused connect means `serve` is gone. A refused connect alone
-/// does not: on macOS a live `serve` whose accept queue is full refuses one too, while it holds the
-/// lock. A held lock, a probe that failed or one past [`STOPPED_ASK`] shows nothing gone.
-async fn lock_free(socket: &UidSocket) -> bool {
-    match tokio::time::timeout(STOPPED_ASK, socket.resident_presence()).await {
-        Ok(Ok(presence)) => presence == ResidentPresence::Free,
-        Ok(Err(error)) => {
-            tracing::debug!(%error, "serve.lock could not be probed after a refused connect");
-            false
-        }
-        Err(_elapsed) => false,
+        socket
+            .gone()
+            .await
+            .then(|| ServeStopped(named.to_string()).into())
     }
 }
 
@@ -460,20 +439,6 @@ async fn lock_free(socket: &UidSocket) -> bool {
 pub fn raise_open_files() {
     if let Err(error) = swoosh::serve::raise_open_files() {
         tracing::warn!(%error, "could not raise the open-file limit");
-    }
-}
-
-/// How long a run that broke waits to learn whether `serve` is gone. A resident that is there answers
-/// its status in a local round trip; one that is gone refuses the connection at once.
-const STOPPED_ASK: core::time::Duration = core::time::Duration::from_secs(1);
-
-/// `serve`'s own line when asking it again showed it gone: no resident, or the connection refused.
-/// Anything else, an answer that is not a status, a reset, a stall, says something is there, so the
-/// break was not `serve` stopping and the line must not claim it did.
-fn serve_gone(asked: Result<(), ControlError>, machine: &Machine) -> Option<ServeStopped> {
-    match asked {
-        Err(ControlError::NoResident) => Some(ServeStopped(machine.to_string())),
-        _ => None,
     }
 }
 
@@ -671,7 +636,7 @@ impl OneStream {
         Self {
             peer,
             info,
-            stream: RefCell::new(Some((Upload(Some(write)), read))),
+            stream: RefCell::new(Some((Upload::from(write), read))),
         }
     }
 }
@@ -713,66 +678,6 @@ impl bifrost::Session for OneStream {
     }
 }
 
-/// The write half of a [`OneStream`]'s stream: Data frames, and End at its `shutdown`. Aborted, or
-/// dropped before `shutdown`, it closes the direction with no End, which `serve` passes on to the peer as
-/// a reset. Its `delivered` never resolves: the word that the peer holds the upload is the read half's.
-pub struct Upload(Option<OpenWrite>);
-
-impl Upload {
-    fn half(&mut self) -> io::Result<Pin<&mut OpenWrite>> {
-        self.0
-            .as_mut()
-            .map(Pin::new)
-            .ok_or_else(|| io::ErrorKind::BrokenPipe.into())
-    }
-}
-
-impl AsyncWrite for Upload {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut().half() {
-            Ok(half) => half.poll_write(cx, buf),
-            Err(error) => Poll::Ready(Err(error)),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut().half() {
-            Ok(half) => half.poll_flush(cx),
-            Err(error) => Poll::Ready(Err(error)),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut().half() {
-            Ok(half) => half.poll_shutdown(cx),
-            Err(error) => Poll::Ready(Err(error)),
-        }
-    }
-}
-
-impl WriteEnd for Upload {
-    fn abort(&mut self) {
-        if let Some(write) = self.0.take() {
-            write.abort();
-        }
-    }
-
-    /// Never resolves: through `serve` the word that the peer holds the upload is Landed, which arrives
-    /// on the read half ([`OpenRead::landed`]), out of this half's reach. Pending forever is the answer
-    /// the transport contract gives for a peer that never takes the bytes, so a caller's own bound ends
-    /// the wait; any error here would claim a reset, a stopped reader or a lost session that did not
-    /// happen. It writes no End, and it holds the half until the wait is dropped, so the direction ends
-    /// as the caller left it: cleanly after its `shutdown`, else as a cut once the caller gives up.
-    async fn delivered(self) -> io::Result<()> {
-        let _held = self;
-        core::future::pending().await
-    }
-}
-
 /// A reach flag set while `serve` answers: it applies to a bind this run does not make.
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -783,7 +688,7 @@ pub struct Moot(&'static str);
 
 impl Moot {
     /// The first reach flag set, in the order the line names them, both spellings.
-    fn first(reach: &ReachArgs) -> Option<Self> {
+    pub(crate) fn first(reach: &ReachArgs) -> Option<Self> {
         if reach.local {
             Some(Self("--local or SWOOSH_LOCAL"))
         } else if reach.relay.is_some() {
@@ -823,7 +728,7 @@ pub struct Skew;
 // The own bind's line names the badge's date too; reading it here can load the root key, which a run
 // through `serve` never does, so the head says only that the badge has ended.
 #[derive(Debug)]
-pub struct StandingEnded(Option<NodeId>);
+pub struct StandingEnded(pub(crate) Option<NodeId>);
 
 impl core::fmt::Display for StandingEnded {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -846,7 +751,7 @@ pub struct ThisMachine(String);
 
 impl ThisMachine {
     /// The line for `machine`, as it was typed: its name, a key or a link.
-    fn of(machine: &PeerMachine) -> Self {
+    pub(crate) fn of(machine: &PeerMachine) -> Self {
         Self(match (machine.name(), machine.kind()) {
             (Some(name), _) => format!("{name} is this machine"),
             (None, Kind::Link) => "that link is for this machine".to_owned(),

@@ -39,6 +39,7 @@ pub mod secret;
 pub mod serve;
 pub mod serve_toml;
 pub mod standing;
+pub mod streams;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;
