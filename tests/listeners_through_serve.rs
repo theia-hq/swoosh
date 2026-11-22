@@ -1,9 +1,9 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! `forward <port>` and `proxy` take the path through a running `swoosh serve`: the compiled binary serves a
-//! home, and the compiled binary runs each listener there with a reach flag that only the path through
-//! `serve` refuses, so its refusal shows which path the verb took.
+//! `forward <port>`, `proxy` and `send` take the path through a running `swoosh serve`: the compiled binary
+//! serves a home, and the compiled binary runs each verb there with a reach flag that only the path
+//! through `serve` refuses, so its refusal shows which path the verb took.
 
 use core::time::Duration;
 use std::io::{BufRead as _, BufReader};
@@ -127,6 +127,18 @@ fn listeners_take_the_path_through_a_running_serve() {
         .to_string();
     refused_through_serve(&scratch.0, &["forward", &other, "ssh", &port]);
     refused_through_serve(&scratch.0, &["proxy", &other, "http://example.com/x"]);
+}
+
+/// With `serve` running, `send` takes its path too: a `--relay` set for a bind it does not make is refused
+/// there, exit 1, before any file is opened.
+#[test]
+fn a_reach_flag_refuses_send_through_serve() {
+    let scratch = Scratch::new("send");
+    let _served = serve(&scratch.0);
+    let other = bifrost::NodeId::from_ed25519_secret(&[0x11; 32]).to_string();
+    let file = scratch.0.join("note.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    refused_through_serve(&scratch.0, &["send", file.to_str().unwrap(), &other]);
 }
 
 /// Run `verb` on `home` with a `--relay` for a bind it does not make: through the running `serve` that

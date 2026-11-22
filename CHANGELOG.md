@@ -33,6 +33,10 @@ All notable changes to swoosh, newest first.
   `speed test to <machine> (<mode>)` on both paths. The `path:` line comes from a reading taken after the
   run; if that fails, there is no `path:` line, stderr says `warning: could not read the path of this run`,
   and the exit code is unchanged.
+- **`send` runs through `swoosh serve` too, and says which file failed.** Every `skip <file>:` line names its
+  file. If the machine cannot be reached before any file is admitted, `send` stops; once files are going, a file
+  that cannot be reached is skipped. An unreadable home, a `serve` error or a malformed reply also ends the run.
+  A `send` to `anyone` presents the link alone, with or without `serve`.
 - **`forward <machine> <service> -` tells a finished stream from a cut-off one.** It exits 0 only when the other
   side ends cleanly and, if you sent anything, the other machine holds it; any other end prints
   `error: connection lost` and exits 1, with or without `swoosh serve` running. With a file or pipe on stdin, it

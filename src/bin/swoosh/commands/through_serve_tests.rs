@@ -889,12 +889,17 @@ pub(crate) enum Answer {
     Version,
     /// Reply with the resident's own error, this reason.
     Error(&'static str),
+    /// Hear the Open and drop its connection with no reply, the resident still up.
+    Hangup,
+    /// Hear the Open, then stop with no reply: the socket and the lock go before the connection does.
+    Vanish,
     /// Refuse it so.
     Refuse(OpenRefusal),
 }
 
 /// One Open the scripted resident heard: what it asked for, and what an attached one uploaded.
 pub(crate) struct Heard {
+    pub(crate) service: String,
     pub(crate) lane: swoosh::serve::control_codec::OpenLane,
     pub(crate) observation: swoosh::serve::control_codec::Observation,
     pub(crate) slip: Option<String>,
@@ -948,6 +953,7 @@ pub(crate) fn scripted(
                 _ => continue,
             };
             heard.push(Heard {
+                service: open.service().to_string(),
                 lane: open.lane(),
                 observation: open.observation(),
                 slip: open.slip().map(|slip| slip.as_str().to_owned()),
@@ -962,6 +968,12 @@ pub(crate) fn scripted(
                 // Another control version's magic: the client reads no further.
                 Answer::Version => {
                     let _ = conn.write_all(b"SWC2").await;
+                }
+                Answer::Hangup => drop(conn),
+                Answer::Vanish => {
+                    listener = None;
+                    lock = None;
+                    drop(conn);
                 }
                 // As a refusal: a client whose run already ended reads no reply.
                 Answer::Error(reason) => {
