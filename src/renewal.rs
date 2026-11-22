@@ -25,7 +25,7 @@ use core::time::Duration;
 use std::io;
 use std::time::SystemTime;
 
-use bifrost::{Discovery, NodeId, Transport};
+use bifrost::NodeId;
 use futures::future::{LocalBoxFuture, Shared};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
@@ -37,11 +37,12 @@ use tokio::time::Instant;
 
 use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::home::{Home, HomeWrite};
-use crate::peers::{Hints, Lane, OpenError, Presents};
+use crate::peers::Hints;
 use crate::roster::{MAX_BADGE, read_held};
-use crate::serve::control_codec::OpenRequest;
+use crate::serve::control_codec::{OpenLane, OpenRequest};
 use crate::serve::{PROVEN_ROUTES, RENEWAL_SERVICE, SYNC_SERVICE};
 use crate::standing::Standing;
+use crate::streams::{Ask, Opened, StreamSource, Unopened};
 use crate::sync::{Device, Reply};
 
 /// The answer that carries a standing.
@@ -150,6 +151,9 @@ pub enum FetchError {
     /// The other device could not be reached.
     #[error(transparent)]
     Dial(#[from] eyre::Report),
+    /// The source gave no stream to the other device; why is kept typed, for the log.
+    #[error("no stream to the other device opened")]
+    Unopened(Unopened),
 }
 
 /// Something that asks one device's pick-up route by its key: a bound node, or a test's stand-in.
@@ -158,42 +162,45 @@ pub trait Fetch {
     fn fetch(&self, peer: NodeId) -> impl Future<Output = Result<Option<Link>, FetchError>>;
 }
 
-/// The [`Fetch`] over the run's credential-free Main sessions. No home is borrowed or badge read:
-/// a dead or unreadable badge cannot delay a pick-up or shorten its session's lease.
-pub struct NodeFetch<'p, 'n, T: Transport, D: Discovery> {
-    peers: &'p crate::peers::Peers<'n, T, D>,
+/// The [`Fetch`] over a stream source: `control.renewal` on Main with no slip, a proven-only route, so
+/// it presents nothing and reads no badge: a dead or unreadable badge cannot delay a pick-up.
+pub struct SourceFetch<'a, S: StreamSource> {
+    source: &'a S,
 }
 
-impl<'p, 'n, T: Transport, D: Discovery> NodeFetch<'p, 'n, T, D> {
-    /// Borrow only the run's sessions; every ask presents neither credential slot.
-    pub fn new(peers: &'p crate::peers::Peers<'n, T, D>) -> Self {
-        Self { peers }
+impl<'a, S: StreamSource> SourceFetch<'a, S> {
+    /// Ask each device's pick-up route through `source`.
+    pub fn new(source: &'a S) -> Self {
+        Self { source }
     }
 }
 
-impl<T: Transport, D: Discovery> Fetch for NodeFetch<'_, '_, T, D> {
+impl<S: StreamSource> Fetch for SourceFetch<'_, S> {
     async fn fetch(&self, peer: NodeId) -> Result<Option<Link>, FetchError> {
-        let service = RENEWAL_SERVICE
-            .parse()
-            .map_err(|error| eyre::eyre!("{error}"))?;
-        // The route refuses a key it does not know, and every key while its slots are full: to the dialer
-        // that is the same miss as the one byte. No badge lookup belongs on this path, even for a key.
-        let (_writer, reader) = match self
-            .peers
-            .open(
-                peer,
-                Hints::NONE,
-                service,
-                Lane::Main,
-                Presents::Standing(None),
-            )
-            .await
-        {
-            Ok(stream) => stream,
-            Err(OpenError::Open(bifrost::Error::Refused(_))) => return Ok(None),
-            Err(other) => return Err(eyre::eyre!(other).into()),
+        let ask = Ask {
+            peer,
+            hints: Hints::NONE,
+            service: RENEWAL_SERVICE
+                .parse()
+                .map_err(|error| eyre::eyre!("{error}"))?,
+            lane: OpenLane::Main,
+            slip: None,
         };
-        read_answer(reader).await
+        // The route refuses a key it does not know, and every key while its slots are full: to the dialer
+        // that is the same miss as the one byte.
+        let Opened {
+            mut write, read, ..
+        } = match self.source.open(&ask).await {
+            Ok(opened) => opened,
+            Err(Unopened::Refused(_)) => return Ok(None),
+            Err(other) => return Err(FetchError::Unopened(other)),
+        };
+        // End the empty upload before reading, so the peer reads a clean end, never a reset that can stop
+        // its answer from completing. The route answers without reading, so a failed End is no failure.
+        if let Err(error) = write.shutdown().await {
+            tracing::debug!(%error, "the pick-up's upload did not end cleanly");
+        }
+        read_answer(read).await
     }
 }
 
@@ -319,7 +326,7 @@ async fn ask(fetch: &impl Fetch, device: &Device, deadline: Instant) -> Option<L
             None
         }
         Ok(Err(error)) => {
-            tracing::debug!(device = %device.name, %error, "the pick-up failed");
+            tracing::debug!(device = %device.name, ?error, "the pick-up failed");
             None
         }
         Err(_) => {

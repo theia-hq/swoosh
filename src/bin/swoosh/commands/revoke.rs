@@ -40,7 +40,8 @@ use swoosh::root::{Root, RootError, RootPlace, RootVerb};
 use swoosh::root_key::{RootKey, RootKeyError};
 use swoosh::roster::Epoch;
 use swoosh::standing::{Standing, StandingError};
-use swoosh::sync::{Answer, Dial, ExchangeError, NodeDial};
+use swoosh::streams::OwnBind;
+use swoosh::sync::{Answer, Dial, ExchangeError, SourceDial};
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -1075,7 +1076,7 @@ impl swoosh::reaching::Reaching for RevokeRoot {
 
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        _node: &'n Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
         peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
@@ -1083,7 +1084,13 @@ impl swoosh::reaching::Reaching for RevokeRoot {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        let dial = NodeDial::new(peers, ctx.home);
+        let own = OwnBind::new(
+            peers,
+            ctx.home,
+            node.node_id(),
+            &swoosh::credential::Credential::Family { present: None },
+        );
+        let dial = SourceDial::new(&own, ctx.home);
         self.publish
             .run(ctx.home, &mut Terminal, &dial, &mut io::stderr())
             .await

@@ -4813,9 +4813,10 @@ async fn the_first_sync_round_runs_at_start() {
     let home = home_with_a_sibling("start", bifrost::Transport::node_id(&nas)).await;
     let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
     let peers = swoosh::peers::Peers::new(&node);
+    let own = swoosh::streams::OwnBind::new(&peers, &home, node.node_id(), &FAMILY);
     let (dial, fetch) = (
-        swoosh::sync::NodeDial::new(&peers, &home),
-        swoosh::renewal::NodeFetch::new(&peers),
+        swoosh::sync::SourceDial::new(&own, &home),
+        swoosh::renewal::SourceFetch::new(&own),
     );
     let (first_round, _held) = FirstRound::hold_stop(AllEnabled);
     let started = tokio::time::Instant::now();
@@ -4833,6 +4834,70 @@ async fn the_first_sync_round_runs_at_start() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
+/// `serve`'s rounds ride its own sessions, through the one source every exchange uses, and each round
+/// presents the standing as it reads then: a renewal between two rounds is the one the second presents.
+#[tokio::test(start_paused = true)]
+async fn serves_rounds_ride_its_own_peers() {
+    use swoosh::testkit::{STANDING_UNTIL, Script, ScriptedPeer, TestNode, TestRoot};
+
+    let nas = TestNode::seeded(0x73).node_id();
+    let home = home_with_a_sibling("own-peers", nas).await;
+    let desk = TestNode::seeded(0x71).node_id();
+    let wire = ScriptedPeer::new(nas, (0..4).map(|_| Script::Lists(Vec::new())));
+    let node = bifrost::Node::new(wire.clone(), bifrost::NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
+    let own = swoosh::streams::OwnBind::new(&peers, &home, desk, &FAMILY);
+    let (dial, fetch) = (
+        swoosh::sync::SourceDial::new(&own, &home),
+        swoosh::renewal::SourceFetch::new(&own),
+    );
+    let (first_round, _held) = FirstRound::hold_stop(AllEnabled);
+    let renewed = TestRoot::seeded(FIRST_ROUND_ROOT)
+        .device_badge(
+            desk,
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL - 60),
+        )
+        .expect("a badge");
+    let asked = async |count: usize| {
+        while wire.requests().len() < count {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let rounds = super::sync_rounds(&home, &dial, &fetch, first_round);
+    tokio::pin!(rounds);
+    tokio::select! {
+        () = &mut rounds => unreachable!("the rounds never end"),
+        () = asked(1) => {}
+    }
+    swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &renewed).expect("the renewal");
+    tokio::select! {
+        () = &mut rounds => unreachable!("the rounds never end"),
+        () = asked(2) => {}
+    }
+    let stored = swoosh::config::load_badge(&home).await.expect("the badge");
+    let requests = wire.requests();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.service == swoosh::serve::SYNC_SERVICE),
+        "every stream is an exchange"
+    );
+    assert_ne!(
+        requests[0].capability, requests[1].capability,
+        "the second round read the standing afresh"
+    );
+    assert_eq!(
+        requests[1].capability.as_deref(),
+        stored.as_ref().map(nauthy::Link::as_str)
+    );
+    assert_eq!(
+        wire.dials(),
+        2,
+        "one session per standing, on the run's own endpoint"
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
 /// `control.stop` is refused while the first round waits on a sibling that never answers, and admitted
 /// once the round gives up on it at its bound. Open the stop only on a newer list and a machine whose
 /// devices are all out of reach could never be stopped from another one.
@@ -4843,9 +4908,10 @@ async fn a_round_that_finds_no_sibling_still_opens_stop() {
     let home = home_with_a_sibling("silent", bifrost::Transport::node_id(&nas)).await;
     let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
     let peers = swoosh::peers::Peers::new(&node);
+    let own = swoosh::streams::OwnBind::new(&peers, &home, node.node_id(), &FAMILY);
     let (dial, fetch) = (
-        swoosh::sync::NodeDial::new(&peers, &home),
-        swoosh::renewal::NodeFetch::new(&peers),
+        swoosh::sync::SourceDial::new(&own, &home),
+        swoosh::renewal::SourceFetch::new(&own),
     );
     let (first_round, held) = FirstRound::hold_stop(AllEnabled);
     let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
@@ -4890,9 +4956,10 @@ async fn a_host_that_is_not_your_device_opens_stop_after_its_round() {
     let home = Home::resolve(Some(dir)).expect("the scratch home resolves");
     let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
     let peers = swoosh::peers::Peers::new(&node);
+    let own = swoosh::streams::OwnBind::new(&peers, &home, node.node_id(), &FAMILY);
     let (dial, fetch) = (
-        swoosh::sync::NodeDial::new(&peers, &home),
-        swoosh::renewal::NodeFetch::new(&peers),
+        swoosh::sync::SourceDial::new(&own, &home),
+        swoosh::renewal::SourceFetch::new(&own),
     );
     let (first_round, held) = FirstRound::hold_stop(AllEnabled);
     let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
@@ -5147,6 +5214,10 @@ async fn home_with_a_sibling(tag: &str, nas: bifrost::NodeId) -> Home {
 
 /// The root every first-round home belongs to.
 const FIRST_ROUND_ROOT: u8 = 0x72;
+
+/// What `serve`'s rounds present: this home's standing, never a slip.
+const FAMILY: swoosh::credential::Credential =
+    swoosh::credential::Credential::Family { present: None };
 
 /// The list `others` and `me/desk` make, at `number`, revoking `revoked`, signed by the first-round root.
 fn first_round_list(

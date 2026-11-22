@@ -34,7 +34,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::SystemTime;
 
-use bifrost::{Discovery, NodeId, Transport};
+use bifrost::NodeId;
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
@@ -43,10 +43,12 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, Petname};
 use crate::home::{Home, HomeWrite};
-use crate::peers::{Hints, Lane, OpenError, Presents};
+use crate::peers::Hints;
 use crate::roster::{Epoch, FoldError, Folded, MAX_ROSTER_BLOB, fold, fold_fork, read_held};
 use crate::serve::SYNC_SERVICE;
+use crate::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
 use crate::standing::Standing;
+use crate::streams::{Ask, Opened, StreamSource, Unopened};
 
 /// How long one exchange may take.
 pub const EACH: Duration = Duration::from_secs(5);
@@ -124,6 +126,9 @@ pub enum ExchangeError {
     /// The other device could not be reached.
     #[error(transparent)]
     Dial(#[from] eyre::Report),
+    /// The source gave no stream to the other device; why is kept typed, for the log.
+    #[error("no stream to the other device opened")]
+    Unopened(Unopened),
 }
 
 /// The digest an exchange names `bytes` by: BLAKE3, or all zeros for no update.
@@ -454,54 +459,47 @@ pub trait Dial {
     ) -> impl Future<Output = Result<Answer, ExchangeError>>;
 }
 
-/// The [`Dial`] over the run's Main sessions. Each exchange snapshots this home's badge once and
-/// presents it afresh; neither its admission nor its credentialed connector is cached.
-pub struct NodeDial<'p, 'n, T: Transport, D: Discovery> {
-    peers: &'p crate::peers::Peers<'n, T, D>,
-    home: &'p Home,
+/// The [`Dial`] over a stream source: each exchange is one stream to `control.sync` on Main, with no
+/// slip, presenting what the source presents for it (this home's standing as it reads now).
+pub struct SourceDial<'a, S: StreamSource> {
+    source: &'a S,
+    home: &'a Home,
 }
 
-impl<'p, 'n, T: Transport, D: Discovery> NodeDial<'p, 'n, T, D> {
-    /// Borrow the run's sessions and the home whose badge each exchange presents.
-    pub fn new(peers: &'p crate::peers::Peers<'n, T, D>, home: &'p Home) -> Self {
-        Self { peers, home }
+impl<'a, S: StreamSource> SourceDial<'a, S> {
+    /// Exchange through `source`, as the device `home` is.
+    pub fn new(source: &'a S, home: &'a Home) -> Self {
+        Self { source, home }
     }
-}
 
-impl<T: Transport, D: Discovery> NodeDial<'_, '_, T, D> {
-    /// Open a stream on `peer`'s `control.sync`, presenting this machine's standing as it reads now.
-    async fn open(
-        &self,
-        peer: NodeId,
-    ) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin), ExchangeError> {
-        let badge = crate::config::load_badge(self.home).await?;
-        let service = SYNC_SERVICE
-            .parse::<nauthy::Service>()
-            .map_err(|error| eyre::eyre!(error))?;
-        let (writer, reader) = self
-            .peers
-            .open(
-                peer,
-                Hints::NONE,
-                service,
-                Lane::Main,
-                Presents::Standing(badge),
-            )
+    /// Open a stream on `peer`'s `control.sync`. A refusal of this machine's standing, by the peer or
+    /// before it was sent, is [`ExchangeError::NotAdmitted`], so a round still reaches the pick-up.
+    async fn open(&self, peer: NodeId) -> Result<Opened<S::Write, S::Read>, ExchangeError> {
+        let ask = Ask {
+            peer,
+            hints: Hints::NONE,
+            service: SYNC_SERVICE
+                .parse::<nauthy::Service>()
+                .map_err(|error| eyre::eyre!(error))?,
+            lane: OpenLane::Main,
+            slip: None,
+        };
+        self.source
+            .open(&ask)
             .await
-            .map_err(|error| match error {
-                OpenError::Open(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted)) => {
-                    ExchangeError::NotAdmitted
-                }
-                other => ExchangeError::Dial(eyre::eyre!(other)),
-            })?;
-        Ok((reader, writer))
+            .map_err(|unopened| match unopened {
+                Unopened::Refused(
+                    OpenRefusal::Peer(PeerRefusal::NotAdmitted) | OpenRefusal::StandingEnded,
+                ) => ExchangeError::NotAdmitted,
+                unopened => ExchangeError::Unopened(unopened),
+            })
     }
 }
 
-impl<T: Transport, D: Discovery> Dial for NodeDial<'_, '_, T, D> {
+impl<S: StreamSource> Dial for SourceDial<'_, S> {
     async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
-        let (reader, writer) = self.open(peer).await?;
-        exchange(self.home, reader, writer).await
+        let Opened { read, write, .. } = self.open(peer).await?;
+        exchange(self.home, read, write).await
     }
 
     async fn offer(
@@ -510,8 +508,8 @@ impl<T: Transport, D: Discovery> Dial for NodeDial<'_, '_, T, D> {
         number: Epoch,
         bytes: &[u8],
     ) -> Result<Answer, ExchangeError> {
-        let (reader, writer) = self.open(peer).await?;
-        offer(self.home, number, bytes, reader, writer).await
+        let Opened { read, write, .. } = self.open(peer).await?;
+        offer(self.home, number, bytes, read, write).await
     }
 }
 
@@ -670,7 +668,7 @@ pub async fn round(
                 Reply::NotAdmitted
             }
             Ok(Err(error)) => {
-                tracing::debug!(device = %device.name, %error, "an exchange failed");
+                tracing::debug!(device = %device.name, ?error, "an exchange failed");
                 Reply::Silent
             }
             Err(_) => {
@@ -731,7 +729,7 @@ pub async fn once(dial: &impl Dial, peer: NodeId) -> Option<Answer> {
     match tokio::time::timeout(EACH, dial.exchange(peer)).await {
         Ok(Ok(answer)) => Some(answer),
         Ok(Err(error)) => {
-            tracing::debug!(%error, "the stale-list exchange failed");
+            tracing::debug!(?error, "the stale-list exchange failed");
             None
         }
         Err(_) => {

@@ -1338,9 +1338,16 @@ where
     let (result, shown) = {
         // Every borrower and the sweep end inside this scope, before the endpoint's awaited close.
         let peers = swoosh::peers::Peers::new(node);
+        // The pick-up and the stale-list exchange present this home's standing, never the verb's slip.
+        let own = swoosh::streams::OwnBind::new(
+            &peers,
+            home,
+            node.node_id(),
+            &credential::Credential::Family { present: None },
+        );
         let run = async {
             if let Some(renew) = renew {
-                let fetch = swoosh::renewal::NodeFetch::new(&peers);
+                let fetch = swoosh::renewal::SourceFetch::new(&own);
                 reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
                 match reaching::resolve(renew.credential, node.node_id(), home).await {
                     Ok(resolved) => (ctx.present, ctx.membership) = resolved.into_slots(),
@@ -1352,7 +1359,7 @@ where
                 node,
                 ctx,
                 &peers,
-                &swoosh::sync::NodeDial::new(&peers, home),
+                &swoosh::sync::SourceDial::new(&own, home),
             )
             .await
         };
@@ -1387,6 +1394,9 @@ struct Renew {
 #[cfg(test)]
 #[path = "bearer_dial_tests.rs"]
 mod bearer_dial_tests;
+#[cfg(test)]
+#[path = "exchange_tests.rs"]
+mod exchange_tests;
 #[cfg(test)]
 #[path = "iroh_group_tests.rs"]
 mod iroh_group_tests;

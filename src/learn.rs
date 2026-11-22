@@ -18,7 +18,7 @@ use core::time::Duration;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use bifrost::{ConnInfo, Discovery, Node, NodeId, PathChanges, Session, Transport};
+use bifrost::{ConnInfo, NodeId, PathChanges, Session};
 use futures::StreamExt as _;
 use futures::future::LocalBoxFuture;
 use nauthy::{Link, Service};
@@ -131,22 +131,6 @@ impl Found {
     }
 }
 
-/// Ask `asked`'s machine which root vouches for it, over a connection of its own on `node`: the root its
-/// standing names, when the standing verifies. For `sync`, which holds no other session to the machine; a
-/// dial asks beside its own streams instead ([`Admitted`]). `None` on a miss, a failure, or a standing
-/// that teaches nothing; never an error, since nothing else depends on it.
-pub async fn ask<T: Transport, D: Discovery>(node: &Node<T, D>, asked: &Asked) -> Option<Shown> {
-    let session = match node.connect(asked.key).await {
-        Ok(session) => session,
-        Err(error) => {
-            tracing::debug!(%error, "the root lookup could not reach the machine");
-            return None;
-        }
-    };
-    let standing = answer(&session).await?;
-    asked.taught(&standing)
-}
-
 /// Open the root route to `key` through `source`, presenting nothing, on Main, and read its one answer:
 /// the standing on a hit, `None` on a miss. A refusal of any kind is the same miss to the asker, as on
 /// [`ask_on`].
@@ -171,7 +155,7 @@ pub async fn ask_through(
     let opened = match source.open(&ask).await {
         Ok(opened) => opened,
         Err(Unopened::Refused(_)) => return Ok(None),
-        Err(other) => return Err(eyre::eyre!("the root lookup opened no stream: {other:?}").into()),
+        Err(other) => return Err(FetchError::Unopened(other)),
     };
     crate::renewal::read_answer(opened.read).await
 }
@@ -240,18 +224,21 @@ pub fn unrooted(contacts: &Contacts) -> Vec<Asked> {
         .collect()
 }
 
-/// Ask every machine in `machines` on `node`, [`AT_ONCE`] at a time and each within [`EACH`]: the roots
-/// they showed, in the order given. A machine that does not answer is left out, silently.
-pub async fn sweep<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
-    machines: Vec<Asked>,
-) -> Vec<Shown> {
+/// Ask every machine in `machines` through `source`, [`AT_ONCE`] at a time and each within [`EACH`]: the
+/// roots they showed, in the order given. A machine that does not answer is left out, silently.
+pub async fn sweep(source: &impl StreamSource, machines: Vec<Asked>) -> Vec<Shown> {
     let mut asked: Vec<(usize, Shown)> = futures::stream::iter(machines.into_iter().enumerate())
         .map(|(at, asked)| async move {
-            tokio::time::timeout(EACH, ask(node, &asked))
-                .await
-                .ok()
-                .flatten()
+            let standing = match tokio::time::timeout(EACH, ask_through(source, asked.key)).await {
+                Ok(Ok(standing)) => standing,
+                Ok(Err(error)) => {
+                    tracing::debug!(?error, "the root lookup failed");
+                    None
+                }
+                Err(_elapsed) => None,
+            };
+            standing
+                .and_then(|standing| asked.taught(&standing))
                 .map(|shown| (at, shown))
         })
         .buffer_unordered(AT_ONCE)

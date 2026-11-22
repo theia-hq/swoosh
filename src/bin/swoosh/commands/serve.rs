@@ -705,8 +705,16 @@ impl ServeCmd {
             std::sync::Arc::clone(&stop_source),
         ));
 
-        let dial = swoosh::sync::NodeDial::new(peers, &home);
-        let fetch = swoosh::renewal::NodeFetch::new(peers);
+        // The rounds and the renewal before an Open ride this run's own sessions, presenting this home's
+        // standing as it reads at each open, never a slip.
+        let own = swoosh::streams::OwnBind::new(
+            peers,
+            &home,
+            addr.node,
+            &swoosh::credential::Credential::Family { present: None },
+        );
+        let dial = swoosh::sync::SourceDial::new(&own, &home);
+        let fetch = swoosh::renewal::SourceFetch::new(&own);
         // The renewal an Open waits for, and what answers Opens on the control socket. Built before the
         // banner, since drawing the epoch for its references can fail, and serve announces only what runs.
         let renewal = swoosh::renewal::OpenRenewal::new(&home, &fetch);

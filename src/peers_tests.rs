@@ -26,9 +26,10 @@ use super::{
     ISOLATED_CONNECTIONS, Key, MAIN_OPEN_TIMEOUT, MAIN_STREAMS, OPEN_TIMEOUT, OpenError, Peers,
 };
 use crate::home::Home;
-use crate::renewal::{Fetch as _, NodeFetch};
+use crate::renewal::{Fetch as _, SourceFetch};
 use crate::serve::{RENEWAL_SERVICE, SYNC_SERVICE};
-use crate::sync::{Dial as _, NodeDial};
+use crate::streams::OwnBind;
+use crate::sync::{Dial as _, SourceDial};
 use crate::testkit::{Script, ScriptedPeer, TestNode, TestRoot, TestWrite};
 
 #[tokio::test]
@@ -37,13 +38,15 @@ async fn credentialed_exchange_and_none_pickup_use_separate_sessions() {
     let node = Node::new(probe.clone(), NoDiscovery);
     let home = scratch("cohorts");
     let peers = Peers::new(&node);
-    let dial = NodeDial::new(&peers, &home);
-    let fetch = NodeFetch::new(&peers);
+    let own = OwnBind::new(&peers, &home, node.node_id(), &FAMILY);
+    let dial = SourceDial::new(&own, &home);
+    let fetch = SourceFetch::new(&own);
     let first = badge(1);
+    pinned(&home);
     crate::config::write_badge(&crate::testkit::lock(), &home, &first).unwrap();
-    // The gate admits the stream; this deliberately unprovisioned home cannot run the exchange body.
+    // The gate admits the stream; the probe answers no exchange, so the body fails.
     assert!(dial.exchange(peer()).await.is_err());
-    // The gate admits the stream; this deliberately unprovisioned home cannot run the exchange body.
+    // The gate admits the stream; the probe answers no exchange, so the body fails.
     assert!(dial.exchange(peer()).await.is_err());
     assert_eq!(probe.state.dials.get(), 1);
     assert!(fetch.fetch(peer()).await.unwrap().is_none());
@@ -55,7 +58,7 @@ async fn credentialed_exchange_and_none_pickup_use_separate_sessions() {
         2,
         "NONE survives badge replacement"
     );
-    // The gate admits the stream; this deliberately unprovisioned home cannot run the exchange body.
+    // The gate admits the stream; the probe answers no exchange, so the body fails.
     assert!(dial.exchange(peer()).await.is_err());
     assert_eq!(
         probe.state.dials.get(),
@@ -82,8 +85,10 @@ async fn credentialed_key_and_slots_use_one_badge_snapshot() {
     let peers = Peers::new(&node);
     let home = scratch("snapshot");
     let first = badge(1);
+    pinned(&home);
     crate::config::write_badge(&crate::testkit::lock(), &home, &first).unwrap();
-    let dial = NodeDial::new(&peers, &home);
+    let own = OwnBind::new(&peers, &home, node.node_id(), &FAMILY);
+    let dial = SourceDial::new(&own, &home);
     let exchange = dial.exchange(peer());
     tokio::pin!(exchange);
     // Async file reads may yield before the dial barrier. Poll until the transport records the dial,
@@ -118,13 +123,14 @@ async fn none_fetch_performs_zero_badge_reads() {
         .device_badge(peer(), SystemTime::UNIX_EPOCH)
         .unwrap();
     crate::config::write_badge(&crate::testkit::lock(), &home, &expired).unwrap();
-    let fetch = NodeFetch::new(&peers);
+    let own = OwnBind::new(&peers, &home, node.node_id(), &FAMILY);
+    let fetch = SourceFetch::new(&own);
     assert!(fetch.fetch(peer()).await.unwrap().is_none());
     std::fs::write(home.key_cert(), b"malformed").unwrap();
     assert!(fetch.fetch(peer()).await.unwrap().is_none());
     std::fs::remove_file(home.key_cert()).unwrap();
     std::fs::create_dir(home.key_cert()).unwrap();
-    assert!(NodeDial::new(&peers, &home).exchange(peer()).await.is_err());
+    assert!(SourceDial::new(&own, &home).exchange(peer()).await.is_err());
     assert!(fetch.fetch(peer()).await.unwrap().is_none());
     std::fs::remove_dir(home.key_cert()).unwrap();
     // A read-only FIFO descriptor records whether any reader opened the badge, without ever allowing
@@ -1353,7 +1359,9 @@ async fn live_none_survives(end: StandingEnd) {
     let cancel = CancellationToken::new();
     let exercise = async {
         let peers = Peers::new(&node);
-        let fetch = NodeFetch::new(&peers);
+        let home = scratch("held-renewal");
+        let own = OwnBind::new(&peers, &home, node.node_id(), &FAMILY);
+        let fetch = SourceFetch::new(&own);
         let (mut write, mut read) = peers
             .open(
                 host.node_id(),
@@ -2251,6 +2259,12 @@ fn main_carry(standing: Option<String>) -> Carry {
         standing,
     }
 }
+/// Pin `home` at the root that signs [`badge`], so the badge stored beside it is this node's standing
+/// as an open reads it.
+fn pinned(home: &Home) {
+    crate::config::write_signet(&crate::testkit::lock(), home, TestRoot::seeded(1).node_id())
+        .unwrap();
+}
 fn scratch(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!(
         "swoosh-peers-{tag}-{}-{:?}",
@@ -2391,3 +2405,7 @@ impl Session for ProbeSession {
         PathChanges::fixed(Path::Unknown)
     }
 }
+
+/// What every exchange presents: this home's standing, never a slip.
+const FAMILY: crate::credential::Credential =
+    crate::credential::Credential::Family { present: None };
