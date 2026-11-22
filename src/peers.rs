@@ -34,6 +34,11 @@ use tightbeam::tunnel::{Connector, WrongPeer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Instant;
 
+use crate::credential::Credential;
+use crate::home::Home;
+use crate::reaching::ResolveError;
+use crate::serve::PROVEN_ROUTES;
+
 pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 // A Bulk or Isolated open's deadline. Neither caller waits on its open with anything racing it, so the
 // open itself bounds how long a silent session, or a fresh isolated connection, is kept.
@@ -207,6 +212,57 @@ impl Presents {
     }
 }
 
+/// What a stream to `service` presents, on both paths a stream to a peer can take: the slip when there
+/// is one, nothing on a proven-only route, else this home's standing as it reads now for the machine
+/// `this`, so a standing renewed meanwhile is the one the next stream presents.
+///
+/// # Errors
+///
+/// [`Unpresentable::Ended`] when the stored badge is past its date, and [`Unpresentable::Unreadable`]
+/// when the home or the badge cannot be read.
+// `core::io::sink` is still unstable, so the sink for the warning comes from `std`.
+#[allow(clippy::std_instead_of_core)]
+pub async fn presents(
+    home: &Home,
+    this: NodeId,
+    service: &Service,
+    slip: Option<Link>,
+) -> Result<Presents, Unpresentable> {
+    if slip.is_none() && PROVEN_ROUTES.contains(&service.as_str()) {
+        return Ok(Presents::Standing(None));
+    }
+    let slipped = slip.is_some();
+    // The expiring-badge line is the verb's to print, never the stream's, once per stream.
+    let mut no_warning = std::io::sink();
+    let resolved = crate::reaching::resolve_to(
+        Credential::Family { present: slip },
+        this,
+        home,
+        &mut no_warning,
+    )
+    .await
+    .map_err(|error| {
+        tracing::debug!(error = %error, "an open's standing could not be presented");
+        match error {
+            ResolveError::Ended { .. } => Unpresentable::Ended,
+            ResolveError::Unreadable(report) => Unpresentable::Unreadable(report),
+        }
+    })?;
+    Ok(match (slipped, resolved.into_slots()) {
+        (true, (Some(slip), membership)) => Presents::Slip { slip, membership },
+        (_, (grant, _)) => Presents::Standing(grant),
+    })
+}
+
+/// Why [`presents`] has nothing to present. Each path words it its own way, so it carries no text.
+#[derive(Debug)]
+pub enum Unpresentable {
+    /// This home's badge has ended: every family gate would refuse it.
+    Ended,
+    /// This home or its badge could not be read; the cause, for the log.
+    Unreadable(eyre::Report),
+}
+
 /// Why [`Peers`] handed back no stream or connection. `Busy` and `Timeout` are this owner's own bounds,
 /// typed so a caller matches them rather than an io kind.
 #[derive(Debug, thiserror::Error)]
@@ -289,8 +345,8 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         (
             ConnInfo,
             SessionEnd<T::Session>,
-            impl AsyncWrite + Unpin + use<'_, 'n, T, D>,
-            impl AsyncRead + Unpin + use<'_, 'n, T, D>,
+            Half<<T::Session as Session>::Write, T::Session>,
+            Half<<T::Session as Session>::Read, T::Session>,
         ),
         OpenError,
     > {
@@ -329,8 +385,8 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
         (
             ConnInfo,
             SessionEnd<T::Session>,
-            impl AsyncWrite + WriteEnd + Unpin + use<'_, 'n, T, D>,
-            impl AsyncRead + Unpin + use<'_, 'n, T, D>,
+            Half<<T::Session as Session>::Write, T::Session>,
+            Half<<T::Session as Session>::Read, T::Session>,
         ),
         OpenError,
     > {
@@ -358,7 +414,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                     entry.opened.set(Some(Instant::now()));
                     let info = entry.session.conn_info();
                     // The reservation transfers to the pair, not to either half alone.
-                    let lease = Rc::new(Lease {
+                    let lease = Rc::new(Lease::Lane {
                         _active: active,
                         _budget: budget,
                     });
@@ -681,9 +737,11 @@ impl Drop for Budget {
     }
 }
 
-struct Lease<S: Session> {
-    _active: Active<S>,
-    _budget: Budget,
+/// What a stream's two halves hold between them, given back once both have dropped: its place on a held
+/// lane and its session's activity, or the isolated connection it rides, which closes then.
+enum Lease<S: Session> {
+    Lane { _active: Active<S>, _budget: Budget },
+    Isolated { _connection: Isolated<S> },
 }
 
 struct Active<S: Session> {
@@ -740,7 +798,9 @@ impl<S: Session> Clone for SessionEnd<S> {
     }
 }
 
-struct Half<H, S: Session> {
+/// One half of a stream [`Peers`] handed out. The two halves share the stream's lease, so its place, or
+/// its isolated connection, is held until both have dropped.
+pub struct Half<H, S: Session> {
     inner: H,
     _lease: Rc<Lease<S>>,
 }
@@ -800,6 +860,26 @@ impl<S: Session> Isolated<S> {
     /// toward no per-peer cap, so a caller keeping it bounds it by a cap of its own.
     pub(crate) fn release_place(&self) {
         drop(self.budget.take());
+    }
+
+    /// Hand out `write` and `read`, a stream opened on this connection, as halves that hold the
+    /// connection between them: it stays open, and keeps its place, until both have dropped.
+    pub(crate) fn lend(
+        self,
+        write: S::Write,
+        read: S::Read,
+    ) -> (Half<S::Write, S>, Half<S::Read, S>) {
+        let lease = Rc::new(Lease::Isolated { _connection: self });
+        (
+            Half {
+                inner: write,
+                _lease: Rc::clone(&lease),
+            },
+            Half {
+                inner: read,
+                _lease: lease,
+            },
+        )
     }
 }
 

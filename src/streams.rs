@@ -1,0 +1,477 @@
+//! One admitted stream to a peer's service, from whichever path this run reaches peers by: its own bind,
+//! over the run's [`Peers`], or a running resident, over this home's control socket.
+//!
+//! A verb asks a [`StreamSource`] for each stream it needs and gets back the two halves the peer
+//! admitted, or why it got none, kept typed ([`Unopened`]) so each path prints its own line for it. A
+//! stream presents the same thing on both paths ([`presents`]): the link typed as the peer, nothing on a
+//! proven-only route, else this home's standing as it reads at that open. An `anyone` run's own bind
+//! presents the link alone and reads nothing of the home.
+
+use core::cell::Cell;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
+use std::rc::Rc;
+
+use bifrost::{ConnInfo, Discovery, NodeId, Session, Transport, WriteEnd};
+use nauthy::{Link, Service};
+use tokio::io::{self, AsyncRead, AsyncWrite};
+
+use crate::credential::Credential;
+use crate::home::Home;
+use crate::node_client::{self, Connected, UidSocket};
+use crate::observation::{Observer, Receipt};
+use crate::peers::{
+    Half, Hints, Lane, OPEN_TIMEOUT, OpenError, Peers, Presents, Unpresentable, presents,
+};
+use crate::serve::control_codec::{
+    ControlError, MalformedOpen, Observation, OpenLane, OpenRead, OpenRefusal, OpenRequest,
+    OpenWrite, PathRef, PeerRefusal,
+};
+
+/// One stream asked for: the peer, where to try it first, the service, the lane, and the link typed as
+/// the peer, if one was.
+///
+/// No `Debug`: the slip is a credential, and no log line needs it.
+pub struct Ask {
+    /// The machine to reach.
+    pub peer: NodeId,
+    /// Addresses a dial this stream starts tries first. Built by the caller, which reports a list that
+    /// is not one open's hints where it was typed.
+    pub hints: Hints,
+    /// The service to open.
+    pub service: Service,
+    /// The lane the stream rides.
+    pub lane: OpenLane,
+    /// The link typed as the peer, presented in place of this home's standing. Cloned for each open,
+    /// never taken: a peer that admits only the link refuses a stream without it.
+    pub slip: Option<Link>,
+}
+
+/// One admitted stream: the path its connection rode as it attached, and its two halves.
+pub struct Opened<W, R> {
+    /// The connection's path report, read as the stream attached.
+    pub info: ConnInfo,
+    /// The bytes toward the peer; `shutdown` is the upload's clean end.
+    pub write: W,
+    /// The peer's bytes.
+    pub read: R,
+}
+
+/// Why [`StreamSource::open`] gave no stream, kept typed so each path prints its own line for it. It
+/// carries no text of its own.
+#[derive(Debug)]
+pub enum Unopened {
+    /// The peer's typed refusal, on both paths, or the resident's own (`Busy`, `StandingEnded`,
+    /// `NotHere`, `Unreachable`, `Timeout`, `Broken`, `PeerUnreadable`).
+    Refused(OpenRefusal),
+    /// By own bind: the open failed on this run's lane cap, its deadline, the dial, or a broken stream.
+    /// A peer's refusal never lands here: it is [`Refused`](Self::Refused).
+    Own(OpenError),
+    /// By own bind: this home or its badge could not be read to present.
+    Home(eyre::Report),
+    /// Through the resident: its bounded Error reply.
+    ServeError(String),
+    /// Through the resident: none answers (the connect refused and `serve.lock` is free), one of
+    /// another version answers after this run's first open attached, so the run's is gone, or the
+    /// control connection was cut before its reply and none answers now.
+    ServeGone,
+    /// Through the resident: the run's first open met one of another version.
+    Skew,
+    /// Through the resident: the ask cannot be put as an Open (its slip addresses another machine), so
+    /// no request was sent.
+    Malformed(MalformedOpen),
+    /// Through the resident: the control connection failed before its reply.
+    Control(ControlError),
+}
+
+impl Unopened {
+    /// Whether every later open of this run would repeat this, so the run ends here, a listener's run
+    /// included. The peer's `NotAdmitted` is a ruling on this machine the wire says not to
+    /// retry, an ended standing's remedy is the person's, the peer being this machine and a malformed
+    /// Open both belong to the fixed ask, and with no resident there is none to ask. Anything else
+    /// belongs to that one stream. A verb with a fixed set of streams may end on more.
+    pub fn ends_run(&self) -> bool {
+        match self {
+            Self::Refused(
+                OpenRefusal::Peer(PeerRefusal::NotAdmitted)
+                | OpenRefusal::StandingEnded
+                | OpenRefusal::NotHere,
+            )
+            | Self::ServeGone
+            | Self::Skew
+            | Self::Malformed(_) => true,
+            Self::Refused(
+                OpenRefusal::Peer(PeerRefusal::BadRequest(_) | PeerRefusal::Unavailable(_))
+                | OpenRefusal::PeerUnreadable(_)
+                | OpenRefusal::Unreachable(_)
+                | OpenRefusal::Timeout
+                | OpenRefusal::Broken(_)
+                | OpenRefusal::Busy,
+            )
+            | Self::Own(_)
+            | Self::Home(_)
+            | Self::ServeError(_)
+            | Self::Control(_) => false,
+        }
+    }
+
+    /// Whether the machine was not reached, on either path: the dial failed or a deadline ran out. The
+    /// own bind's `Timeout` is here because the resident folds that same event into its `Timeout`.
+    pub fn unreached(&self) -> bool {
+        matches!(
+            self,
+            Self::Own(OpenError::Unreachable(_) | OpenError::Timeout)
+                | Self::Refused(OpenRefusal::Unreachable(_) | OpenRefusal::Timeout)
+        )
+    }
+}
+
+impl From<OpenError> for Unopened {
+    /// The peer's refusal as the typed refusal both paths share; any other failure as the own bind's.
+    fn from(error: OpenError) -> Self {
+        match error {
+            OpenError::Open(bifrost::Error::Refused(refusal)) => {
+                Self::Refused(OpenRefusal::from(refusal))
+            }
+            other => Self::Own(other),
+        }
+    }
+}
+
+/// Where a verb's streams come from: one admitted stream per [`open`](Self::open).
+///
+/// Written as a returned `impl Future`, not `async fn`, so the trait states no auto-trait bound it does
+/// not need; the impls stay plain `async fn`.
+pub trait StreamSource {
+    /// The bytes toward the peer.
+    type Write: AsyncWrite + WriteEnd + Unpin;
+    /// The peer's bytes.
+    type Read: AsyncRead + Unpin;
+
+    /// One admitted stream to `ask.peer`'s `ask.service` on `ask.lane`, presenting what [`presents`]
+    /// says for it, or, by an `anyone` run's own bind, the link alone.
+    fn open(
+        &self,
+        ask: &Ask,
+    ) -> impl Future<Output = Result<Opened<Self::Write, Self::Read>, Unopened>>;
+}
+
+// A borrowed source opens as the source does, so a caller that hands one out by copy can lend it.
+impl<S: StreamSource> StreamSource for &S {
+    type Write = S::Write;
+    type Read = S::Read;
+
+    fn open(
+        &self,
+        ask: &Ask,
+    ) -> impl Future<Output = Result<Opened<Self::Write, Self::Read>, Unopened>> {
+        S::open(self, ask)
+    }
+}
+
+/// The streams of a run that bound its own endpoint: each rides the run's [`Peers`], presenting what
+/// [`presents`] reads from `home` for the machine `this`, or, for an `anyone` run, the link alone.
+pub struct OwnBind<'p, 'n, T: Transport, D: Discovery> {
+    peers: &'p Peers<'n, T, D>,
+    home: &'p Home,
+    this: NodeId,
+    presenting: Presenting,
+}
+
+/// What each open of an own bind presents, fixed by the run's [`Credential`]: the same value that chose
+/// the key the run bound, so the bind and what rides it cannot disagree.
+#[derive(Clone, Copy)]
+enum Presenting {
+    /// This home's standing, or the slip with this home's badge beside it, as [`presents`] reads them.
+    Home,
+    /// The link typed as the peer alone, under a throwaway key: no read of this home, so nothing of it
+    /// travels with the link, and a home that cannot be read stops nothing.
+    Alone,
+}
+
+impl<'p, 'n, T: Transport, D: Discovery> OwnBind<'p, 'n, T, D> {
+    /// The streams `peers` opens for the run bound as `this` with `credential`, presenting from `home`
+    /// unless the credential presents alone.
+    pub fn new(
+        peers: &'p Peers<'n, T, D>,
+        home: &'p Home,
+        this: NodeId,
+        credential: &Credential,
+    ) -> Self {
+        let presenting = match credential {
+            Credential::Family { .. } => Presenting::Home,
+            Credential::Anyone(_) => Presenting::Alone,
+        };
+        Self {
+            peers,
+            home,
+            this,
+            presenting,
+        }
+    }
+
+    /// What `ask` presents on this bind: an `anyone` run's slip alone, read from nothing, else what
+    /// [`presents`] reads from the home now.
+    async fn presents(&self, ask: &Ask) -> Result<Presents, Unopened> {
+        let slip = Option::clone(&ask.slip);
+        match self.presenting {
+            Presenting::Alone => Ok(match slip {
+                Some(slip) => Presents::Slip {
+                    slip,
+                    membership: None,
+                },
+                None => Presents::Standing(None),
+            }),
+            Presenting::Home => presents(self.home, self.this, &ask.service, slip)
+                .await
+                .map_err(|unpresentable| match unpresentable {
+                    Unpresentable::Ended => Unopened::Refused(OpenRefusal::StandingEnded),
+                    Unpresentable::Unreadable(report) => Unopened::Home(report),
+                }),
+        }
+    }
+
+    /// One stream on a connection of its own, which the stream's halves hold between them: it closes
+    /// once both have dropped.
+    async fn isolated(
+        &self,
+        ask: &Ask,
+        presents: Presents,
+    ) -> Result<Opened<<Self as StreamSource>::Write, <Self as StreamSource>::Read>, Unopened> {
+        let connection = self.peers.isolated(ask.peer, ask.hints.clone()).await?;
+        let connector = presents.connector(ask.peer, Service::clone(&ask.service));
+        // Bulk's deadline: nothing is evicted and nothing races this open.
+        let (write, read) =
+            match tokio::time::timeout(OPEN_TIMEOUT, connector.open_on(&connection)).await {
+                Ok(Ok(halves)) => halves,
+                Ok(Err(error)) => return Err(OpenError::Open(error).into()),
+                Err(_elapsed) => return Err(Unopened::Own(OpenError::Timeout)),
+            };
+        let info = connection.conn_info();
+        let (write, read) = connection.lend(write, read);
+        Ok(Opened { info, write, read })
+    }
+}
+
+// By hand: the endpoint's types need not be `Clone` for a borrow of them to be.
+impl<T: Transport, D: Discovery> Clone for OwnBind<'_, '_, T, D> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Transport, D: Discovery> Copy for OwnBind<'_, '_, T, D> {}
+
+impl<T: Transport, D: Discovery> StreamSource for OwnBind<'_, '_, T, D> {
+    type Write = Half<<T::Session as Session>::Write, T::Session>;
+    type Read = Half<<T::Session as Session>::Read, T::Session>;
+
+    async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
+        let presents = self.presents(ask).await?;
+        let lane = match ask.lane {
+            OpenLane::Main => Lane::Main,
+            OpenLane::Bulk => Lane::Bulk,
+            OpenLane::Isolated => return self.isolated(ask, presents).await,
+        };
+        let (info, _end, write, read) = self
+            .peers
+            .open_attached(
+                ask.peer,
+                ask.hints.clone(),
+                Service::clone(&ask.service),
+                lane,
+                presents,
+            )
+            .await?;
+        Ok(Opened { info, write, read })
+    }
+}
+
+/// The streams of a run through the resident at this home's control socket: each is one Open there, on
+/// a control connection of its own, since an Open spends the connection it rides.
+pub struct Resident {
+    socket: Rc<UidSocket>,
+    /// Whether an Open of this run has attached, so a resident of another version answering now is a
+    /// restarted one and the run's is gone.
+    // A `Cell`: opens run through `&self` on one task.
+    attached: Cell<bool>,
+}
+
+impl Resident {
+    /// The streams the resident at `socket` opens.
+    pub fn new(socket: Rc<UidSocket>) -> Self {
+        Self {
+            socket,
+            attached: Cell::new(false),
+        }
+    }
+
+    /// Send `ask` as an Open on `connected`, asking for a reference to its connection when `observation`
+    /// says so: the stream with its write half as the socket gives it, and the reference.
+    ///
+    /// # Errors
+    ///
+    /// The resident's or the peer's refusal, its Error reply, another version answering ([`Skew`]), or
+    /// the control connection failing before its reply.
+    ///
+    /// [`Skew`]: Unopened::Skew
+    pub async fn attach(
+        connected: Connected,
+        ask: &Ask,
+        observation: Observation,
+    ) -> Result<(Opened<OpenWrite, OpenRead>, Option<PathRef>), Unopened> {
+        let request = OpenRequest::new(
+            ask.peer,
+            ask.hints.clone(),
+            Service::clone(&ask.service),
+            ask.lane,
+            Option::clone(&ask.slip),
+        )
+        .map_err(Unopened::Malformed)?;
+        let request = match observation {
+            Observation::Unobserved => request,
+            Observation::Observed => request.observed(),
+        };
+        match connected.open(request).await {
+            Ok(node_client::Opened::Attached {
+                info,
+                reference,
+                read,
+                write,
+            }) => Ok((Opened { info, write, read }, reference)),
+            Ok(node_client::Opened::Refused(refusal)) => Err(Unopened::Refused(refusal)),
+            Ok(node_client::Opened::Error(reason)) => Err(Unopened::ServeError(reason)),
+            Err(ControlError::Version { .. }) => Err(Unopened::Skew),
+            Err(error) => Err(Unopened::Control(error)),
+        }
+    }
+
+    /// Send `ask` as an observed Open on `connected`: the stream, and the observer that follows its
+    /// connection through this socket, read from the Attached report on.
+    ///
+    /// # Errors
+    ///
+    /// As [`attach`](Self::attach).
+    pub async fn observed(
+        &self,
+        connected: Connected,
+        ask: &Ask,
+    ) -> Result<(Opened<OpenWrite, OpenRead>, Observer), Unopened> {
+        let (opened, reference) = Self::attach(connected, ask, Observation::Observed).await?;
+        // The client hands out no halves on an Attached whose reference does not match the Open.
+        let Some(reference) = reference else {
+            return Err(Unopened::Control(ControlError::Protocol(
+                "attached lacks the requested path reference".to_owned(),
+            )));
+        };
+        let observer = Observer::new(
+            Receipt::new(reference, Rc::clone(&self.socket)),
+            opened.info.clone(),
+        );
+        self.attached.set(true);
+        Ok((opened, observer))
+    }
+}
+
+impl StreamSource for Resident {
+    type Write = Upload;
+    type Read = OpenRead;
+
+    async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
+        let connected = match self.socket.connected().await {
+            Ok(connected) => connected,
+            Err(ControlError::NoResident) if self.socket.lock_free().await => {
+                return Err(Unopened::ServeGone);
+            }
+            Err(error) => return Err(Unopened::Control(error)),
+        };
+        match Self::attach(connected, ask, Observation::Unobserved).await {
+            Ok((Opened { info, write, read }, _unobserved)) => {
+                self.attached.set(true);
+                Ok(Opened {
+                    info,
+                    write: Upload::from(write),
+                    read,
+                })
+            }
+            Err(Unopened::Skew) if self.attached.get() => Err(Unopened::ServeGone),
+            Err(Unopened::Control(error)) if self.socket.gone().await => {
+                tracing::debug!(%error, "an open through serve was cut before its reply, and serve is gone");
+                Err(Unopened::ServeGone)
+            }
+            Err(unopened) => Err(unopened),
+        }
+    }
+}
+
+/// The write half of a stream through the resident, as a transport's: Data frames, and End at its
+/// `shutdown`. Aborted, or dropped before `shutdown`, it closes the direction with no End, which the
+/// resident passes on to the peer as a reset. Its `delivered` never resolves: the word that the peer
+/// holds the upload is the read half's.
+pub struct Upload(Option<OpenWrite>);
+
+impl From<OpenWrite> for Upload {
+    fn from(write: OpenWrite) -> Self {
+        Self(Some(write))
+    }
+}
+
+impl Upload {
+    fn half(&mut self) -> io::Result<Pin<&mut OpenWrite>> {
+        self.0
+            .as_mut()
+            .map(Pin::new)
+            .ok_or_else(|| io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+impl AsyncWrite for Upload {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut().half() {
+            Ok(half) => half.poll_write(cx, buf),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut().half() {
+            Ok(half) => half.poll_flush(cx),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut().half() {
+            Ok(half) => half.poll_shutdown(cx),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+}
+
+impl WriteEnd for Upload {
+    fn abort(&mut self) {
+        if let Some(write) = self.0.take() {
+            write.abort();
+        }
+    }
+
+    /// Never resolves: through the resident the word that the peer holds the upload is Landed, which
+    /// arrives on the read half ([`OpenRead::landed`]), out of this half's reach. Pending forever is the
+    /// answer the transport contract gives for a peer that never takes the bytes, so a caller's own bound
+    /// ends the wait; any error here would claim a reset, a stopped reader or a lost session that did not
+    /// happen. It writes no End, and it holds the half until the wait is dropped, so the direction ends
+    /// as the caller left it: cleanly after its `shutdown`, else as a cut once the caller gives up.
+    async fn delivered(self) -> io::Result<()> {
+        let _held = self;
+        core::future::pending().await
+    }
+}
+
+#[cfg(test)]
+#[path = "streams_tests.rs"]
+mod tests;
