@@ -951,11 +951,15 @@ pub(crate) struct Heard {
 }
 
 /// What a row holds of its scripted resident: `stop` ends it (it stops on its own once its answers run
-/// out, unless it went deaf), and `landed` is told each time it answers an upload's End with Landed.
+/// out, unless it went deaf), and `landed` is told each time it answers an upload's End with Landed. A
+/// [`routed`] resident orders its held replies by the other two: `held` once it hears an Open whose reply
+/// waits ([`Reply::AfterVersion`]), `versioned` once a client hung up on its [`Reply::VersionAfterHeld`].
 #[derive(Default)]
 pub(crate) struct Rig {
     pub(crate) stop: tightbeam::tunnel::CancellationToken,
     pub(crate) landed: std::sync::Arc<tokio::sync::Notify>,
+    held: tightbeam::tunnel::CancellationToken,
+    versioned: tightbeam::tunnel::CancellationToken,
 }
 
 /// A resident on `served`'s socket that reads one request per connection and answers each Open with the
@@ -1095,6 +1099,19 @@ pub(crate) enum Reply {
     Stall,
     /// Hear the Open and drop its connection with no reply, still serving.
     Hangup,
+    /// Reply as a `serve` of another control version only once an Open held by [`AfterVersion`] is
+    /// heard, so that Open was sent before the client read this reply.
+    ///
+    /// [`AfterVersion`]: Self::AfterVersion
+    VersionAfterHeld,
+    /// Hear the Open, and answer it as the inner [`Observed`] or [`Exchange`] only once a client hung up
+    /// on a [`VersionAfterHeld`] reply: the client had read it, so its record is made, while this Open's
+    /// run is still under way.
+    ///
+    /// [`Observed`]: Self::Observed
+    /// [`Exchange`]: Self::Exchange
+    /// [`VersionAfterHeld`]: Self::VersionAfterHeld
+    AfterVersion(Box<Reply>),
 }
 
 /// A resident on `served`'s socket that answers each Open by its service, as `reply` says, and every
@@ -1114,6 +1131,7 @@ pub(crate) fn routed(
     let lock = served.lock();
     let stop = rig.stop.clone();
     let landed = std::sync::Arc::clone(&rig.landed);
+    let (held_heard, versioned) = (rig.held.clone(), rig.versioned.clone());
     tokio::spawn(async move {
         let mut events = Vec::new();
         let mut held = Vec::new();
@@ -1171,6 +1189,55 @@ pub(crate) fn routed(
                         let landed = Some(std::sync::Arc::clone(&landed));
                         held.push((at, tokio::spawn(hold(conn, Some(download), landed))));
                     }
+                }
+                // Spawned, so the resident hears the Open it waits on. Each wait also ends at `stop`, so a
+                // client that never sends the other Open fails its row rather than hanging it.
+                Reply::VersionAfterHeld => {
+                    let (heard, versioned, stop) =
+                        (held_heard.clone(), versioned.clone(), stop.clone());
+                    held.push((
+                        at,
+                        tokio::spawn(async move {
+                            use tokio::io::AsyncReadExt as _;
+                            tokio::select! {
+                                () = heard.cancelled() => {}
+                                () = stop.cancelled() => return Vec::new(),
+                            }
+                            let _ = conn.write_all(b"SWC2").await;
+                            // The client hangs up once it has read the reply, and records it then.
+                            let mut sent = Vec::new();
+                            let _ = conn.read_to_end(&mut sent).await;
+                            versioned.cancel();
+                            sent
+                        }),
+                    ));
+                }
+                Reply::AfterVersion(reply) => {
+                    held_heard.cancel();
+                    let (versioned, stop) = (versioned.clone(), stop.clone());
+                    let landed = std::sync::Arc::clone(&landed);
+                    held.push((
+                        at,
+                        tokio::spawn(async move {
+                            tokio::select! {
+                                () = versioned.cancelled() => {}
+                                () = stop.cancelled() => return Vec::new(),
+                            }
+                            let (reference, download, landed) = match *reply {
+                                Reply::Observed => (Some(reference().await), None, None),
+                                Reply::Exchange(download) => (None, Some(download), Some(landed)),
+                                _ => panic!("only an attaching reply waits on another's version"),
+                            };
+                            let attached = Attached {
+                                reference,
+                                info: direct(),
+                            };
+                            match Response::Attached(attached).write(&mut conn).await {
+                                Ok(()) => hold(conn, download, landed).await,
+                                Err(_) => Vec::new(),
+                            }
+                        }),
+                    ));
                 }
             }
         }
