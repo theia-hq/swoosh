@@ -1315,6 +1315,58 @@ async fn a_refused_send_to_your_device_ends_with_one_refusal() {
     assert_eq!(asked, ["recv", "control.services"]);
 }
 
+/// A `serve` that takes an Open and then answers nothing, a status included, has stalled: every file would
+/// stall on it. The first file to confirm it ends the run with the stall's two lines, once and with no
+/// `skip` before them, and no file's Open follows; files already sent stay sent.
+#[tokio::test]
+async fn a_stalled_serve_ends_a_send_once() {
+    tokio::time::pause();
+    let (dir, paths) = files("wedged", 3);
+    let mut argv: Vec<&str> = paths.iter().map(String::as_str).collect();
+    argv.push("me/nas");
+    let cmd = send(&argv);
+    let contacts = book();
+    let peer = typed(&contacts, "me/nas");
+    let mut served = Served::new("send-wedged").await;
+    let rig = Rig::default();
+    let resident = scripted(&mut served, vec![Answer::Wedge], &rig);
+    let socket = Rc::new(swoosh::node_client::UidSocket::resolve(&served.home).unwrap());
+    let source = swoosh::streams::Tracked::new(
+        Resident::new(Rc::clone(&socket)),
+        std::collections::HashMap::new(),
+    );
+    let dial = Dial {
+        machine: &peer,
+        service: &cmd.service,
+        slip: None,
+        reach: &cmd.reach,
+        contacts: &contacts,
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let ended = tokio::time::timeout(
+        core::time::Duration::from_secs(600),
+        cmd.through(
+            &source,
+            &dial,
+            &socket,
+            &peer,
+            Admitted::unheard(),
+            &mut out,
+            &mut err,
+        ),
+    )
+    .await
+    .expect("the run ended");
+    rig.stop.cancel();
+    let _ = std::fs::remove_dir_all(dir);
+    let report = ended.expect_err("a stalled serve ends the run non-zero");
+    assert!(report.is::<through_serve::Unresponsive>(), "{report:#}");
+    assert_eq!(String::from_utf8(err).unwrap(), "", "no skip line");
+    assert!(sent_names(&String::from_utf8(out).unwrap()).is_empty());
+    let heard = resident.await.unwrap();
+    assert_eq!(file_opens(&heard).len(), 1, "no Open after the stall");
+}
+
 /// A live `serve` that refuses a connect while it holds its lock skips each file with the cut's line,
 /// never that `serve` is not running.
 #[tokio::test]

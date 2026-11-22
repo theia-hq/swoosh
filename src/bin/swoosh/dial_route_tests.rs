@@ -320,8 +320,9 @@ fn assert_skew_once(error: Option<String>) {
 }
 
 /// Through `serve`, an Open beside the verb prints nothing and asks `serve` nothing: an exchange dropped
-/// unanswered when the verb ends, and a lookup that runs past its deadline. One that meets `serve` gone
-/// or of another version ends the run with that line once, after the verb's own.
+/// unanswered when the verb ends, a lookup that runs past its deadline, and either meeting another
+/// version of `serve`. One that meets `serve` gone or of another version ends the run with that line
+/// once, after the verb's own. The only status ask is the warning's, before the first Open.
 #[test]
 fn beside_opens_print_nothing_of_their_own() {
     on_a_big_stack(async || {
@@ -342,13 +343,17 @@ fn beside_opens_print_nothing_of_their_own() {
             let printed = dialed(&served.home, &["ping", "me/nas", "-c", "1"]).await;
             rig.stop.cancel();
             let events = resident.await.unwrap();
-            assert_eq!(statuses(&events), 0, "{exchange}: no status ask");
+            assert_eq!(statuses(&events), 1, "{exchange}: the warning's ask alone");
             assert_eq!(
                 opens(&events)
                     .iter()
                     .any(|open| open.service == "control.sync"),
                 exchange != "none",
                 "{exchange}: the exchange was made"
+            );
+            assert!(
+                matches!(events[0], Event::Status),
+                "{exchange}: asked first"
             );
             match &baseline {
                 None => baseline = Some(printed),
@@ -397,7 +402,7 @@ fn beside_opens_print_nothing_of_their_own() {
         }
 
         // The exchange cut before its reply: the cut is asked about once, as any cut is (`serve` may have
-        // gone), so one status ask follows; the ping's lines are still its own.
+        // gone), so a second status ask follows the warning's; the ping's lines are still its own.
         let mut served = a_device("beside-hangup", true).await;
         let rig = Rig::default();
         let resident = routed(
@@ -411,7 +416,7 @@ fn beside_opens_print_nothing_of_their_own() {
         let printed = dialed(&served.home, &["ping", "me/nas", "-c", "1"]).await;
         rig.stop.cancel();
         let events = resident.await.unwrap();
-        assert_eq!(statuses(&events), 1, "the cut's ask alone");
+        assert_eq!(statuses(&events), 2, "the warning's ask and the cut's");
         let mut fresh = a_device("beside-hangup-fresh", false).await;
         let rig = Rig::default();
         let resident = routed(&mut fresh, |_| unavailable(), &rig);
@@ -508,7 +513,7 @@ fn beside_opens_print_nothing_of_their_own() {
             rig.stop.cancel();
             let events = resident.await.unwrap();
             assert_eq!(printed.ok, lookup != "version", "{lookup}: {printed:?}");
-            assert_eq!(statuses(&events), 0, "{lookup}: no status ask");
+            assert_eq!(statuses(&events), 1, "{lookup}: the warning's ask alone");
             assert!(
                 opens(&events)
                     .iter()
@@ -533,5 +538,174 @@ fn beside_opens_print_nothing_of_their_own() {
                 Some(baseline) => assert_eq!(&printed, baseline, "{lookup}"),
             }
         }
+    });
+}
+
+/// A stderr the resident can read as it hears an Open.
+#[derive(Clone, Default)]
+struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Shared {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Shared {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+/// Through `serve`, a badge inside the warning window warns once, written before the first Open reaches
+/// `serve`, when `serve` runs as this machine's key. A `serve` that says it runs as another key reads no
+/// standing of its own here, so nothing warns: the key is `serve`'s, never read from this machine's files.
+#[test]
+fn the_warning_prints_before_the_first_open() {
+    use crate::commands::invite::invite_tests::{OWN, ROOT};
+
+    on_a_big_stack(async || {
+        let warning = "swoosh: this device's membership badge expires in";
+        let file = a_file("warn-order");
+        for argv in the_four("me/nas", &file, &[]) {
+            for (key, warns) in [(node(OWN), true), (node(NAS), false)] {
+                let mut served = a_device(&format!("warn-{}-{warns}", argv[0]), false).await;
+                let until = SystemTime::now() + Duration::from_secs(3 * 24 * 3600);
+                let badge = TestRoot::seeded(ROOT)
+                    .device_badge(node(OWN), until)
+                    .unwrap();
+                swoosh::config::write_badge(&swoosh::testkit::lock(), &served.home, &badge)
+                    .unwrap();
+                let err = Shared::default();
+                let first = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let rig = Rig {
+                    key: Some(key),
+                    heard: Some({
+                        let (err, first) = (err.clone(), std::sync::Arc::clone(&first));
+                        std::sync::Arc::new(move || {
+                            first
+                                .lock()
+                                .unwrap()
+                                .get_or_insert_with(|| err.text().contains(warning));
+                        })
+                    }),
+                    ..Rig::default()
+                };
+                let resident = routed(&mut served, |_| unavailable(), &rig);
+                let _ = dialed_to(&served.home, &words(&argv), ROW_BOUND, &mut err.clone()).await;
+                rig.stop.cancel();
+                resident.await.unwrap();
+                let printed = err.text();
+                assert_eq!(
+                    printed.matches(warning).count(),
+                    usize::from(warns),
+                    "{argv:?} {warns}: {printed}"
+                );
+                assert_eq!(
+                    *first.lock().unwrap(),
+                    Some(warns),
+                    "{argv:?} {warns}: written before the first Open: {printed}"
+                );
+            }
+        }
+    });
+}
+
+/// More files than run at once, to a `serve` that takes every Open and answers nothing more, a status
+/// included: the run ends on the first stall it confirms, with the stall's line once and no `skip`, and no
+/// file's Open follows the asks that confirmed it. A file sent before the stall stays sent. The run is
+/// bounded by the Open's own wait and the bounded asks: the warning's ask adds no more than theirs.
+#[test]
+fn a_stalled_serve_ends_a_send_of_many_files_once() {
+    on_a_big_stack(async || {
+        tokio::time::pause();
+        let dir =
+            std::env::temp_dir().join(format!("swoosh-dialroute-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for at in 0..=crate::commands::send::MAX_INFLIGHT {
+            std::fs::write(dir.join(format!("f{at:02}")), b"hello").unwrap();
+        }
+        for sends_first in [false, true] {
+            let mut served = bobs_contact(&format!("many-{sends_first}")).await;
+            // Wedged from the start, the warning's status ask too, unless a file is sent first.
+            let rig = Rig {
+                wedged: !sends_first,
+                ..Rig::default()
+            };
+            let mut acked = !sends_first;
+            let resident = routed(
+                &mut served,
+                move |service| match service {
+                    "recv" if !acked => {
+                        acked = true;
+                        Reply::Exchange(vec![1])
+                    }
+                    _ => Reply::Wedge,
+                },
+                &rig,
+            );
+            let started = tokio::time::Instant::now();
+            let printed = dialed_to(
+                &served.home,
+                &["send", dir.to_str().unwrap(), "bob/nas"],
+                Duration::from_secs(600),
+                &mut Vec::new(),
+            )
+            .await;
+            let took = started.elapsed();
+            rig.stop.cancel();
+            let events = resident.await.unwrap();
+            assert!(!printed.ok, "{sends_first}");
+            let error = printed.error.unwrap();
+            assert!(
+                error.starts_with("swoosh serve on this machine did not answer"),
+                "{error}"
+            );
+            assert_eq!(error.matches("did not answer").count(), 1, "{error}");
+            assert_eq!(
+                printed
+                    .out
+                    .lines()
+                    .filter(|line| line.starts_with("sent "))
+                    .count(),
+                usize::from(sends_first),
+                "{}",
+                printed.out
+            );
+            let recv = opens(&events)
+                .iter()
+                .filter(|open| open.service == "recv")
+                .count();
+            let most = crate::commands::send::MAX_INFLIGHT + usize::from(sends_first);
+            assert_eq!(
+                recv, most,
+                "{sends_first}: every file in flight, and no more"
+            );
+            // After the first status ask that follows an Open, no Open.
+            let asked = events
+                .iter()
+                .position(|event| matches!(event, Event::Open(_)))
+                .and_then(|first| {
+                    events[first..]
+                        .iter()
+                        .position(|event| matches!(event, Event::Status))
+                        .map(|at| first + at)
+                })
+                .expect("a status was asked after the Opens");
+            assert!(
+                !events[asked..]
+                    .iter()
+                    .any(|event| matches!(event, Event::Open(_))),
+                "{sends_first}: an Open after the stall was asked about"
+            );
+            assert!(took < Duration::from_secs(65), "{sends_first}: {took:?}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     });
 }

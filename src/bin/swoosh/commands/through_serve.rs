@@ -251,7 +251,9 @@ impl Dial<'_> {
 
     /// What an Open that attached nothing means to this dial: the resident's or the peer's refusal kept
     /// typed, else the line it prints. A control connection that failed before its reply is `serve`'s
-    /// own line when `serve` is gone, else a cut.
+    /// own line when `serve` is gone, else a cut. A reply that never came is [`Unresponsive`] only when
+    /// `serve` then fails a status too: a slow machine behind a `serve` that answers is never read as
+    /// `serve` stalled.
     pub(crate) async fn unopened(&self, unopened: Unopened, socket: &UidSocket) -> Unattached {
         match unopened {
             Unopened::Refused(refusal) => Unattached::Refused(refusal),
@@ -259,6 +261,14 @@ impl Dial<'_> {
             Unopened::Skew => Unattached::Failed(Skew.into()),
             Unopened::ServeGone => Unattached::Failed(self.serve_stopped()),
             Unopened::Malformed(malformed) => Unattached::Failed(malformed.into()),
+            Unopened::Control(error @ ControlError::Timeout { .. }) => {
+                tracing::debug!(%error, "an open through serve got no reply in time");
+                if socket.stalled().await {
+                    Unattached::Failed(Unresponsive.into())
+                } else {
+                    Unattached::Failed(self.cut(socket).await)
+                }
+            }
             Unopened::Control(error) => {
                 tracing::debug!(%error, "an open through serve failed before its reply");
                 Unattached::Failed(self.cut(socket).await)

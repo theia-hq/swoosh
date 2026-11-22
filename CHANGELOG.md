@@ -26,6 +26,11 @@ All notable changes to swoosh, newest first.
   `status` reads `me/nas, path: direct, rtt 12.031 ms`; `ping` prints the device, then a `path:` row from a
   reading taken after the run. If that fails, the path is left out, stderr says
   `warning: could not read the path of this run`, and the exit code is unchanged.
+- **A `swoosh serve` that stops answering is named, and the expiring-standing warning follows the run.** `ping`,
+  `speed`, `status <machine>`, `send`, `forward` and `proxy` end with `error: swoosh serve on this machine did not answer` and
+  exit 1; `send` stops there instead of skipping each file, and a `forward <port>` or `proxy` connection that fails later
+  keeps its warning. Through `serve`, `ping`, `speed`, `status` and `send` also warn when this machine's standing
+  is about to expire, as they do without it.
 - **`forward <port>` and `proxy` run through `swoosh serve` too.** If `serve` stops, both end with
   `error: swoosh serve stopped here and ended the connection to me/nas`. A `proxy` request that fails gets a
   `502` whose body is one line, `proxy failed: <what went wrong>`, and `proxy` still prints its URL first.

@@ -948,9 +948,17 @@ async fn run() -> eyre::Result<()> {
                 &[verb_word.as_deref().unwrap_or_default()],
                 outward.reach_args(),
             );
-            // The exchange verbs take `--peer` on every path: what one Open could not carry is usage here,
-            // `serve` running or not.
-            if matches!(outward, Outward::Sync(_) | Outward::Invite(_)) {
+            // The exchange verbs and the dialing verbs take `--peer` on every path: what one Open could not
+            // carry is usage here, `serve` running or not, before `serve` is asked.
+            if matches!(
+                outward,
+                Outward::Sync(_)
+                    | Outward::Invite(_)
+                    | Outward::Ping(_)
+                    | Outward::Speed(_)
+                    | Outward::Status(_)
+                    | Outward::Send(_)
+            ) {
                 hints_or_usage(
                     &[verb_word.as_deref().unwrap_or_default()],
                     outward.reach_args(),
@@ -1228,10 +1236,11 @@ fn hints_or_usage(
 /// Run a dialing verb through the `serve` on `socket`: its streams, the stale-list exchange beside it and
 /// the root question are each one Open there, with `hints` riding the Opens to their own machine.
 ///
-/// A reach flag `serve` makes moot refuses before anything is opened. What runs beside the verb ends with
-/// it and prints nothing of its own; a beside Open dropped unanswered is never asked about, so a slow
-/// machine never reads as `serve` stalled. One that met `serve` gone or of another version ends a run
-/// the verb ended clean with that line, once. Its lines go to `out` and `err`.
+/// A reach flag `serve` makes moot refuses before anything is opened. The expiring-badge warning the own
+/// bind prints before its bind prints here before the first Open, keyed to the key `serve` runs as. What
+/// runs beside the verb ends with it and prints nothing of its own; a beside Open dropped unanswered is
+/// never asked about, so a slow machine never reads as `serve` stalled. One that met `serve` gone or of
+/// another version ends a run the verb ended clean with that line, once. Its lines go to `out` and `err`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the run's two writers ride beside what it dials"
@@ -1248,6 +1257,7 @@ async fn dial_through_serve(
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
     use commands::through_serve::{Dial, Moot, Skew, Unresponsive};
+    use swoosh::node_client::NodeClient as _;
     use swoosh::streams::GoneWhy;
 
     if let Some(moot) = Moot::first(outward.reach_args()) {
@@ -1258,6 +1268,15 @@ async fn dial_through_serve(
         swoosh::streams::Resident::new(std::rc::Rc::clone(&socket)),
         hints,
     );
+    // Bounded as the asks after a failure are, so a stalled `serve` holds the run no longer here than
+    // there; a warning missed on a slow `serve` is said on the next run.
+    match tokio::time::timeout(swoosh::node_client::STOPPED_ASK, socket.status()).await {
+        Ok(Ok(status)) => {
+            reaching::warn_expiring(home, status.node_id, Option::clone(&slip), err).await;
+        }
+        Ok(Err(error)) => tracing::debug!(%error, "serve's status for the badge's warning failed"),
+        Err(_elapsed) => tracing::debug!("serve's status for the badge's warning took too long"),
+    }
     let service = match &outward {
         Outward::Ping(_) => swoosh::reach::PING_SERVICE.parse()?,
         Outward::Speed(_) => swoosh::reach::SPEED_SERVICE.parse()?,
