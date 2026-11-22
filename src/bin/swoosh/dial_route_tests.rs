@@ -309,9 +309,19 @@ fn probe_verbs_through_serve_ask_the_lookup() {
     });
 }
 
+/// The line another version of `serve` ends a run with, once.
+fn assert_skew_once(error: Option<String>) {
+    let error = error.unwrap_or_default();
+    assert!(
+        error.starts_with("swoosh serve on this machine is a different version"),
+        "{error}"
+    );
+    assert_eq!(error.matches("different version").count(), 1, "{error}");
+}
+
 /// Through `serve`, an Open beside the verb prints nothing and asks `serve` nothing: an exchange dropped
-/// unanswered when the verb ends, a lookup that runs past its deadline, and either meeting another
-/// version of `serve`.
+/// unanswered when the verb ends, and a lookup that runs past its deadline. One that meets `serve` gone
+/// or of another version ends the run with that line once, after the verb's own.
 #[test]
 fn beside_opens_print_nothing_of_their_own() {
     on_a_big_stack(async || {
@@ -346,18 +356,19 @@ fn beside_opens_print_nothing_of_their_own() {
             }
         }
 
-        // The exchange met by another version beside a ping whose stream attached: the ping's lines are its
-        // own, as with no exchange at all.
-        let mut baseline = None;
+        // The exchange met by another version while a ping whose stream attached runs: the ping's lines are
+        // its own, as with no exchange at all, and the version's line ends the run after them, once.
+        let mut baseline: Option<Printed> = None;
         for exchange in ["none", "version"] {
             let mut served =
                 a_device(&format!("beside-attached-{exchange}"), exchange != "none").await;
             let rig = Rig::default();
             let resident = routed(
                 &mut served,
-                |service| match service {
-                    "control.sync" => Reply::Version,
-                    _ => Reply::Observed,
+                move |service| match (service, exchange) {
+                    ("control.sync", _) => Reply::VersionAfterHeld,
+                    (_, "none") => Reply::Observed,
+                    _ => Reply::AfterVersion(Box::new(Reply::Observed)),
                 },
                 &rig,
             );
@@ -369,8 +380,19 @@ fn beside_opens_print_nothing_of_their_own() {
                 "{exchange}: the ping attached"
             );
             match &baseline {
-                None => baseline = Some(printed),
-                Some(baseline) => assert_eq!(&printed, baseline, "{exchange}"),
+                None => {
+                    assert!(printed.ok, "{printed:?}");
+                    baseline = Some(printed);
+                }
+                Some(baseline) => {
+                    assert_eq!(
+                        (&printed.out, &printed.err),
+                        (&baseline.out, &baseline.err),
+                        "{exchange}"
+                    );
+                    assert!(!printed.ok, "{printed:?}");
+                    assert_skew_once(printed.error);
+                }
             }
         }
 
@@ -398,36 +420,77 @@ fn beside_opens_print_nothing_of_their_own() {
         resident.await.unwrap();
         assert_eq!(printed, baseline, "the cut exchange printed nothing");
 
-        // `send` beside an exchange met by another version: the record ends the run with that line once,
-        // and no file's Open is sent.
+        // `send` beside an exchange met by another version, its reply read after the one file's Open was
+        // sent: the file is sent, then the record ends the run with that line, once.
         let file = a_file("beside-skew");
         let mut served = a_device("beside-skew", true).await;
         let rig = Rig::default();
         let resident = routed(
             &mut served,
             |service| match service {
-                "control.sync" => Reply::Version,
-                _ => Reply::Exchange(vec![1]),
+                "control.sync" => Reply::VersionAfterHeld,
+                _ => Reply::AfterVersion(Box::new(Reply::Exchange(vec![1]))),
             },
             &rig,
         );
         let printed = dialed(&served.home, &["send", &file, "me/nas"]).await;
         rig.stop.cancel();
         let events = resident.await.unwrap();
-        let error = printed.error.unwrap_or_default();
         assert!(
-            error.starts_with("swoosh serve on this machine is a different version"),
-            "{error}"
+            printed.out.ends_with("sent note.txt (5 bytes)\n"),
+            "{printed:?}"
         );
-        assert_eq!(error.matches("different version").count(), 1, "{error}");
+        assert!(!printed.ok, "{printed:?}");
+        assert_skew_once(printed.error);
+        let mut heard: Vec<_> = opens(&events)
+            .iter()
+            .map(|open| open.service.clone())
+            .collect();
+        heard.sort();
+        assert_eq!(heard, ["control.sync", "recv"], "no Open after the record");
+
+        // And read before the last files' Opens: more files than `send` keeps in flight (16), so the last
+        // is opened only once one is sent, which the resident holds until the record is made. That file
+        // is never sent an Open; its record ends the run with the line, once.
+        let dir = std::env::temp_dir().join(format!(
+            "swoosh-dialroute-beside-skew-many-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = 17;
+        for at in 0..files {
+            std::fs::write(dir.join(format!("note-{at}.txt")), b"hello").unwrap();
+        }
+        let mut served = a_device("beside-skew-many", true).await;
+        let rig = Rig::default();
+        let resident = routed(
+            &mut served,
+            |service| match service {
+                "control.sync" => Reply::VersionAfterHeld,
+                _ => Reply::AfterVersion(Box::new(Reply::Exchange(vec![1]))),
+            },
+            &rig,
+        );
+        let printed = dialed(&served.home, &["send", dir.to_str().unwrap(), "me/nas"]).await;
+        rig.stop.cancel();
+        let events = resident.await.unwrap();
+        assert!(!printed.ok, "{printed:?}");
+        assert_skew_once(printed.error);
+        let sent = opens(&events)
+            .iter()
+            .filter(|open| open.service == "recv")
+            .count();
         assert!(
-            !opens(&events).iter().any(|open| open.service == "recv"),
-            "no file's Open after the record"
+            sent < files,
+            "{sent} of {files}: no file's Open after the record"
         );
 
-        // The lookup: past its deadline, or met by another version, after `send`'s file attached.
+        // The lookup: past its deadline, or met by another version, after `send`'s file attached. The file
+        // is sent either way; another version after an attach is a restarted `serve`, so the run's is
+        // gone, and that line ends the run, once, after the file's.
         let file = a_file("beside-lookup");
-        let mut baseline = None;
+        let mut baseline: Option<Printed> = None;
         for lookup in ["miss", "stall", "version"] {
             let mut served = bobs_contact(&format!("beside-lookup-{lookup}")).await;
             let rig = Rig::default();
@@ -444,7 +507,7 @@ fn beside_opens_print_nothing_of_their_own() {
             let printed = dialed(&served.home, &["send", &file, "bob/nas"]).await;
             rig.stop.cancel();
             let events = resident.await.unwrap();
-            assert!(printed.ok, "{lookup}: {printed:?}");
+            assert_eq!(printed.ok, lookup != "version", "{lookup}: {printed:?}");
             assert_eq!(statuses(&events), 0, "{lookup}: no status ask");
             assert!(
                 opens(&events)
@@ -454,6 +517,19 @@ fn beside_opens_print_nothing_of_their_own() {
             );
             match &baseline {
                 None => baseline = Some(printed),
+                Some(baseline) if lookup == "version" => {
+                    assert_eq!(
+                        (&printed.out, &printed.err),
+                        (&baseline.out, &baseline.err),
+                        "{lookup}"
+                    );
+                    let error = printed.error.unwrap_or_default();
+                    assert!(
+                        error.starts_with("swoosh serve stopped here and ended the connection"),
+                        "{error}"
+                    );
+                    assert_eq!(error.matches("serve stopped").count(), 1, "{error}");
+                }
                 Some(baseline) => assert_eq!(&printed, baseline, "{lookup}"),
             }
         }

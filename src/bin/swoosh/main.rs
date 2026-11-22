@@ -1228,8 +1228,10 @@ fn hints_or_usage(
 /// Run a dialing verb through the `serve` on `socket`: its streams, the stale-list exchange beside it and
 /// the root question are each one Open there, with `hints` riding the Opens to their own machine.
 ///
-/// A reach flag `serve` makes moot refuses before anything is opened. What runs beside the verb ends with it and prints nothing of its own; a beside Open dropped unanswered is
-/// never asked about, so a slow machine never reads as `serve` stalled. Its lines go to `out` and `err`.
+/// A reach flag `serve` makes moot refuses before anything is opened. What runs beside the verb ends with
+/// it and prints nothing of its own; a beside Open dropped unanswered is never asked about, so a slow
+/// machine never reads as `serve` stalled. One that met `serve` gone or of another version ends a run
+/// the verb ended clean with that line, once. Its lines go to `out` and `err`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the run's two writers ride beside what it dials"
@@ -1245,7 +1247,8 @@ async fn dial_through_serve(
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
-    use commands::through_serve::{Dial, Moot};
+    use commands::through_serve::{Dial, Moot, Skew, Unresponsive};
+    use swoosh::streams::GoneWhy;
 
     if let Some(moot) = Moot::first(outward.reach_args()) {
         return Err(moot.into());
@@ -1303,7 +1306,18 @@ async fn dial_through_serve(
         )
         .await;
     }
-    ended
+    // A record none of the verb's Opens met: `serve` went, or answered in another version, after they
+    // were sent, so the verb ended clean and said nothing of it. Its line ends the run, once, after the
+    // verb's own lines. A verb that ended on a line keeps it: a record made before one of its Opens is
+    // what ended it. No `settle`: a beside Open dropped unanswered still never reads as `serve` stalled.
+    match (ended, source.went()) {
+        (Ok(()), Some(gone)) => Err(match gone.why {
+            GoneWhy::Skew => Skew.into(),
+            GoneWhy::Stopped => dial.serve_stopped(),
+            GoneWhy::Unresponsive => Unresponsive.into(),
+        }),
+        (ended, _) => ended,
+    }
 }
 
 /// The internal error for a verb the dialing route does not run: a root-dispatch bug.
