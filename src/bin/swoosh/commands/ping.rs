@@ -127,7 +127,7 @@ impl PingCmd {
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
-        admitted: Admitted,
+        admitted: Admitted<'_>,
     ) -> eyre::Result<()>
     where
         T::Session: 'static,

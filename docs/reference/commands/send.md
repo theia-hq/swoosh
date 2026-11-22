@@ -24,7 +24,8 @@ directory).
 Each file is hashed with BLAKE3 and checked again as it arrives, so a file corrupted or changed while it was
 sent does not land.
 A name the receiver already holds is refused, never replaced.
-A file that does not land prints a `skip` line, and `send` exits non-zero.
+A file that does not land prints `skip <file>: <reason>`, and `send` exits non-zero.
+If the machine refuses or cannot be reached, or the same failure would hit every file, `send` stops with one line instead.
 If the receiver does not answer a file within 10 minutes, `send` prints a `skip` line, and the file may have arrived.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
