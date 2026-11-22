@@ -37,7 +37,7 @@ use transfer::wire::{Blob, Transfer};
 
 use crate::commands::connect::ConnectionLost;
 use crate::commands::machine;
-use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachine};
+use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachine, Unresponsive};
 
 /// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
@@ -48,7 +48,7 @@ pub const RECV_SERVICE: &str = Unbound::RECV.name();
 
 /// Files send concurrently over separate streams, capped so one connection is not flooded. Matches iris's
 /// pipeline depth; a receiver's exposer accepts these streams concurrently too, so both sides fan out.
-const MAX_INFLIGHT: usize = 16;
+pub(crate) const MAX_INFLIGHT: usize = 16;
 
 /// Push a file or directory to a peer, addressed by their public key.
 #[derive(Debug, Args)]
@@ -178,7 +178,8 @@ impl SendCmd {
     /// expanding directories first, and printing on `out` and `err`. Up to [`MAX_INFLIGHT`] files go at
     /// once. A file that cannot be read, or whose stream alone fails, is skipped and reported; the run
     /// ends non-zero if any was. An outcome every later stream would repeat ends the run with its one
-    /// line, never a `skip` per file: for `NotAdmitted`, after asking the machine why. The first
+    /// line, never a `skip` per file: for `NotAdmitted`, after asking the machine why, and for a `serve`
+    /// confirmed stalled, whose stall every file would meet. The first
     /// admitted stream gives `admitted` its question, asked through `source`.
     #[expect(
         clippy::too_many_arguments,
@@ -237,6 +238,11 @@ impl SendCmd {
                 }
                 Err((name, Unsent::Unopened(unopened))) => {
                     let line = route.line(unopened, machine).await;
+                    // A stalled `serve` stalls every file: the run ends with its line, once.
+                    if line.is::<Unresponsive>() {
+                        drop(sending);
+                        return Err(line);
+                    }
                     writeln!(err, "skip {}: {line:#}", Escaped(&name))?;
                     failures += 1;
                 }

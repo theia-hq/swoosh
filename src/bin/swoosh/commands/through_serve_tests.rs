@@ -958,8 +958,14 @@ pub(crate) struct Heard {
 pub(crate) struct Rig {
     pub(crate) stop: tightbeam::tunnel::CancellationToken,
     pub(crate) landed: std::sync::Arc<tokio::sync::Notify>,
-    held: tightbeam::tunnel::CancellationToken,
-    versioned: tightbeam::tunnel::CancellationToken,
+    pub(crate) held: tightbeam::tunnel::CancellationToken,
+    pub(crate) versioned: tightbeam::tunnel::CancellationToken,
+    /// The key a [`routed`] resident's status names, [`resident_key`] when unset.
+    pub(crate) key: Option<NodeId>,
+    /// Told each time a [`routed`] resident hears an Open, before it replies.
+    pub(crate) heard: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// Whether a [`routed`] resident starts as [`Reply::Wedge`] leaves it, answering nothing.
+    pub(crate) wedged: bool,
 }
 
 /// A resident on `served`'s socket that reads one request per connection and answers each Open with the
@@ -1112,6 +1118,9 @@ pub(crate) enum Reply {
     /// [`Exchange`]: Self::Exchange
     /// [`VersionAfterHeld`]: Self::VersionAfterHeld
     AfterVersion(Box<Reply>),
+    /// Hear the Open and never reply, and from then on take every connection and answer nothing on it,
+    /// a status included, its lock kept: a stalled resident whose kernel still takes connects.
+    Wedge,
 }
 
 /// A resident on `served`'s socket that answers each Open by its service, as `reply` says, and every
@@ -1132,9 +1141,13 @@ pub(crate) fn routed(
     let stop = rig.stop.clone();
     let landed = std::sync::Arc::clone(&rig.landed);
     let (held_heard, versioned) = (rig.held.clone(), rig.versioned.clone());
+    let key = rig.key.unwrap_or_else(resident_key);
+    let told = rig.heard.clone();
+    let wedged_from_start = rig.wedged;
     tokio::spawn(async move {
         let mut events = Vec::new();
         let mut held = Vec::new();
+        let mut wedged = wedged_from_start;
         loop {
             let (mut conn, _) = tokio::select! {
                 accepted = listener.accept() => accepted.unwrap(),
@@ -1144,13 +1157,18 @@ pub(crate) fn routed(
                 Ok(Request::Open(open)) => open,
                 Ok(Request::Status) => {
                     events.push(Event::Status);
-                    let _ = Response::Status(status_of(resident_key()))
-                        .write(&mut conn)
-                        .await;
+                    if wedged {
+                        held.push((None, tokio::spawn(hold_silent(conn))));
+                    } else {
+                        let _ = Response::Status(status_of(key)).write(&mut conn).await;
+                    }
                     continue;
                 }
                 _ => continue,
             };
+            if let Some(told) = &told {
+                told();
+            }
             let service = open.service().to_string();
             events.push(Event::Open(Heard {
                 peer: open.peer(),
@@ -1162,6 +1180,10 @@ pub(crate) fn routed(
                 upload: Vec::new(),
             }));
             let at = Some(events.len() - 1);
+            if wedged {
+                held.push((at, tokio::spawn(hold_silent(conn))));
+                continue;
+            }
             match reply(&service) {
                 Reply::Refuse(refusal) => {
                     let _ = Response::OpenRefusal(refusal).write(&mut conn).await;
@@ -1171,6 +1193,10 @@ pub(crate) fn routed(
                 }
                 Reply::Stall => held.push((at, tokio::spawn(hold_silent(conn)))),
                 Reply::Hangup => drop(conn),
+                Reply::Wedge => {
+                    wedged = true;
+                    held.push((at, tokio::spawn(hold_silent(conn))));
+                }
                 Reply::Observed => {
                     let attached = Attached {
                         reference: Some(reference().await),
@@ -1693,6 +1719,46 @@ async fn a_port_through_serve_admits_on_an_open_it_ends_with_end() {
     );
 }
 
+/// A dialing verb's Open that gets no reply prints `Unresponsive` only when `serve` then fails a status
+/// too: a resident that takes the Open and answers nothing more has stalled, exit 1 with stdout empty. One
+/// that answers status but not the Open is a slow machine behind a working `serve`, so the line is the
+/// cut's. Neither hangs past the bounded asks.
+#[tokio::test]
+async fn a_stalled_serve_is_unresponsive_for_a_dialing_verb() {
+    tokio::time::pause();
+    // A second answer keeps the stalling resident serving status until the row's stop.
+    for (tag, answers, wedged) in [
+        ("wedged", vec![Answer::Wedge], true),
+        ("slow", vec![Answer::Stall, Answer::Hangup], false),
+    ] {
+        let mut served = Served::new(&format!("unresponsive-{tag}")).await;
+        let rig = Rig::default();
+        let resident = scripted(&mut served, answers, &rig);
+        let contacts = book();
+        let peer = machine(&contacts, "me/nas");
+        let ran = tokio::time::timeout(
+            core::time::Duration::from_secs(600),
+            Dialing::of(&["ping", "me/nas"]).through(&served.home, &peer, &contacts),
+        )
+        .await
+        .expect("the run never hung");
+        rig.stop.cancel();
+        let _ = resident.await;
+        let report = ran.ended.expect_err("a stalled Open ends non-zero");
+        assert_eq!(ran.out, "", "{tag}: stdout empty");
+        assert_eq!(ran.err, "", "{tag}: the line is the run's error");
+        if wedged {
+            assert!(report.is::<super::Unresponsive>(), "{tag}: {report:#}");
+            assert_eq!(
+                printed(&report),
+                "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+            );
+        } else {
+            assert!(report.is::<ConnectionLost>(), "{tag}: {report:#}");
+        }
+    }
+}
+
 /// A live `serve` that refuses a connect while it holds its lock, as one whose accept queue is full does,
 /// is no `serve` gone: a dialing verb's Open there prints the cut's line, never that `serve` is not
 /// running.
@@ -1712,5 +1778,43 @@ async fn a_refused_connect_under_a_held_lock_is_a_cut_for_a_dialing_verb() {
     let report = ran.ended.expect_err("no stream, no exit 0");
     assert!(report.is::<ConnectionLost>(), "{report:#}");
     assert_eq!(ran.out, "");
-    assert_eq!(ran.err, "", "the line is the run's error");
+}
+
+/// `forward <port>` through a `serve` that takes its admission Open and answers nothing more, a status
+/// included: the admission prints `Unresponsive`, once, as the run's error, and no listener starts.
+#[tokio::test]
+async fn a_stalled_serve_is_unresponsive_at_a_port_admission() {
+    tokio::time::pause();
+    let mut served = Served::new("admit-wedged").await;
+    let rig = Rig::default();
+    let resident = scripted(&mut served, vec![Answer::Wedge], &rig);
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let service = "ssh".parse().unwrap();
+    let reach = reach(&["forward"]);
+    let dial = Dial {
+        machine: &peer,
+        service: &service,
+        slip: None,
+        reach: &reach,
+        contacts: &contacts,
+    };
+    let routed = tokio::time::timeout(
+        core::time::Duration::from_secs(600),
+        super::forward_port(&served.home, dial, 0),
+    )
+    .await
+    .expect("the admission never hung")
+    .unwrap();
+    rig.stop.cancel();
+    let heard = resident.await.unwrap();
+    let super::Routed::Ran(Err(report)) = routed else {
+        panic!("not a run through serve that ended at its admission");
+    };
+    assert!(report.is::<super::Unresponsive>(), "{report:#}");
+    assert_eq!(
+        printed(&report),
+        "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+    );
+    assert_eq!(heard.len(), 1, "one admission Open");
 }

@@ -232,6 +232,23 @@ pub async fn resolve(cred: Credential, node: NodeId, home: &Home) -> eyre::Resul
         .map_err(ResolveError::into_report)
 }
 
+/// Warn on `warn` when the standing a run presents ends inside the window, as the own bind's [`resolve`]
+/// warns before its bind, for a run whose opens present through a resident that sinks the line. An ended
+/// or unreadable standing says nothing here: the resident renews or refuses, and that is the run's line.
+///
+/// `this` is the key the resident runs as, the one the remedy names. A slip that pins another fleet
+/// sends no badge, so it warns nothing, by the one rule [`resolve`] applies.
+pub async fn warn_expiring(
+    home: &Home,
+    this: NodeId,
+    slip: Option<Link>,
+    warn: &mut impl std::io::Write,
+) {
+    if let Err(error) = resolve_to(Credential::Family { present: slip }, this, home, warn).await {
+        tracing::debug!(%error, "the standing could not be read for the badge's warning");
+    }
+}
+
 /// Why [`resolve_to`] gave no slots: the stored badge has ended, or the home could not be read. A
 /// caller that answers for the dial, rather than printing its cause, tells the two apart: only the
 /// first says anything about this machine's standing.
