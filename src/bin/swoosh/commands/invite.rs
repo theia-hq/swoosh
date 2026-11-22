@@ -28,7 +28,8 @@ use swoosh::peer::KeyTextError;
 use swoosh::root::{self, Date, Minted, Records, Root, RootError, RootPlace, RootVerb};
 use swoosh::roster::Member;
 use swoosh::standing::{Standing, StandingError};
-use swoosh::sync::{Dial, NodeDial};
+use swoosh::streams::OwnBind;
+use swoosh::sync::{Dial, SourceDial};
 use swoosh::transport::ReachArgs;
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
@@ -594,7 +595,7 @@ impl swoosh::reaching::Reaching for InviteCmd {
 
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        _node: &'n Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
         peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
@@ -602,7 +603,13 @@ impl swoosh::reaching::Reaching for InviteCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        let dial = NodeDial::new(peers, ctx.home);
+        let own = OwnBind::new(
+            peers,
+            ctx.home,
+            node.node_id(),
+            &swoosh::credential::Credential::Family { present: None },
+        );
+        let dial = SourceDial::new(&own, ctx.home);
         self.issue(
             ctx.home,
             &mut Terminal,

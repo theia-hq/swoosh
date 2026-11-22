@@ -631,7 +631,7 @@ impl Committed {
                     why: Why::Refused,
                 }),
                 Ok(Err(error)) => {
-                    tracing::debug!(device = %device.name, %error, "an offer failed");
+                    tracing::debug!(device = %device.name, ?error, "an offer failed");
                     missed.push(Missed {
                         name: device.name.clone(),
                         why: Why::Silent,

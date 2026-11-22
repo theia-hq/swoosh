@@ -13,7 +13,8 @@ use keystore::KeyFile;
 use swoosh::home::Home;
 use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::Restored;
-use swoosh::sync::{Dial, NodeDial};
+use swoosh::streams::OwnBind;
+use swoosh::sync::{Dial, SourceDial};
 use swoosh::touch::Lines;
 use swoosh::transport::ReachArgs;
 
@@ -126,7 +127,7 @@ impl swoosh::reaching::Reaching for RestoreSync {
 
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        _node: &'n Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
         peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
@@ -134,8 +135,18 @@ impl swoosh::reaching::Reaching for RestoreSync {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.finish(ctx.home, &NodeDial::new(peers, ctx.home), &mut io::stderr())
-            .await
+        let own = OwnBind::new(
+            peers,
+            ctx.home,
+            node.node_id(),
+            &swoosh::credential::Credential::Family { present: None },
+        );
+        self.finish(
+            ctx.home,
+            &SourceDial::new(&own, ctx.home),
+            &mut io::stderr(),
+        )
+        .await
     }
 }
 

@@ -22,7 +22,8 @@ use swoosh::joining::Join;
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::root::Date;
 use swoosh::standing::{Disagreement, Standing, StandingError};
-use swoosh::sync::{Dial, NodeDial};
+use swoosh::streams::OwnBind;
+use swoosh::sync::{Dial, SourceDial};
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
@@ -413,7 +414,7 @@ impl swoosh::reaching::Reaching for JoinPull {
 
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
-        _node: &'n Node<T, D>,
+        node: &'n Node<T, D>,
         ctx: swoosh::reaching::ReachCtx<'_>,
         peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
@@ -421,7 +422,13 @@ impl swoosh::reaching::Reaching for JoinPull {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        pull(&NodeDial::new(peers, ctx.home), self.from).await;
+        let own = OwnBind::new(
+            peers,
+            ctx.home,
+            node.node_id(),
+            &swoosh::credential::Credential::Family { present: None },
+        );
+        pull(&SourceDial::new(&own, ctx.home), self.from).await;
         Ok(())
     }
 }

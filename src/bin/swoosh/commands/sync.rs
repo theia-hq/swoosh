@@ -9,14 +9,17 @@
 //! it, and offers that root once per person ([`swoosh::learn`]).
 
 use core::time::Duration;
+use std::io::Write;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use swoosh::contacts::DeviceLabel;
+use swoosh::credential::Credential;
 use swoosh::home::Home;
-use swoosh::renewal::{NodeFetch, PickUp, Renewed};
+use swoosh::renewal::{Fetch, PickUp, Renewed, SourceFetch};
 use swoosh::standing::{Standing, StandingError};
-use swoosh::sync::{Answer, NodeDial, Reply, Until};
+use swoosh::streams::{OwnBind, StreamSource};
+use swoosh::sync::{Answer, Device, Dial, Reply, SourceDial, Until};
 use swoosh::transport::ReachArgs;
 
 use crate::commands::learning;
@@ -57,6 +60,8 @@ impl swoosh::reaching::Reaching for SyncCmd {
         })
     }
 
+    /// By own bind: every exchange, pick-up and root question rides the run's own sessions, presenting
+    /// this home's standing as it reads at each open.
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
         node: &'n Node<T, D>,
@@ -67,39 +72,69 @@ impl swoosh::reaching::Reaching for SyncCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        refuse_unless_device(ctx.home).await?;
-        let devices = swoosh::sync::devices(ctx.home, []).await?;
-        let dial = NodeDial::new(peers, ctx.home);
-        let mut replies = swoosh::sync::round(&dial, &devices, Until::Every, TOTAL).await;
+        // Every exchange presents this home's standing, never a slip.
+        let own = OwnBind::new(
+            peers,
+            ctx.home,
+            node.node_id(),
+            &Credential::Family { present: None },
+        );
+        self.exchange(
+            ctx.home,
+            &SourceDial::new(&own, ctx.home),
+            &SourceFetch::new(&own),
+            &own,
+            &mut std::io::stdout(),
+        )
+        .await
+        .map(drop)
+    }
+}
+
+impl SyncCmd {
+    /// Exchange with every device through `dial`, pick up a renewal through `fetch` when one refused this
+    /// machine, then ask the unrooted machines through `source`, the lines on `out`: the body on either
+    /// path. The devices the round asked, by the names its rows give them.
+    pub(crate) async fn exchange(
+        self,
+        home: &Home,
+        dial: &impl Dial,
+        fetch: &impl Fetch,
+        source: &impl StreamSource,
+        out: &mut impl Write,
+    ) -> eyre::Result<Vec<Device>> {
+        refuse_unless_device(home).await?;
+        let devices = swoosh::sync::devices(home, []).await?;
+        let mut replies = swoosh::sync::round(dial, &devices, Until::Every, TOTAL).await;
         // Refused for a standing that needs a renewal: pick it up from one of your devices, then exchange
         // again with it.
-        match swoosh::renewal::after_round(ctx.home, &NodeFetch::new(peers), &replies).await {
+        match swoosh::renewal::after_round(home, fetch, &replies).await {
             PickUp::Skipped => {}
             PickUp::Took(renewed) => {
-                println!("{}", took(&renewed));
-                replies = swoosh::sync::round(&dial, &devices, Until::Every, TOTAL).await;
+                writeln!(out, "{}", took(&renewed))?;
+                replies = swoosh::sync::round(dial, &devices, Until::Every, TOTAL).await;
             }
             PickUp::Missed => {
-                let label = swoosh::renewal::own_label(ctx.home).await;
-                println!("{}", missed(label.as_ref()));
-                learn_roots(node, ctx.home).await;
-                return Ok(());
+                let label = swoosh::renewal::own_label(home).await;
+                writeln!(out, "{}", missed(label.as_ref()))?;
+                learn_roots(source, home).await;
+                return Ok(devices);
             }
         }
         let rows: Vec<(String, Row)> = replies
             .into_iter()
             .map(|(device, reply)| (device.name, Row::of(reply)))
             .collect();
-        print!("{}", report(&rows));
-        learn_roots(node, ctx.home).await;
-        Ok(())
+        write!(out, "{}", report(&rows))?;
+        learn_roots(source, home).await;
+        Ok(devices)
     }
 }
 
 /// After `sync`'s own lines: ask each saved machine of a person with no root saved which root vouches for
 /// it ([`swoosh::learn::sweep`]), and tell the person once per person, in name order. Silent for a machine
 /// that does not answer; never a failure of `sync`.
-async fn learn_roots<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home) {
+async fn learn_roots(source: &impl StreamSource, home: &Home) {
     let machines = match swoosh::contacts::ContactsStore::open(home).await {
         Ok(store) => swoosh::learn::unrooted(store.contacts()),
         Err(error) => {
@@ -107,7 +142,7 @@ async fn learn_roots<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home)
             return;
         }
     };
-    let shown = swoosh::learn::sweep(node, machines).await;
+    let shown = swoosh::learn::sweep(source, machines).await;
     learning::tell_each(
         home,
         &shown,

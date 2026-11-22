@@ -16,11 +16,13 @@ use bifrost_mem::MemTransport;
 use keystore::{KeyFile, Protection};
 use nauthy::Link;
 use swoosh::contacts::DeviceLabel;
+use swoosh::credential::Credential;
 use swoosh::home::Home;
 use swoosh::peers::Peers;
-use swoosh::renewal::{Fetch as _, NodeFetch};
+use swoosh::renewal::{Fetch as _, SourceFetch};
 use swoosh::roster::{Epoch, Member, RosterDoc, fold};
 use swoosh::serve::{RENEWAL_SERVICE, SYNC_SERVICE};
+use swoosh::streams::OwnBind;
 use swoosh::testkit::{STANDING_UNTIL, TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{CancellationToken, Connector, Router};
@@ -49,6 +51,17 @@ fn on_a_node<F: core::future::Future<Output = ()>>(test: impl FnOnce() -> F + Se
         .unwrap()
         .join()
         .unwrap();
+}
+
+/// What the laptop's pick-up rides: its own sessions, presenting nothing on the proven-only route.
+const FAMILY: Credential = Credential::Family { present: None };
+
+/// An empty home for a dialer whose pick-up reads nothing of it.
+fn scratch(tag: &str) -> Home {
+    let dir = std::env::temp_dir().join(format!("swoosh-pick-up-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    swoosh::config::create_store_dir(&dir).unwrap();
+    Home::resolve(Some(dir)).unwrap()
 }
 
 /// A fresh home for the device `seed`: its key, the pin, and a live standing the root signed for it.
@@ -155,7 +168,9 @@ fn a_door_peer_reaches_no_other_route() {
         serve(nas, host);
 
         let peers = Peers::new(&laptop);
-        let fetched = tokio::time::timeout(BOUND, NodeFetch::new(&peers).fetch(host_id))
+        let home = scratch("laptop-door");
+        let own = OwnBind::new(&peers, &home, laptop.node_id(), &FAMILY);
+        let fetched = tokio::time::timeout(BOUND, SourceFetch::new(&own).fetch(host_id))
             .await
             .expect("the pick-up answers in time")
             .expect("the pick-up runs");
@@ -235,7 +250,9 @@ fn a_stranger_flood_does_not_hold_a_proven_permit() {
         }
 
         let peers = Peers::new(&laptop);
-        let fetched = tokio::time::timeout(BOUND, NodeFetch::new(&peers).fetch(host_id))
+        let home = scratch("laptop-flood");
+        let own = OwnBind::new(&peers, &home, laptop.node_id(), &FAMILY);
+        let fetched = tokio::time::timeout(BOUND, SourceFetch::new(&own).fetch(host_id))
             .await
             .expect("the pick-up answers in time")
             .expect("the pick-up runs");
