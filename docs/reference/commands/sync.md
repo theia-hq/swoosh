@@ -17,6 +17,7 @@ device it asked before it took a newer list.
 when it first picks up this machine's renewal. It prints one report, and names every device that did not
 answer. It runs only on one of your devices. Your devices also do this on their own: every `swoosh serve`
 asks as it starts, then once an hour, and a command that reaches one of your devices asks it when this
-machine has not heard from any device for an hour.
+machine has not heard from any device for an hour. If `swoosh serve` is running here, `sync` runs through it;
+if `serve` stops, `sync` ends with `error: swoosh serve stopped here and ended the connection to me/nas`.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

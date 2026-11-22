@@ -37,6 +37,11 @@ All notable changes to swoosh, newest first.
   file. If the machine cannot be reached before any file is admitted, `send` stops; once files are going, a file
   that cannot be reached is skipped. An unreadable home, a `serve` error or a malformed reply also ends the run.
   A `send` to `anyone` presents the link alone, with or without `serve`.
+- **`sync`, `invite`, `revoke`, `join` and `root restore` run through `swoosh serve` too.** `--local`, `--relay`
+  and `--resolver` do not apply while `serve` runs, and the command refuses before it writes anything. More than
+  16 `--peer` addresses for one key, or an address no machine can be reached at, is a usage error (exit 2). If,
+  after a `revoke`, `invite` or `root restore` has landed, `serve` is another version, has stopped or does not
+  answer, the command prints that line and exits 1.
 - **`forward <machine> <service> -` tells a finished stream from a cut-off one.** It exits 0 only when the other
   side ends cleanly and, if you sent anything, the other machine holds it; any other end prints
   `error: connection lost` and exits 1, with or without `swoosh serve` running. With a file or pipe on stdin, it

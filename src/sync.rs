@@ -460,7 +460,9 @@ pub trait Dial {
 }
 
 /// The [`Dial`] over a stream source: each exchange is one stream to `control.sync` on Main, with no
-/// slip, presenting what the source presents for it (this home's standing as it reads now).
+/// slip, presenting what the source presents for it (this home's standing as it reads now). A stream
+/// cut once opened asks the source whether it went away, so a source that keeps a record names this
+/// device.
 pub struct SourceDial<'a, S: StreamSource> {
     source: &'a S,
     home: &'a Home,
@@ -494,12 +496,26 @@ impl<'a, S: StreamSource> SourceDial<'a, S> {
                 unopened => ExchangeError::Unopened(unopened),
             })
     }
+
+    /// `answer` from an exchange with `peer` on a stream that opened: a cut stream asks the source, once,
+    /// whether it went away. A remote device's own failure is no cut and asks nothing.
+    async fn ended(
+        &self,
+        peer: NodeId,
+        answer: Result<Answer, ExchangeError>,
+    ) -> Result<Answer, ExchangeError> {
+        if let Err(ExchangeError::Io(_)) = &answer {
+            let _ = self.source.gone(peer).await;
+        }
+        answer
+    }
 }
 
 impl<S: StreamSource> Dial for SourceDial<'_, S> {
     async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
         let Opened { read, write, .. } = self.open(peer).await?;
-        exchange(self.home, read, write).await
+        let answer = exchange(self.home, read, write).await;
+        self.ended(peer, answer).await
     }
 
     async fn offer(
@@ -509,7 +525,8 @@ impl<S: StreamSource> Dial for SourceDial<'_, S> {
         bytes: &[u8],
     ) -> Result<Answer, ExchangeError> {
         let Opened { read, write, .. } = self.open(peer).await?;
-        offer(self.home, number, bytes, read, write).await
+        let answer = offer(self.home, number, bytes, read, write).await;
+        self.ended(peer, answer).await
     }
 }
 
