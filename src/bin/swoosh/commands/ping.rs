@@ -26,18 +26,18 @@ use clap::Args;
 use futures::StreamExt as _;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
-use swoosh::home::Home;
 use swoosh::learn::Admitted;
+use swoosh::node_client::UidSocket;
 use swoosh::observation::{Observer, PathSource};
 use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
+use swoosh::streams::{Resident, Tracked};
 use swoosh::transport::{self, ReachArgs};
 
 use crate::commands::machine;
-use crate::commands::through_serve::{self, Dial, Routed, Unattached};
+use crate::commands::through_serve::{self, Dial, Unattached};
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
@@ -211,62 +211,53 @@ impl PingCmd {
 }
 
 impl PingCmd {
-    /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
-    /// typed as it, if one was, and `contacts` to name it in a cut's line.
+    /// Run through `serve` on `socket` as `dial` asks, printing on `out` and `err`. Once the Open
+    /// attaches, `admitted` gets its question, asked through `source`.
     ///
     /// # Errors
     ///
-    /// The control socket cannot be trusted; never an own bind then.
-    pub async fn through_serve(
+    /// The run's line: a refusal, a cut, or `serve` gone.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's two writers ride beside its source and socket"
+    )]
+    pub async fn through<'s>(
         &self,
-        home: &Home,
+        source: &'s Tracked<Resident>,
+        dial: &Dial<'_>,
+        socket: &Rc<UidSocket>,
         machine: &Machine,
-        slip: Option<Link>,
-        contacts: &Contacts,
-    ) -> eyre::Result<Routed> {
-        let Some((socket, connected)) = through_serve::serve(home).await? else {
-            return Ok(Routed::OwnBind);
-        };
-        let service: Service = reach::PING_SERVICE.parse()?;
-        let dial = Dial {
-            machine,
-            service: &service,
-            slip,
-            reach: &self.reach,
-            contacts,
-        };
+        admitted: Admitted<'s>,
+        out: &mut impl Write,
+        err: &mut impl Write,
+    ) -> eyre::Result<()> {
         // Main: the held session the rest of this home's traffic through `serve` rides to the machine,
         // so the round trip and the path are the ones that traffic gets.
-        let socket = Rc::new(socket);
-        let (session, observer) = match dial.observed(&socket, connected, OpenLane::Main).await {
+        let (session, observer) = match dial.observed(socket, OpenLane::Main).await {
             Ok(opened) => opened,
             Err(Unattached::Refused(refusal)) => match own_line(&machine.label(), refusal) {
                 Ok((line, outcome)) => {
-                    writeln!(io::stdout(), "{line}")?;
-                    return Ok(Routed::Ran(outcome.unbound_result(&self.peer)));
+                    writeln!(out, "{line}")?;
+                    return outcome.unbound_result(&self.peer);
                 }
                 Err(refusal) => {
-                    let report = dial
-                        .unattached(Unattached::Refused(refusal), &*socket)
-                        .await;
-                    return Ok(Routed::Ran(Err(report)));
+                    return Err(dial
+                        .unattached(Unattached::Refused(refusal), &**socket)
+                        .await);
                 }
             },
-            Err(failed) => {
-                return Ok(Routed::Ran(Err(dial.unattached(failed, &*socket).await)));
-            }
+            Err(failed) => return Err(dial.unattached(failed, &**socket).await),
         };
-        let ended = self
-            .observed(
-                &session,
-                observer,
-                machine,
-                async || dial.stopped(&socket).await,
-                &mut io::stdout(),
-                &mut io::stderr(),
-            )
-            .await;
-        Ok(Routed::Ran(ended))
+        admitted.asked_through(source, machine.key());
+        self.observed(
+            &session,
+            observer,
+            machine,
+            async || dial.stopped(socket).await,
+            out,
+            err,
+        )
+        .await
     }
 
     /// The probes over `session`, one stream through `serve`, beside `observer`, printing on `out` and

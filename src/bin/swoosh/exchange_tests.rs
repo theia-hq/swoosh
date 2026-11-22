@@ -263,7 +263,7 @@ fn siblings() -> Vec<Row> {
 
 /// Make `home` `OWN`, its key sealed, a device of `ROOT` holding the list of [`siblings`], folded so
 /// `me` names them; with the root kept here when `root` says so.
-async fn a_device(home: &Home, root: bool) {
+pub(crate) async fn a_device(home: &Home, root: bool) {
     a_device_of(home, root, &siblings()).await;
 }
 

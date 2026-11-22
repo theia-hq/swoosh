@@ -281,20 +281,20 @@ impl Dial<'_> {
         }
     }
 
-    /// Open the verb's one stream through `serve` on `connected`, on `lane`, observed: the stream as a
-    /// session, and the observer that follows its connection through `socket`, read from the Attached
-    /// report on.
+    /// Open the verb's one stream through `serve` on a control connection of its own, on `lane`,
+    /// observed: the stream as a session, and the observer that follows its connection through `socket`,
+    /// read from the Attached report on.
     ///
     /// # Errors
     ///
-    /// As [`open`](Self::open), with the resident's refusal kept typed.
+    /// As [`open`](Self::open), with the resident's refusal kept typed, or no `serve` to connect to.
     pub async fn observed(
         &self,
         socket: &Rc<UidSocket>,
-        connected: Connected,
         lane: OpenLane,
     ) -> Result<(OneStream, Observer), Unattached> {
         let ask = self.ask(lane)?;
+        let connected = self.connect(socket).await?;
         let (opened, observer) = match Resident::new(Rc::clone(socket))
             .observed(connected, &ask)
             .await
@@ -330,13 +330,7 @@ impl Dial<'_> {
     ///
     /// Why it attached nothing, sorted by what that does to the run ([`Unpiped`]).
     pub async fn pipe(&self, socket: &UidSocket) -> Result<Stream, Unpiped> {
-        let connected = match socket.connected().await {
-            Ok(connected) => connected,
-            Err(ControlError::NoResident) if socket.lock_free().await => {
-                return Err(Unpiped::of(Unattached::Failed(self.serve_stopped())));
-            }
-            Err(error) => return Err(Unpiped::of(Unattached::Failed(error.into()))),
-        };
+        let connected = self.connect(socket).await.map_err(Unpiped::of)?;
         match self
             .attach(socket, connected, LISTENER_LANE, Observation::Unobserved)
             .await
@@ -348,6 +342,21 @@ impl Dial<'_> {
                 Err(Unpiped::of(Unattached::Failed(self.serve_stopped())))
             }
             Err(unattached) => Err(Unpiped::of(unattached)),
+        }
+    }
+
+    /// A control connection of its own for one Open: a refused connect with `serve.lock` free is `serve`
+    /// gone, its own line. A socket that cannot be trusted keeps its own error, never a cut's. Any other
+    /// failure reads as an Open's that got no reply, so a live `serve` whose accept queue is full or that
+    /// stalled says what an Open to it says.
+    async fn connect(&self, socket: &UidSocket) -> Result<Connected, Unattached> {
+        match socket.connected().await {
+            Ok(connected) => Ok(connected),
+            Err(ControlError::NoResident) if socket.lock_free().await => {
+                Err(Unattached::Failed(self.serve_stopped()))
+            }
+            Err(error @ ControlError::Untrusted { .. }) => Err(Unattached::Failed(error.into())),
+            Err(error) => Err(self.unopened(Unopened::Control(error), socket).await),
         }
     }
 

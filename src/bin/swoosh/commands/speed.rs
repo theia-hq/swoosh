@@ -26,18 +26,18 @@ use measure::{
     Throughput,
 };
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
-use swoosh::home::Home;
 use swoosh::learn::Admitted;
+use swoosh::node_client::UidSocket;
 use swoosh::observation::{Observed, Observer, PathSource};
 use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
 use swoosh::serve::control_codec::OpenLane;
+use swoosh::streams::{Resident, Tracked};
 use swoosh::transport::{self, ReachArgs};
 
 use crate::commands::machine;
-use crate::commands::through_serve::{self, Dial, Routed};
+use crate::commands::through_serve::{self, Dial};
 
 /// How often a running speed test prints its current rate. One second matches iperf's default report
 /// interval and reads as a live, once-a-second heartbeat without flooding the terminal.
@@ -203,56 +203,49 @@ impl SpeedCmd {
 }
 
 impl SpeedCmd {
-    /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
-    /// typed as it, if one was, and `contacts` to name it in a cut's line.
+    /// Run through `serve` on `socket` as `dial` asks, printing on `out` and `err`. Once the Open
+    /// attaches, `admitted` gets its question, asked through `source`.
     ///
     /// # Errors
     ///
-    /// The control socket cannot be trusted; never an own bind then.
-    pub async fn through_serve(
+    /// The run's line: a refusal, a cut, or `serve` gone.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's two writers ride beside its source and socket"
+    )]
+    pub async fn through<'s>(
         &self,
-        home: &Home,
+        source: &'s Tracked<Resident>,
+        dial: &Dial<'_>,
+        socket: &Rc<UidSocket>,
         machine: &Machine,
-        slip: Option<Link>,
-        contacts: &Contacts,
-    ) -> eyre::Result<Routed> {
-        let Some((socket, connected)) = through_serve::serve(home).await? else {
-            return Ok(Routed::OwnBind);
-        };
-        let service: Service = reach::SPEED_SERVICE.parse()?;
-        let dial = Dial {
-            machine,
-            service: &service,
-            slip,
-            reach: &self.reach,
-            contacts,
-        };
+        admitted: Admitted<'s>,
+        out: &mut impl Write,
+        err: &mut impl Write,
+    ) -> eyre::Result<()> {
         // Isolated, as by own bind, and observed: the rate and the path it prints belong to this run's
         // own connection, and the path is read there, through `serve`, after the run.
-        let socket = Rc::new(socket);
-        let (session, observer) = match dial.observed(&socket, connected, OpenLane::Isolated).await
-        {
+        let (session, observer) = match dial.observed(socket, OpenLane::Isolated).await {
             Ok(opened) => opened,
-            Err(unattached) => {
-                return Ok(Routed::Ran(Err(dial
-                    .unattached(unattached, &*socket)
-                    .await)));
-            }
+            Err(unattached) => return Err(dial.unattached(unattached, &**socket).await),
         };
+        admitted.asked_through(source, machine.key());
         let (mode, label) = (self.mode(), machine.label());
-        println!("{}", title(&label, mode));
-        let ended = observed(
+        // A title that cannot be written ends the run as a failure, Finished all the same.
+        if let Err(error) = writeln!(out, "{}", title(&label, mode)) {
+            return Err(through_serve::failed(error.into(), observer, err).await);
+        }
+        observed(
             mode,
             self.limit(),
             &session,
             observer,
             &label,
-            async |own| dial.cut_or(&socket, own).await,
-            &mut io::stdout(),
-            &mut io::stderr(),
+            async |own| dial.cut_or(socket, own).await,
+            out,
+            err,
         )
-        .await;
-        Ok(Routed::Ran(ended))
+        .await
     }
 
     /// What to measure: `--up`, `--bidir`, or download (the group makes more than one impossible).
