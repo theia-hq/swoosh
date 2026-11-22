@@ -23,6 +23,7 @@
 
 use core::cell::RefCell;
 use core::ops::ControlFlow;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use bifrost::{ConnInfo, NodeId, PathChanges, Refusal};
@@ -32,7 +33,7 @@ use swoosh::escape::{Escaped, escaped_report};
 use swoosh::node_client::{Connected, NodeClient, UidSocket};
 use swoosh::observation::{Observed, Observer, PathSource};
 use swoosh::peer::{Kind, Machine as PeerMachine};
-use swoosh::peers::Hints;
+use swoosh::peers::{Hints, HintsError};
 use swoosh::serve::control_codec::{
     ControlError, Observation, OpenLane, OpenRead, OpenRefusal, OpenWrite, PeerRefusal,
 };
@@ -88,6 +89,54 @@ pub async fn serve(home: &swoosh::home::Home) -> eyre::Result<Option<(UidSocket,
         Err(error) => Err(error.into()),
     }
 }
+
+/// Refuse a reach flag `serve` makes moot before a verb's local act, when `serve` answers here: the
+/// act would land and its exchange would refuse after it. With no reach flag set the socket is not
+/// probed.
+///
+/// # Errors
+///
+/// The flag's line, or the control socket cannot be trusted.
+pub async fn refuse_moot(home: &swoosh::home::Home, reach: &ReachArgs) -> eyre::Result<()> {
+    let Some(moot) = Moot::first(reach) else {
+        return Ok(());
+    };
+    match serve(home).await? {
+        Some(_) => Err(moot.into()),
+        None => Ok(()),
+    }
+}
+
+/// The `--peer` addresses as each machine's hints, by its key, checked before anything is read or
+/// written: the addresses typed for one machine go to its Opens alone.
+///
+/// # Errors
+///
+/// [`CrowdedHints`] past the addresses one Open carries for a machine, or [`UnusableHint`] for one no
+/// machine can be reached at: each a usage error.
+pub fn hints(reach: &ReachArgs) -> eyre::Result<HashMap<NodeId, Hints>> {
+    reach.reject_crowded_hints()?;
+    let mut addrs: HashMap<NodeId, Vec<core::net::SocketAddr>> = HashMap::new();
+    for hint in &reach.peer {
+        addrs
+            .entry(hint.node())
+            .or_default()
+            .extend_from_slice(hint.addrs());
+    }
+    addrs
+        .into_iter()
+        .map(|(key, addrs)| match Hints::new(addrs) {
+            Ok(hints) => Ok((key, hints)),
+            Err(HintsError::Unusable) => Err(UnusableHint.into()),
+            Err(error) => Err(error.into()),
+        })
+        .collect()
+}
+
+/// A `--peer` address that is never a machine's endpoint: a usage error, exit 2.
+#[derive(Debug, thiserror::Error)]
+#[error("--peer or SWOOSH_PEER gives an address no machine can be reached at")]
+pub struct UnusableHint;
 
 /// Run `dial` as a `forward <machine> <service> -` through the `serve` at `home`'s control socket when
 /// one answers.
@@ -709,6 +758,11 @@ impl Moot {
 )]
 pub struct Busy;
 
+/// `serve` is there and took no connection, or gave no reply in time.
+#[derive(Debug, thiserror::Error)]
+#[error("swoosh serve on this machine did not answer\n  Restart it.")]
+pub struct Unresponsive;
+
 /// `serve` stopped under a live pipe, or before it answered.
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -716,6 +770,22 @@ pub struct Busy;
      while it runs.\n  Run this command again to reconnect."
 )]
 pub struct ServeStopped(String);
+
+/// `serve` stopped under a root act's exchange with `machine`, after the act landed: no rerun is
+/// advised, since the act is done and the started `serve` asks your devices itself.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "swoosh serve stopped here and ended the connection to {0}\n  Commands here connect through it \
+     while it runs.\n  Start it again; it asks your devices as it starts."
+)]
+pub struct StoppedAfterAct(pub(crate) String);
+
+impl ServeStopped {
+    /// The line for the connection to `machine`, as a line names it.
+    pub(crate) fn to(machine: impl core::fmt::Display) -> Self {
+        Self(machine.to_string())
+    }
+}
 
 /// The `serve` answering is another version of swoosh.
 #[derive(Debug, thiserror::Error)]

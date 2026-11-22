@@ -877,6 +877,9 @@ pub(crate) enum Answer {
     Attach,
     /// Attach, send these bytes and End, and answer the client's End with Landed.
     Exchange(Vec<u8>),
+    /// Attach, read the client's upload to its End, and only then send these bytes and End: a client
+    /// that reads before it ends its upload waits forever.
+    AfterEnd(Vec<u8>),
     /// Attach, then drop the connection with no End: a cut, the resident still up.
     Cut,
     /// Attach, then stop: the socket and the lock go before the connection does, as when `serve` exits
@@ -891,6 +894,12 @@ pub(crate) enum Answer {
     Error(&'static str),
     /// Hear the Open and drop its connection with no reply, the resident still up.
     Hangup,
+    /// Hear the Open and never reply to it, still serving every other connection: a resident whose
+    /// machine is slow to answer.
+    Stall,
+    /// Hear the Open and never reply, serving nothing more until the row's `stop`, its listener and lock
+    /// kept: a stalled resident, whose kernel still takes connects.
+    Wedge,
     /// Hear the Open, then stop with no reply: the socket and the lock go before the connection does.
     Vanish,
     /// Refuse it so.
@@ -899,6 +908,8 @@ pub(crate) enum Answer {
 
 /// One Open the scripted resident heard: what it asked for, and what an attached one uploaded.
 pub(crate) struct Heard {
+    pub(crate) peer: NodeId,
+    pub(crate) hints: Vec<core::net::SocketAddr>,
     pub(crate) service: String,
     pub(crate) lane: swoosh::serve::control_codec::OpenLane,
     pub(crate) observation: swoosh::serve::control_codec::Observation,
@@ -953,6 +964,8 @@ pub(crate) fn scripted(
                 _ => continue,
             };
             heard.push(Heard {
+                peer: open.peer(),
+                hints: open.hints().as_slice().to_vec(),
                 service: open.service().to_string(),
                 lane: open.lane(),
                 observation: open.observation(),
@@ -970,6 +983,12 @@ pub(crate) fn scripted(
                     let _ = conn.write_all(b"SWC2").await;
                 }
                 Answer::Hangup => drop(conn),
+                Answer::Stall => held.push((at, tokio::spawn(hold_silent(conn)))),
+                Answer::Wedge => {
+                    stop.cancelled().await;
+                    drop(conn);
+                    break;
+                }
                 Answer::Vanish => {
                     listener = None;
                     lock = None;
@@ -989,6 +1008,9 @@ pub(crate) fn scripted(
                         Answer::Exchange(download) => {
                             let landed = Some(std::sync::Arc::clone(&landed));
                             held.push((at, tokio::spawn(hold(conn, Some(download), landed))));
+                        }
+                        Answer::AfterEnd(download) => {
+                            held.push((at, tokio::spawn(answer_after_end(conn, download))));
                         }
                         Answer::Stop => {
                             listener = None;
@@ -1046,6 +1068,40 @@ async fn hold(
             }
             upload.extend_from_slice(&body);
         }
+    }
+    let _ = conn.read_to_end(&mut upload).await;
+    upload
+}
+
+/// Hold one heard Open with no reply until the client hangs up: what it sent after.
+async fn hold_silent(mut conn: tokio::net::UnixStream) -> Vec<u8> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut sent = Vec::new();
+    let _ = conn.read_to_end(&mut sent).await;
+    sent
+}
+
+/// Hold one attached connection as the resident: read the client's upload to its End, then send
+/// `download` and End. Returns the upload's raw frames, End included.
+async fn answer_after_end(mut conn: tokio::net::UnixStream, download: Vec<u8>) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut upload = Vec::new();
+    let mut header = [0; 7];
+    while conn.read_exact(&mut header).await.is_ok() {
+        upload.extend_from_slice(&header);
+        if header == END {
+            let mut sent = data(&download);
+            sent.extend_from_slice(&END);
+            let _ = conn.write_all(&sent).await;
+            break;
+        }
+        let mut body = vec![0; usize::from(u16::from_be_bytes([header[5], header[6]]))];
+        if conn.read_exact(&mut body).await.is_err() {
+            break;
+        }
+        upload.extend_from_slice(&body);
     }
     let _ = conn.read_to_end(&mut upload).await;
     upload

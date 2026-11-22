@@ -1,12 +1,12 @@
 //! The own bind's Isolated stream: a connection of its own, which the stream's two halves hold. And an
-//! ask the resident's Open cannot carry.
+//! ask the resident's Open cannot carry. And a source tracked for one run through `serve`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::rc::Rc;
 
 use bifrost::{NoDiscovery, Node};
 
-use super::{Ask, OwnBind, Resident, StreamSource as _, Unopened};
+use super::{Ask, Gone, GoneWhy, Opened, OwnBind, Resident, StreamSource, Tracked, Unopened};
 use crate::credential::Credential;
 use crate::home::Home;
 use crate::node_client::UidSocket;
@@ -100,4 +100,70 @@ async fn a_slip_for_another_peer_is_malformed_and_ends_the_run() {
         "{unopened:?}"
     );
     assert!(unopened.ends_run());
+}
+
+/// A source whose opens meet `meets`, in order, and that says it went away whenever asked: what a
+/// tracked source does with each, counted.
+struct Meets {
+    meets: core::cell::RefCell<std::collections::VecDeque<Unopened>>,
+    opens: core::cell::Cell<usize>,
+}
+
+impl StreamSource for Meets {
+    type Write = crate::testkit::TestWrite<tokio::io::DuplexStream>;
+    type Read = tokio::io::DuplexStream;
+
+    async fn open(&self, _ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
+        self.opens.set(self.opens.get() + 1);
+        Err(self.meets.borrow_mut().pop_front().unwrap())
+    }
+
+    async fn gone(&self, _peer: bifrost::NodeId) -> bool {
+        true
+    }
+}
+
+fn sync_ask(peer: bifrost::NodeId) -> Ask {
+    Ask {
+        peer,
+        hints: Hints::NONE,
+        service: crate::serve::SYNC_SERVICE.parse().unwrap(),
+        lane: OpenLane::Main,
+        slip: None,
+    }
+}
+
+/// A tracked source keeps the first sign that it went away: every later open returns that at once, with
+/// nothing opened, and a later cut elsewhere does not move it.
+#[tokio::test]
+async fn a_tracked_source_keeps_the_first_outcome() {
+    let (first, second) = (TestNode::seeded(1).node_id(), TestNode::seeded(2).node_id());
+    let tracked = Tracked::new(
+        Meets {
+            meets: core::cell::RefCell::new([Unopened::Skew, Unopened::ServeGone].into()),
+            opens: core::cell::Cell::new(0),
+        },
+        std::collections::HashMap::new(),
+    );
+    assert!(matches!(
+        tracked.open(&sync_ask(first)).await,
+        Err(Unopened::Skew)
+    ));
+    assert!(matches!(
+        tracked.open(&sync_ask(second)).await,
+        Err(Unopened::Skew)
+    ));
+    assert!(tracked.gone(second).await);
+    assert_eq!(
+        tracked.source.opens.get(),
+        1,
+        "nothing opened after the record"
+    );
+    assert_eq!(
+        tracked.went(),
+        Some(Gone {
+            peer: first,
+            why: GoneWhy::Skew
+        })
+    );
 }

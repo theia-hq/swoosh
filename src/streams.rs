@@ -11,6 +11,7 @@ use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use bifrost::{ConnInfo, Discovery, NodeId, Session, Transport, WriteEnd};
@@ -155,6 +156,18 @@ pub trait StreamSource {
         &self,
         ask: &Ask,
     ) -> impl Future<Output = Result<Opened<Self::Write, Self::Read>, Unopened>>;
+
+    /// Whether the source itself went away, asked once after a stream it opened to `peer` was cut: a
+    /// source that keeps a record notes `peer` as where it went. A source that cannot go away says no.
+    fn gone(&self, peer: NodeId) -> impl Future<Output = bool> {
+        let _ = peer;
+        core::future::ready(false)
+    }
+    /// Whether the source is there and stalled, asked once at a run's end when an open went unanswered.
+    /// A source that cannot stall says no.
+    fn stalled(&self) -> impl Future<Output = bool> {
+        core::future::ready(false)
+    }
 }
 
 // A borrowed source opens as the source does, so a caller that hands one out by copy can lend it.
@@ -167,6 +180,187 @@ impl<S: StreamSource> StreamSource for &S {
         ask: &Ask,
     ) -> impl Future<Output = Result<Opened<Self::Write, Self::Read>, Unopened>> {
         S::open(self, ask)
+    }
+
+    fn gone(&self, peer: NodeId) -> impl Future<Output = bool> {
+        S::gone(self, peer)
+    }
+    fn stalled(&self) -> impl Future<Output = bool> {
+        S::stalled(self)
+    }
+}
+
+/// The source went away mid-run, at the stream to `peer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gone {
+    /// The machine whose stream met it.
+    pub peer: NodeId,
+    /// What it met.
+    pub why: GoneWhy,
+}
+
+/// How a source went away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoneWhy {
+    /// No resident answers any more.
+    Stopped,
+    /// A resident of another version answers.
+    Skew,
+    /// The resident is there and gave no reply in time, to an open nor to a status asked after.
+    Unresponsive,
+}
+
+impl GoneWhy {
+    /// What an open that met `unopened` says of the source itself, if anything: an outcome every later
+    /// open through it would meet too.
+    fn of(unopened: &Unopened) -> Option<Self> {
+        match unopened {
+            Unopened::ServeGone => Some(Self::Stopped),
+            Unopened::Skew => Some(Self::Skew),
+            _ => None,
+        }
+    }
+
+    /// The outcome every later open meets once the source went so, with no stream asked for.
+    fn unopened(self) -> Unopened {
+        match self {
+            Self::Stopped => Unopened::ServeGone,
+            Self::Skew => Unopened::Skew,
+            Self::Unresponsive => Unopened::Control(ControlError::Timeout {
+                phase: "response read",
+            }),
+        }
+    }
+}
+
+/// One run's view of a source that can go away: each ask carries the addresses typed for its peer, and
+/// the first sign that the source itself went away is kept, so every later ask returns at once with no
+/// stream asked for, and the run's last line can say where it went.
+pub struct Tracked<S> {
+    source: S,
+    /// The addresses typed for each machine, by its key.
+    hints: HashMap<NodeId, Hints>,
+    // `Cell`s: opens run through `&self` on one task; the first of each is kept.
+    gone: Cell<Option<Gone>>,
+    /// The first open that got no reply: its caller gave up first, or the reply wait timed out. Only a
+    /// candidate: a source dialing a slow machine answers late too, so [`settle`](Self::settle) asks.
+    unanswered: Cell<Option<NodeId>>,
+}
+
+/// Notes an open still waiting on its reply when its caller drops it.
+struct Waiting<'a> {
+    unanswered: &'a Cell<Option<NodeId>>,
+    peer: Option<NodeId>,
+}
+
+impl Waiting<'_> {
+    fn answered(mut self) {
+        self.peer = None;
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Some(peer) = self.peer
+            && self.unanswered.get().is_none()
+        {
+            self.unanswered.set(Some(peer));
+        }
+    }
+}
+
+impl<S: StreamSource> Tracked<S> {
+    /// The streams `source` opens, each to a machine in `hints` carrying that machine's addresses.
+    pub fn new(source: S, hints: HashMap<NodeId, Hints>) -> Self {
+        Self {
+            source,
+            hints,
+            gone: Cell::new(None),
+            unanswered: Cell::new(None),
+        }
+    }
+
+    /// At the run's end: when an open went unanswered and nothing else said the source went away, ask it
+    /// once whether it stalled, and keep that.
+    pub async fn settle(&self) {
+        if self.gone.get().is_some() {
+            return;
+        }
+        let Some(peer) = self.unanswered.get() else {
+            return;
+        };
+        if self.source.stalled().await {
+            self.record(Gone {
+                peer,
+                why: GoneWhy::Unresponsive,
+            });
+        }
+    }
+
+    /// Where the source went away, and how: the first such outcome of the run.
+    pub fn went(&self) -> Option<Gone> {
+        self.gone.get()
+    }
+
+    fn record(&self, gone: Gone) {
+        if self.gone.get().is_none() {
+            self.gone.set(Some(gone));
+        }
+    }
+}
+
+impl<S: StreamSource> StreamSource for Tracked<S> {
+    type Write = S::Write;
+    type Read = S::Read;
+
+    async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
+        if let Some(gone) = self.gone.get() {
+            return Err(gone.why.unopened());
+        }
+        let waiting = Waiting {
+            unanswered: &self.unanswered,
+            peer: Some(ask.peer),
+        };
+        let opened = match self.hints.get(&ask.peer) {
+            Some(hints) if ask.hints.as_slice().is_empty() => {
+                let hinted = Ask {
+                    peer: ask.peer,
+                    hints: hints.clone(),
+                    service: Service::clone(&ask.service),
+                    lane: ask.lane,
+                    slip: Option::clone(&ask.slip),
+                };
+                self.source.open(&hinted).await
+            }
+            _ => self.source.open(ask).await,
+        };
+        match &opened {
+            Err(Unopened::Control(ControlError::Timeout { .. })) => {}
+            _ => waiting.answered(),
+        }
+        opened.inspect_err(|unopened| {
+            if let Some(why) = GoneWhy::of(unopened) {
+                self.record(Gone {
+                    peer: ask.peer,
+                    why,
+                });
+            }
+        })
+    }
+
+    async fn stalled(&self) -> bool {
+        self.source.stalled().await
+    }
+
+    async fn gone(&self, peer: NodeId) -> bool {
+        let gone = self.source.gone(peer).await;
+        if gone {
+            self.record(Gone {
+                peer,
+                why: GoneWhy::Stopped,
+            });
+        }
+        gone
     }
 }
 
@@ -402,6 +596,16 @@ impl StreamSource for Resident {
             }
             Err(unopened) => Err(unopened),
         }
+    }
+
+    /// Asked of the socket, bounded: no status answers and `serve.lock` is free.
+    async fn gone(&self, _peer: NodeId) -> bool {
+        self.socket.gone().await
+    }
+
+    /// Asked of the socket, bounded: a status gets no reply in time while `serve.lock` is held.
+    async fn stalled(&self) -> bool {
+        self.socket.stalled().await
     }
 }
 

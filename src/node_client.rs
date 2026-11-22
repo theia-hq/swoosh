@@ -231,6 +231,17 @@ impl UidSocket {
         }
     }
 
+    /// Whether the resident is there and stalled, asked once at a run's end when an open went unanswered:
+    /// a status bounded by [`STOPPED_ASK`] gets no reply in time while `serve.lock` is held. A refused
+    /// connect is no stall (a live resident's full accept queue refuses one too), and neither is an
+    /// answer.
+    pub async fn stalled(&self) -> bool {
+        timeout(STOPPED_ASK, self.status_attributed())
+            .await
+            .is_err()
+            && !self.lock_free().await
+    }
+
     /// Whether the resident is gone, asked after a cut: a status bounded by [`STOPPED_ASK`] finds none,
     /// and `serve.lock` is free. Anything else, an answer, a reset or a stall, says something is there.
     pub async fn gone(&self) -> bool {

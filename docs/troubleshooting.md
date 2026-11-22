@@ -126,6 +126,32 @@ draining the uplink. Only `--public` the services you are willing to let a stran
 off <name>` stops serving it to anyone, live, no restart; to keep it for your own devices while
 taking it off the public menu, restart `serve` without the flag.
 
+## "does not apply while swoosh serve runs here"
+
+<!-- manual: needs a running swoosh serve and a reach flag -->
+```
+error: --relay or SWOOSH_RELAY does not apply while swoosh serve runs here
+  Commands here connect through swoosh serve.
+  Set it on swoosh serve, or stop swoosh serve and run this command again.
+```
+
+While `swoosh serve` runs on this machine, `sync`, `invite`, `revoke`, `join`, and `root restore` go
+through it, so `--local`, `--relay` and `--resolver` (and their `SWOOSH_` variables) belong on `serve`.
+
+## "swoosh serve on this machine is a different version" / "did not answer"
+
+<!-- manual: needs a serve of another build, or one that is stuck -->
+```
+error: swoosh serve on this machine is a different version
+  Restart it with this version.
+error: swoosh serve on this machine did not answer
+  Restart it.
+```
+
+The command went through the `serve` running here and it could not take the request. A `revoke`, `invite` or
+`root restore` has already done its part on this machine when this prints; restarting `serve` finishes the rest,
+because `serve` asks your devices as it starts.
+
 ## Next
 
 - [Keys](keys.md#the-gate) how the gate decides who gets in.

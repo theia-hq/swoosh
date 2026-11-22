@@ -861,6 +861,8 @@ async fn run() -> eyre::Result<()> {
         // exchange that brings the restored root up to date binds a transport, under the key it wrote for.
         Verb::RootRestore(cmd) => {
             unused_reach(&["root", "restore"], &cmd.reach);
+            hints_or_usage(&["root", "restore"], &cmd.reach);
+            commands::through_serve::refuse_moot(&home, &cmd.reach).await?;
             Outward::RootRestore(Box::new(cmd.run_local(&home).await?))
         }
         // A bare `swoosh invite`: what is due, read from the root's records with no lock and no prompt.
@@ -870,6 +872,8 @@ async fn run() -> eyre::Result<()> {
         // reach flag that exchange would never read is refused first, before the join writes anything.
         Verb::Join(cmd) => {
             unused_reach(&["join"], &cmd.reach);
+            hints_or_usage(&["join"], &cmd.reach);
+            commands::through_serve::refuse_moot(&home, &cmd.reach).await?;
             match cmd.run_local(&home).await? {
                 Some(from) => Outward::Join(join::JoinPull {
                     from,
@@ -880,10 +884,13 @@ async fn run() -> eyre::Result<()> {
         }
         Verb::Leave(cmd) => return cmd.run(&home).await,
         // Revokes: the block and its lines are local and come first, before any transport is composed,
-        // so nothing a bind does can delay or stop them. Only a device's part that your root publishes
-        // goes on to bind, to sync and to offer the cut. A root's revoke runs whole here: it dials nobody.
+        // so nothing a bind does can delay or stop them; a reach flag `serve` makes moot is refused first,
+        // as `unused_reach` is. Only a device's part that your root publishes goes on to bind, to sync and
+        // to offer the cut. A root's revoke runs whole here: it dials nobody.
         Verb::Revoke(cmd) => {
             unused_reach(&["revoke"], &cmd.reach);
+            hints_or_usage(&["revoke"], &cmd.reach);
+            commands::through_serve::refuse_moot(&home, &cmd.reach).await?;
             match cmd
                 .block(
                     &home,
@@ -941,6 +948,14 @@ async fn run() -> eyre::Result<()> {
                 &[verb_word.as_deref().unwrap_or_default()],
                 outward.reach_args(),
             );
+            // The exchange verbs take `--peer` on every path: what one Open could not carry is usage here,
+            // `serve` running or not.
+            if matches!(outward, Outward::Sync(_) | Outward::Invite(_)) {
+                hints_or_usage(
+                    &[verb_word.as_deref().unwrap_or_default()],
+                    outward.reach_args(),
+                );
+            }
             // A `serve` takes its home's lock and control socket before anything is opened or bound, so a
             // second one for the home refuses leaving everything as the running one has it. Its typed
             // services that cannot be one list exit 2 first, as clap's own errors do.
@@ -1054,6 +1069,37 @@ async fn run() -> eyre::Result<()> {
         }
     }
 
+    // `sync`, `invite`, `revoke`, `root restore` and `join`'s pull while `serve` runs here: each exchange,
+    // offer, pick-up and root question is one Open there, so nothing is bound beside it and no machine key
+    // is unlocked. `revoke`, `root restore` and `join` refused a moot reach flag before their local act;
+    // a `serve` that started since leaves that flag its own bind, so no refusal follows a landed act.
+    let exchanging = match &reach {
+        Outward::Sync(_) | Outward::Invite(_) => true,
+        Outward::Revoke(_) | Outward::RootRestore(_) | Outward::Join(_) => {
+            commands::through_serve::Moot::first(reach.reach_args()).is_none()
+        }
+        _ => false,
+    };
+    if exchanging && let Some((socket, probe)) = commands::through_serve::serve(&home).await? {
+        // The connection that showed `serve` answers carries nothing, and would sit idle for the run:
+        // each exchange takes one of its own.
+        drop(probe);
+        let hints = hints_or_usage(
+            &[verb_word.as_deref().unwrap_or_default()],
+            reach.reach_args(),
+        );
+        return exchange_through_serve(
+            reach,
+            &home,
+            socket,
+            hints,
+            &mut swoosh::passphrase::Terminal,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )
+        .await;
+    }
+
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
     // writing nothing. Resolve it before binding, since the secret is what the transport is bound under.
@@ -1159,6 +1205,92 @@ async fn run() -> eyre::Result<()> {
     let node = Node::new(endpoint, composed.discovery);
     let reach = reach.attach_bound_reach(&bound.reach);
     run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
+}
+
+/// The `--peer` addresses as each machine's hints, or the usage error they make, exit 2: checked before
+/// anything is read, written or opened.
+fn hints_or_usage(
+    path: &[&str],
+    reach: &transport::ReachArgs,
+) -> std::collections::HashMap<bifrost::NodeId, swoosh::peers::Hints> {
+    commands::through_serve::hints(reach)
+        .unwrap_or_else(|error| usage_error(path, &error.to_string()))
+}
+
+/// Run an exchange verb's exchanges through the `serve` on `socket`: each is one Open there, on Main with
+/// no slip, `hints` riding the Opens to their own machine. A reach flag `serve` makes moot refuses before
+/// the first Open. When `serve` went away or stopped answering during the run, the verb's own lines come
+/// first and its line ends the run; once it has, nothing more is opened through it.
+async fn exchange_through_serve(
+    outward: Outward,
+    home: &Home,
+    socket: swoosh::node_client::UidSocket,
+    hints: std::collections::HashMap<bifrost::NodeId, swoosh::peers::Hints>,
+    prompt: &mut impl swoosh::passphrase::Prompt,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> eyre::Result<()> {
+    use commands::through_serve::{Moot, ServeStopped, Skew, StoppedAfterAct, Unresponsive};
+    use swoosh::streams::GoneWhy;
+
+    if let Some(moot) = Moot::first(outward.reach_args()) {
+        return Err(moot.into());
+    }
+    let source = swoosh::streams::Tracked::new(
+        swoosh::streams::Resident::new(std::rc::Rc::new(socket)),
+        hints,
+    );
+    let dial = swoosh::sync::SourceDial::new(&source, home);
+    let fetch = swoosh::renewal::SourceFetch::new(&source);
+    // A root act may cut the very device its exchange met, so its names are read before it, and after.
+    let before = swoosh::sync::devices(home, []).await.unwrap_or_default();
+    let after = async || swoosh::sync::devices(home, []).await.unwrap_or_default();
+    let (named, act) = match outward {
+        Outward::Sync(cmd) => (
+            cmd.exchange(home, &dial, &fetch, &source, out).await?,
+            false,
+        ),
+        Outward::Invite(cmd) => {
+            cmd.issue(home, prompt, &dial, out, err).await?;
+            (after().await, true)
+        }
+        Outward::Revoke(cmd) => {
+            cmd.publish.run(home, prompt, &dial, err).await?;
+            (after().await, true)
+        }
+        Outward::RootRestore(cmd) => {
+            cmd.finish(home, &dial, err).await?;
+            (after().await, true)
+        }
+        // The pull is never printed: a machine that does not answer now is asked at the next sync.
+        Outward::Join(pull) => {
+            join::pull(&dial, pull.from).await;
+            return Ok(());
+        }
+        _ => eyre::bail!(
+            "internal: a verb that makes no exchange reached the exchange route (root-dispatch bug)"
+        ),
+    };
+    source.settle().await;
+    let Some(gone) = source.went() else {
+        return Ok(());
+    };
+    Err(match gone.why {
+        GoneWhy::Skew => Skew.into(),
+        GoneWhy::Unresponsive => Unresponsive.into(),
+        GoneWhy::Stopped => {
+            let name = named
+                .into_iter()
+                .chain(before)
+                .find(|device| device.key == gone.peer)
+                .map_or_else(|| credential::short(&gone.peer), |device| device.name);
+            if act {
+                StoppedAfterAct(name).into()
+            } else {
+                ServeStopped::to(name).into()
+            }
+        }
+    })
 }
 
 /// Which iroh constructor the bind selects, the flags' one mechanism. A named choice instead of an
