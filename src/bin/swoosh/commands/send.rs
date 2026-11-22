@@ -13,22 +13,33 @@
 //! names the root of whatever it sends: who sent the bytes is the gate's proof, and the receiver's line
 //! names that key.
 
+use core::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use bifrost::{Discovery, Node, Session, Transport};
+use bifrost::{Discovery, Node, NodeId, Refusal, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
+use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, EscapedPath, causes, escaped_report};
+use swoosh::home::Home;
 use swoosh::learn::Admitted;
+use swoosh::node_client::UidSocket;
 use swoosh::peer::{Machine, Peer};
+use swoosh::peers::{Hints, OpenError};
+use swoosh::reach;
+use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
+use swoosh::streams::{Ask, OwnBind, Resident, StreamSource, Unopened};
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
 use transfer::wire::{Blob, Transfer};
 
-use crate::commands::machine;
+use crate::commands::connect::ConnectionLost;
+use crate::commands::through_serve::{self, Busy, Dial, Routed, Skew, StandingEnded, ThisMachine};
+use crate::commands::{learning, machine};
 
 /// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
@@ -81,19 +92,16 @@ impl swoosh::reaching::Reaching for SendCmd {
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
-            &self.peer,
-            self.service.as_str(),
-        ))
+        swoosh::reaching::BindRole::Dialing(self.credential())
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `send` reads the resolved `present` badge and
-    /// the machine resolved before the bind; it ignores `transport` and `key`.
+    /// Uniform dispatch: each file is a stream on the run's own Bulk session to the machine resolved
+    /// before the bind, presenting what each open reads from the home, or an `anyone` link alone.
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
         node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        _peers: &'p swoosh::peers::Peers<'n, T, D>,
+        ctx: swoosh::reaching::ReachCtx<'p>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         T::Session: 'static,
@@ -103,49 +111,122 @@ impl swoosh::reaching::Reaching for SendCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `send` ran without its machine resolved (root-dispatch bug)");
         };
-        self.run_send(node, machine, ctx.present, ctx.membership, ctx.admitted)
-            .await
+        let ask = Ask {
+            peer: machine.key(),
+            // The addresses typed for the machine reach this run's dials through its discovery.
+            hints: Hints::NONE,
+            service: self.service.clone(),
+            lane: SEND_LANE,
+            slip: self.peer.self_present(),
+        };
+        let route = Route::Own {
+            peer: &self.peer,
+            bound: ctx.bound,
+            this: node.node_id(),
+        };
+        self.run_send(
+            OwnBind::new(peers, ctx.home, node.node_id(), &self.credential()),
+            &route,
+            machine,
+            ask,
+            ctx.admitted,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )
+        .await
     }
 }
 
+/// The lane `send`'s file streams ride: a fan-out of long transfers, so a slow one never holds the Main
+/// session the run's exchanges ride past its open deadline.
+const SEND_LANE: OpenLane = OpenLane::Bulk;
+
 impl SendCmd {
-    /// Reach the peer's `recv:` service and push every named file over its own gated stream, expanding
-    /// directories first. Presents the resolved `present` (this device's membership badge, or the link typed
-    /// as the peer) so the receiver's family gate admits each stream. A file that cannot be read is
-    /// skipped and reported; the run ends non-zero if any item failed. A stream the receiver refuses
-    /// `NotAdmitted` ends the run with the one dial refusal, never a `skip:` per file.
-    async fn run_send<T: Transport, D: Discovery>(
-        self,
-        node: &Node<T, D>,
+    /// What this run dials as: the one value that picks its bind and what each of its streams presents.
+    fn credential(&self) -> swoosh::credential::Credential {
+        swoosh::credential::Credential::dialing(&self.peer, self.service.as_str())
+    }
+
+    /// Run through the `serve` at `home` when one answers there: `machine` as resolved, `slip` the link
+    /// typed as it, if one was, and `contacts` to name it in a line. A root the machine shows is told
+    /// after the run, as by own bind.
+    ///
+    /// # Errors
+    ///
+    /// The control socket cannot be trusted; never an own bind then.
+    pub async fn through_serve(
+        &self,
+        home: &Home,
         machine: &Machine,
-        present: Option<Link>,
-        membership: Option<Link>,
-        admitted: Admitted,
-    ) -> eyre::Result<()>
-    where
-        T::Session: 'static,
-    {
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
-        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
-        // link-as-peer through that same resolver, so the verb never threads a slip itself.
-        let connector = swoosh::reach::gated(
-            machine.key(),
-            self.service.clone(),
-            Option::clone(&present),
-            Option::clone(&membership),
+        slip: Option<Link>,
+        contacts: &Contacts,
+    ) -> eyre::Result<Routed> {
+        // Each file's Open takes a control connection of its own, so the one that showed `serve` answers
+        // carries nothing.
+        let Some((socket, _)) = through_serve::serve(home).await? else {
+            return Ok(Routed::OwnBind);
+        };
+        let dial = Dial {
+            machine,
+            service: &self.service,
+            slip,
+            reach: &self.reach,
+            contacts,
+        };
+        let ask = match dial.ask(SEND_LANE) {
+            Ok(ask) => ask,
+            Err(unattached) => {
+                return Ok(Routed::Ran(Err(dial.unattached(unattached, &socket).await)));
+            }
+        };
+        let socket = Rc::new(socket);
+        let resident = Resident::new(Rc::clone(&socket));
+        let route = Route::Serve {
+            dial: &dial,
+            socket: &socket,
+        };
+        let (admitted, lookup) = crate::lookup(swoosh::learn::Asked::of(machine));
+        let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+        let (ended, shown) = tokio::join!(
+            self.run_send(
+                &resident, &route, machine, ask, admitted, &mut out, &mut err,
+            ),
+            lookup
         );
-        let dial = connector.dial();
-        println!("sending to {dial}...");
-        // A service-scoped session: each `open_bi` speaks the `recv:` request and presents the badge, so
-        // every per-file stream is admitted by the receiver's gate on its own merits. The connect chain can
-        // carry the peer's text (the reason it gave for closing), so it prints through the escaper.
-        let session = node
-            .connect(dial)
-            .await
-            .map_err(|error| escaped_report(eyre::Report::new(error)))?;
-        // Its first admitted file stream tells the composition root it may ask which root vouches for the
-        // machine.
-        let session = admitted.watch(session, connector);
+        if let Some(shown) = shown {
+            learning::tell(
+                home,
+                &shown,
+                learning::Asking::here(),
+                &mut swoosh::passphrase::Terminal,
+                &mut std::io::stderr(),
+            )
+            .await;
+        }
+        Ok(Routed::Ran(ended))
+    }
+
+    /// Push every named file to `machine`, each over its own stream from `source` as `ask` asks for it,
+    /// expanding directories first, and printing on `out` and `err`. Up to [`MAX_INFLIGHT`] files go at
+    /// once. A file that cannot be read, or whose stream alone fails, is skipped and reported; the run
+    /// ends non-zero if any was. An outcome every later stream would repeat ends the run with its one
+    /// line, never a `skip` per file: for `NotAdmitted`, after asking the machine why. The first
+    /// admitted stream gives `admitted` its question, asked through `source`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's two writers ride beside its source"
+    )]
+    async fn run_send<'s, S: StreamSource + Copy + 's>(
+        &self,
+        source: S,
+        route: &Route<'_>,
+        machine: &Machine,
+        ask: Ask,
+        admitted: Admitted<'s>,
+        out: &mut impl std::io::Write,
+        err: &mut impl std::io::Write,
+    ) -> eyre::Result<()> {
+        writeln!(out, "sending to {}...", machine.key())?;
 
         // Expand directories, then pipeline up to MAX_INFLIGHT files over concurrent streams.
         let mut files = Vec::new();
@@ -154,86 +235,238 @@ impl SendCmd {
             match collect_files(path).await {
                 Ok(collected) => files.extend(collected),
                 Err(error) => {
-                    eprintln!("skip {}: {error:#}", render_path(path));
+                    writeln!(err, "skip {}: {error:#}", render_path(path))?;
                     failures += 1;
                 }
             }
         }
 
+        // A `Cell`: the file streams open through a shared borrow on one task, and whichever is admitted
+        // first takes the signal.
+        let admitted = Cell::new(Some(admitted));
+        let first = First {
+            admitted: &admitted,
+            admitted_any: Cell::new(false),
+            source,
+            key: machine.key(),
+        };
         let mut pending = files.into_iter();
         let mut sending = FuturesUnordered::new();
         for _ in 0..MAX_INFLIGHT {
             match pending.next() {
-                Some((name, path)) => sending.push(send_one(&session, name, path)),
+                Some((name, path)) => sending.push(send_one(&first, &ask, name, path)),
                 None => break,
             }
         }
         while let Some(result) = sending.next().await {
             match result {
-                Ok(()) => {}
-                // The receiver refused this machine the service: no other file would be admitted, so the
-                // run ends here with one refusal, and the files still in flight are dropped.
-                Err(error) if error.is::<NotAdmitted>() => {
+                Ok((name, len)) => writeln!(out, "sent {} ({len} bytes)", Escaped(&name))?,
+                // No later file would be admitted: the run ends here with one line, and the files still
+                // in flight are dropped.
+                Err((_, Unsent::Unopened(unopened))) if first.ends(&unopened) => {
                     drop(sending);
-                    let diagnosis = swoosh::reach::diagnose_over(
-                        node,
-                        machine,
-                        &self.service,
-                        present,
-                        membership,
-                    )
-                    .await;
-                    return Err(machine::refused(machine, &self.service, diagnosis));
+                    return Err(self.ended(unopened, source, route, machine, ask).await);
                 }
-                Err(error) => {
-                    eprintln!("skip: {error:#}");
+                Err((name, Unsent::Unopened(unopened))) => {
+                    let line = route.line(unopened, machine).await;
+                    writeln!(err, "skip {}: {line:#}", Escaped(&name))?;
+                    failures += 1;
+                }
+                Err((name, Unsent::Failed(error))) => {
+                    writeln!(err, "skip {}: {error:#}", Escaped(&name))?;
                     failures += 1;
                 }
             }
             if let Some((name, path)) = pending.next() {
-                sending.push(send_one(&session, name, path));
+                sending.push(send_one(&first, &ask, name, path));
             }
         }
 
-        // The composition root closes the node once anything still running beside the verb has ended.
         if failures > 0 {
             eyre::bail!("{failures} item(s) could not be sent");
         }
         Ok(())
     }
+
+    /// The line a run ends with for `unopened`, which every later stream would repeat. A machine's
+    /// `NotAdmitted` asks it why first, through the same `source`.
+    async fn ended(
+        &self,
+        unopened: Unopened,
+        source: impl StreamSource,
+        route: &Route<'_>,
+        machine: &Machine,
+        ask: Ask,
+    ) -> eyre::Report {
+        match unopened {
+            Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted)) => {
+                let diagnosis =
+                    reach::diagnose_through(&source, machine, &self.service, ask.slip).await;
+                machine::refused(machine, &self.service, diagnosis)
+            }
+            other => route.line(other, machine).await,
+        }
+    }
 }
 
-/// Push one file over its own admitted stream: hash it, open a gated stream, and drive the transfer,
-/// naming the file by its relative name so the receiver saves it under that name.
-async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre::Result<()> {
+/// The path a run's streams take, for the line an open that gave no stream prints: each path prints its
+/// own line for the same outcome.
+enum Route<'a> {
+    /// By own bind: the machine as typed and what the run bound, for an unreachable one's line, and the
+    /// key it bound, for an ended standing's remedy.
+    Own {
+        peer: &'a Peer,
+        bound: &'a swoosh::transport::Bound,
+        this: NodeId,
+    },
+    /// Through `serve`: the dial's lines, and its socket to ask whether `serve` went.
+    Serve {
+        dial: &'a Dial<'a>,
+        socket: &'a UidSocket,
+    },
+}
+
+impl Route<'_> {
+    /// The line `unopened` prints for `machine`: by own bind, the cause chain as a transport's failure
+    /// prints it; through `serve`, the routed verbs' line for it.
+    async fn line(&self, unopened: Unopened, machine: &Machine) -> eyre::Report {
+        let (peer, bound, this) = match self {
+            Self::Serve { dial, socket } => {
+                let unattached = dial.unopened(unopened, socket).await;
+                return dial.unattached(unattached, *socket).await;
+            }
+            Self::Own { peer, bound, this } => (*peer, *bound, *this),
+        };
+        match unopened {
+            Unopened::Refused(OpenRefusal::Peer(refusal)) => {
+                peer_error(&bifrost::Error::Refused(Refusal::from(refusal)))
+            }
+            Unopened::Refused(OpenRefusal::StandingEnded) => StandingEnded(Some(this)).into(),
+            Unopened::Refused(OpenRefusal::NotHere) => ThisMachine::of(machine).into(),
+            Unopened::Refused(OpenRefusal::Busy) => Busy.into(),
+            Unopened::Refused(OpenRefusal::Unreachable(detail)) => {
+                peer_error(&bifrost::Error::Connect(detail.to_string().into()))
+            }
+            Unopened::Refused(OpenRefusal::Timeout) => {
+                peer_error(&bifrost::Error::Connect("timed out".into()))
+            }
+            Unopened::Refused(
+                OpenRefusal::Broken(detail) | OpenRefusal::PeerUnreadable(detail),
+            ) => peer_error(&bifrost::Error::Stream(detail.to_string().into())),
+            Unopened::Own(error @ OpenError::Unreachable(_)) => {
+                reach::open_failed(peer, error, bound)
+            }
+            Unopened::Own(error) => peer_error(&error),
+            Unopened::Home(report) => peer_error(report.as_ref()),
+            // The resident's own outcomes, which a run that bound its own never meets.
+            Unopened::ServeError(reason) => escaped_report(eyre::eyre!(reason)),
+            Unopened::Skew => Skew.into(),
+            Unopened::Malformed(malformed) => malformed.into(),
+            Unopened::ServeGone | Unopened::Control(_) => ConnectionLost.into(),
+        }
+    }
+}
+
+/// What a run holds to hand over its root question once a file stream is admitted: the signal, taken
+/// by the first, and the source and key the question asks through. It also knows whether any file was
+/// admitted, which decides what a machine not reached means.
+struct First<'a, 's, S> {
+    admitted: &'a Cell<Option<Admitted<'s>>>,
+    /// Whether a file stream of this run was admitted. Apart from the signal, which the question takes
+    /// and so cannot be read in place.
+    // A `Cell`: the file streams open through a shared borrow on one task.
+    admitted_any: Cell<bool>,
+    source: S,
+    key: NodeId,
+}
+
+impl<'s, S: StreamSource + Copy + 's> First<'_, 's, S> {
+    /// Whether `unopened` ends this run: an outcome every later open repeats (the shared table), one this
+    /// run's fixed ask and home repeat, or a machine not reached before any file was admitted.
+    ///
+    /// The home and a resident's Error reply belong to the run's fixed inputs: every Error reply an
+    /// unobserved Open can get (a home it cannot read, a request it cannot decode) repeats for this ask,
+    /// and a passing fault comes back as a typed refusal or no reply at all. A machine not reached before
+    /// any admission is a fact about the machine, so every file would repeat it; after one, the path
+    /// dropped, and the next file redials.
+    fn ends(&self, unopened: &Unopened) -> bool {
+        unopened.ends_run()
+            || matches!(unopened, Unopened::Home(_) | Unopened::ServeError(_))
+            || (unopened.unreached() && !self.admitted_any.get())
+    }
+
+    /// A file stream was admitted: the first gives the signal, so the question is asked from now, and
+    /// never ahead of it.
+    fn admitted(&self) {
+        self.admitted_any.set(true);
+        let Some(admitted) = self.admitted.take() else {
+            return;
+        };
+        let (source, key) = (self.source, self.key);
+        admitted.ask(Box::pin(async move {
+            match swoosh::learn::ask_through(&source, key).await {
+                Ok(standing) => standing,
+                Err(error) => {
+                    tracing::debug!(%error, "the root lookup failed");
+                    None
+                }
+            }
+        }));
+    }
+}
+
+/// Why one file was not sent: its stream was not opened, kept typed for the run to sort, or it failed
+/// some other way, its line.
+enum Unsent {
+    Unopened(Unopened),
+    Failed(eyre::Report),
+}
+
+/// Push one file over its own admitted stream, opened through `first`'s source as `ask` asks: hash it,
+/// open the stream, and drive the transfer, naming the file by its relative name so the receiver saves
+/// it under that name. The file's name and length once it is sent, else its name and why not, so the
+/// skip line names the file.
+async fn send_one<'s, S: StreamSource + Copy + 's>(
+    first: &First<'_, 's, S>,
+    ask: &Ask,
+    name: String,
+    path: PathBuf,
+) -> Result<(String, u64), (String, Unsent)> {
+    match send_named(first, ask, &name, &path).await {
+        Ok(len) => Ok((name, len)),
+        Err(unsent) => Err((name, unsent)),
+    }
+}
+
+/// [`send_one`]'s body: the file's length once it is sent.
+async fn send_named<'s, S: StreamSource + Copy + 's>(
+    first: &First<'_, 's, S>,
+    ask: &Ask,
+    name: &str,
+    path: &Path,
+) -> Result<u64, Unsent> {
     let blob = {
-        let mut file = tokio::fs::File::open(&path)
+        let mut file = tokio::fs::File::open(path)
             .await
-            .wrap_err_with(|| format!("open {}", render_path(&path)))?;
-        Blob::hash(&mut file).await?
+            .wrap_err("open")
+            .map_err(Unsent::Failed)?;
+        Blob::hash(&mut file)
+            .await
+            .map_err(|error| Unsent::Failed(error.into()))?
     };
 
-    let (send, recv) = session.open_bi().await.map_err(|error| match error {
-        bifrost::Error::Refused(bifrost::Refusal::NotAdmitted) => eyre::Report::new(NotAdmitted),
-        error => peer_error(&error),
-    })?;
-    let mut source = tokio::fs::File::open(&path)
+    let opened = first.source.open(ask).await.map_err(Unsent::Unopened)?;
+    first.admitted();
+    let mut source = tokio::fs::File::open(path)
         .await
-        .wrap_err_with(|| format!("open {}", render_path(&path)))?;
-    Transfer::new(send, recv)
+        .wrap_err("open")
+        .map_err(Unsent::Failed)?;
+    Transfer::new(opened.write, opened.read)
         .send(name.as_bytes(), &blob, &mut source)
         .await
-        .map_err(|error| peer_error(&error))?;
-
-    println!("sent {} ({} bytes)", Escaped(&name), blob.len());
-    Ok(())
+        .map_err(|error| Unsent::Failed(peer_error(&error)))?;
+    Ok(blob.len())
 }
-
-/// A stream the receiver refused `NotAdmitted`: the run's one refusal, which ends it rather than skipping
-/// the file.
-#[derive(Debug, thiserror::Error)]
-#[error("the receiver refused the stream")]
-struct NotAdmitted;
 
 /// A failed stream or transfer as the skip line prints it: the cause chain, `outer: inner`, through the
 /// shared escaper. The chain can carry the receiver's text (a refusal detail, the reason it gave for
@@ -255,9 +488,7 @@ fn render_path(path: &Path) -> String {
 /// under it, named by its path relative to the directory's parent (so the directory name is kept). Ported
 /// from iris.
 async fn collect_files(root: &Path) -> eyre::Result<Vec<(String, PathBuf)>> {
-    let meta = tokio::fs::metadata(root)
-        .await
-        .wrap_err_with(|| format!("stat {}", render_path(root)))?;
+    let meta = tokio::fs::metadata(root).await.wrap_err("stat")?;
 
     if meta.is_file() {
         let name = file_name(root)?;

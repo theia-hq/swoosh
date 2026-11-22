@@ -29,9 +29,12 @@ use tokio::sync::oneshot;
 use crate::contacts::{Contacts, ContactsStore, DeviceLabel, ME, Petname, Taken};
 use crate::home::{Home, HomeWrite};
 use crate::peer::{Kind, Machine};
+use crate::peers::Hints;
 use crate::renewal::FetchError;
 use crate::root_key::RootKey;
 use crate::serve::LOOKUP_ROOT_SERVICE;
+use crate::serve::control_codec::OpenLane;
+use crate::streams::{Ask, StreamSource, Unopened};
 
 /// The longest a dial's question may run, from its start: under the asked machine's 5 s cap on the
 /// stream, and short enough that a machine that admits it and never answers holds the run open no longer.
@@ -130,9 +133,8 @@ impl Found {
 
 /// Ask `asked`'s machine which root vouches for it, over a connection of its own on `node`: the root its
 /// standing names, when the standing verifies. For `sync`, which holds no other session to the machine; a
-/// dial asks on its own session instead ([`Admitted`]), since an endpoint may hold one connection per peer
-/// and a second would replace the verb's. `None` on a miss, a failure, or a standing that teaches nothing;
-/// never an error, since nothing else depends on it.
+/// dial asks beside its own streams instead ([`Admitted`]). `None` on a miss, a failure, or a standing
+/// that teaches nothing; never an error, since nothing else depends on it.
 pub async fn ask<T: Transport, D: Discovery>(node: &Node<T, D>, asked: &Asked) -> Option<Shown> {
     let session = match node.connect(asked.key).await {
         Ok(session) => session,
@@ -143,6 +145,35 @@ pub async fn ask<T: Transport, D: Discovery>(node: &Node<T, D>, asked: &Asked) -
     };
     let standing = answer(&session).await?;
     asked.taught(&standing)
+}
+
+/// Open the root route to `key` through `source`, presenting nothing, on Main, and read its one answer:
+/// the standing on a hit, `None` on a miss. A refusal of any kind is the same miss to the asker, as on
+/// [`ask_on`].
+///
+/// # Errors
+///
+/// The stream failed some other way, or its answer did not read.
+pub async fn ask_through(
+    source: &impl StreamSource,
+    key: NodeId,
+) -> Result<Option<Link>, FetchError> {
+    let service: Service = LOOKUP_ROOT_SERVICE
+        .parse()
+        .map_err(|error| eyre::eyre!("{error}"))?;
+    let ask = Ask {
+        peer: key,
+        hints: Hints::NONE,
+        service,
+        lane: OpenLane::Main,
+        slip: None,
+    };
+    let opened = match source.open(&ask).await {
+        Ok(opened) => opened,
+        Err(Unopened::Refused(_)) => return Ok(None),
+        Err(other) => return Err(eyre::eyre!("the root lookup opened no stream: {other:?}").into()),
+    };
+    crate::renewal::read_answer(opened.read).await
 }
 
 /// The standing `session`'s peer hands over on its root route, or `None` on a miss or a failure, logged.
@@ -266,18 +297,18 @@ pub async fn save(home: &Home, shown: &Shown) -> eyre::Result<Result<(), Taken>>
     Ok(saved)
 }
 
-/// The root question a dial's first admitted stream hands over: the machine's standing, asked on the
-/// session the verb dialed, which it holds open until it ends. Its answer is read with [`Asked::taught`].
-pub type Question = LocalBoxFuture<'static, Option<Link>>;
+/// The root question a dial's first admitted stream hands over: the machine's standing, asked beside the
+/// verb's streams, holding what it asks through until it ends. Its answer is read with [`Asked::taught`].
+pub type Question<'s> = LocalBoxFuture<'s, Option<Link>>;
 
 /// The signal a dial's first admitted stream gives: the question to ask beside the verb, from that moment
 /// and never ahead of it. Dropped unsent when the verb ends with no stream admitted, so whoever waits on it
 /// stops waiting.
 #[derive(Default)]
-pub struct Admitted(Option<oneshot::Sender<Question>>);
+pub struct Admitted<'s>(Option<oneshot::Sender<Question<'s>>>);
 
 // By hand: a question is a future, which has no `Debug` of its own.
-impl core::fmt::Debug for Admitted {
+impl core::fmt::Debug for Admitted<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let Self(signal) = self;
         f.debug_struct("Admitted")
@@ -286,9 +317,9 @@ impl core::fmt::Debug for Admitted {
     }
 }
 
-impl Admitted {
+impl<'s> Admitted<'s> {
     /// A signal and the end that hears it.
-    pub fn new() -> (Self, oneshot::Receiver<Question>) {
+    pub fn new() -> (Self, oneshot::Receiver<Question<'s>>) {
         let (tx, rx) = oneshot::channel();
         (Self(Some(tx)), rx)
     }
@@ -298,9 +329,19 @@ impl Admitted {
         Self(None)
     }
 
+    /// Give the signal: `question`, asked beside the verb from now on. For a verb whose first stream was
+    /// just admitted.
+    pub fn ask(self, question: Question<'s>) {
+        let Self(signal) = self;
+        if let Some(signal) = signal {
+            // Nobody listening any more is no failure of the verb's.
+            let _ = signal.send(question);
+        }
+    }
+
     /// `session`, gated through `connector` on every stream it opens, giving this signal the first time one
     /// is admitted.
-    pub fn watch<S: Session + 'static>(self, session: S, connector: Connector) -> Watched<S> {
+    pub fn watch<S: Session + 'static>(self, session: S, connector: Connector) -> Watched<'s, S> {
         let Self(signal) = self;
         Watched {
             session: Rc::new(session),
@@ -314,17 +355,16 @@ impl Admitted {
 /// and that hands over the root question when its first stream is admitted ([`Admitted::watch`]).
 ///
 /// The question rides this same session, and holds it (an `Rc`, since a dial runs on one task) so it stays
-/// open until the question ends, past the verb if it must: an endpoint may hold one connection per peer,
-/// so a connection of its own would replace the verb's.
-pub struct Watched<S> {
+/// open until the question ends, past the verb if it must.
+pub struct Watched<'s, S> {
     session: Rc<S>,
     connector: Connector,
     // A `Cell`: a stream opens through `&self`, and the sender is taken once, by whichever open admits
     // first. Never shared across threads, since the session is not.
-    signal: Cell<Option<oneshot::Sender<Question>>>,
+    signal: Cell<Option<oneshot::Sender<Question<'s>>>>,
 }
 
-impl<S: Session + 'static> Session for Watched<S> {
+impl<S: Session + 'static> Session for Watched<'_, S> {
     type Write = S::Write;
     type Read = S::Read;
 

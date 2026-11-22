@@ -204,7 +204,7 @@ macro_rules! reaching_verbs {
             async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
                 self,
                 node: &'n Node<T, D>,
-                ctx: reaching::ReachCtx<'_>,
+                ctx: reaching::ReachCtx<'p>,
                 peers: &'p swoosh::peers::Peers<'n, T, D>,
             ) -> eyre::Result<()>
             where
@@ -1007,10 +1007,15 @@ async fn run() -> eyre::Result<()> {
     }
 
     // `speed`, `ping` and `status <machine>` while `serve` runs here, the same way: one observed Open
-    // there, its path read through `serve` after the run. `proxy` too, an unobserved Open per request.
+    // there, its path read through `serve` after the run. `proxy` too, an unobserved Open per request,
+    // and `send`, one per file.
     if matches!(
         reach,
-        Outward::Speed(_) | Outward::Ping(_) | Outward::Status(_) | Outward::Proxy(_)
+        Outward::Speed(_)
+            | Outward::Ping(_)
+            | Outward::Status(_)
+            | Outward::Proxy(_)
+            | Outward::Send(_)
     ) && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
@@ -1031,6 +1036,10 @@ async fn run() -> eyre::Result<()> {
             )),
             Outward::Proxy(cmd) => Some((
                 "proxy",
+                cmd.through_serve(&home, machine, slip, contacts).await?,
+            )),
+            Outward::Send(cmd) => Some((
+                "send",
                 cmd.through_serve(&home, machine, slip, contacts).await?,
             )),
             _ => None,
@@ -1233,7 +1242,7 @@ async fn stale_device(home: &Home, machine: &Machine) -> Option<bifrost::NodeId>
 async fn run_verb<'n: 'p, 'p, T: Transport, D: Discovery>(
     outward: Outward,
     node: &'n Node<T, D>,
-    mut ctx: reaching::ReachCtx<'_>,
+    ctx: reaching::ReachCtx<'_>,
     peers: &'p swoosh::peers::Peers<'n, T, D>,
     dial: &impl swoosh::sync::Dial,
 ) -> (eyre::Result<()>, Option<swoosh::learn::Shown>)
@@ -1249,26 +1258,20 @@ where
         }
         _ => None,
     };
-    let asked = ctx
-        .machine
-        .filter(|_| outward.teaches_root())
-        .and_then(swoosh::learn::Asked::of);
-    let heard = asked.as_ref().map(|_| {
-        let (admitted, heard) = swoosh::learn::Admitted::new();
-        ctx.admitted = admitted;
-        heard
-    });
-    let lookup = async {
-        let (Some(asked), Some(heard)) = (&asked, heard) else {
-            return None;
-        };
-        // Unsent when the verb ended with no stream admitted: then nothing is asked.
-        let question = heard.await.ok()?;
-        let standing = tokio::time::timeout(swoosh::learn::DEADLINE, question)
-            .await
-            .ok()
-            .flatten()?;
-        asked.taught(&standing)
+    let (admitted, lookup) = lookup(
+        ctx.machine
+            .filter(|_| outward.teaches_root())
+            .and_then(swoosh::learn::Asked::of),
+    );
+    // The question may borrow what the verb opens through, so the context is the run's for as long.
+    let ctx = reaching::ReachCtx {
+        contacts: ctx.contacts,
+        machine: ctx.machine,
+        bound: ctx.bound,
+        present: ctx.present,
+        membership: ctx.membership,
+        home: ctx.home,
+        admitted,
     };
     let verb = async { tokio::join!(outward.run(node, ctx, peers), lookup) };
     match device {
@@ -1283,6 +1286,37 @@ where
             }
         }
     }
+}
+
+/// The root question a verb that may teach a root asks about `asked`'s machine: the signal its first
+/// admitted stream gives, and the lookup that hears it, then asks within [`swoosh::learn::DEADLINE`]. A
+/// machine that never answers is dropped silently. With nothing to ask, the signal is unheard and the
+/// lookup ends at once; one never given, when the verb ended with no stream admitted, asks nothing.
+pub(crate) fn lookup<'s>(
+    asked: Option<swoosh::learn::Asked>,
+) -> (
+    swoosh::learn::Admitted<'s>,
+    impl Future<Output = Option<swoosh::learn::Shown>> + 's,
+) {
+    let (admitted, heard) = match &asked {
+        Some(_) => {
+            let (admitted, heard) = swoosh::learn::Admitted::new();
+            (admitted, Some(heard))
+        }
+        None => (swoosh::learn::Admitted::unheard(), None),
+    };
+    let lookup = async move {
+        let (Some(asked), Some(heard)) = (asked, heard) else {
+            return None;
+        };
+        let question = heard.await.ok()?;
+        let standing = tokio::time::timeout(swoosh::learn::DEADLINE, question)
+            .await
+            .ok()
+            .flatten()?;
+        asked.taught(&standing)
+    };
+    (admitted, lookup)
 }
 
 /// Run a reaching verb, then await node close on success or error. Cancellation can bypass this close.

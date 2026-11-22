@@ -14,12 +14,14 @@ use core::time::Duration;
 use bifrost::{ConnInfo, Discovery, Node, NodeId, Path, Session, Transport};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::{self, Connector};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::escape::{Escaped, causes, escaped_report};
 use crate::peer::{Kind, Machine};
-use crate::peers::OpenError;
+use crate::peers::{Hints, OpenError};
 use crate::serve::CONTROL_SERVICES_SERVICE;
+use crate::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
+use crate::streams::{Ask, StreamSource, Unopened};
 use crate::transport;
 
 /// The two diagnostic services a peer serves, independent so a node may offer one without the other: `ping`
@@ -205,6 +207,54 @@ pub async fn diagnose_over<T: Transport, D: Discovery>(
     )
 }
 
+/// [`diagnose`] through `source`, the path the refused stream took: one `control.services` stream on Main,
+/// presenting `slip` when the machine was typed as a link, else what `source` presents for the route.
+/// Asked of your own devices only, and bounded by [`FOLLOW_UP_TIMEOUT`], as [`diagnose`] is.
+pub async fn diagnose_through(
+    source: &impl StreamSource,
+    machine: &Machine,
+    service: &Service,
+    slip: Option<Link>,
+) -> Option<Diagnosis> {
+    if machine.kind() != Kind::Yours {
+        return None;
+    }
+    let asked = async {
+        let Ok(route) = CONTROL_SERVICES_SERVICE.parse::<Service>() else {
+            return Diagnosis::Unknown;
+        };
+        let ask = Ask {
+            peer: machine.key(),
+            hints: Hints::NONE,
+            service: route,
+            lane: OpenLane::Main,
+            slip,
+        };
+        match source.open(&ask).await {
+            Ok(mut opened) => {
+                // The read sends nothing. Its clean end, never a dropped half, which a stream through
+                // the resident passes on as a reset, lets the node's reply complete.
+                if let Err(error) = opened.write.shutdown().await {
+                    tracing::debug!(%error, "the follow-up's request did not end cleanly");
+                }
+                listed(opened.read, service).await
+            }
+            Err(Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted))) => {
+                Diagnosis::NotYours
+            }
+            Err(unopened) => {
+                tracing::debug!(?unopened, "the follow-up call failed");
+                Diagnosis::Unknown
+            }
+        }
+    };
+    Some(
+        tokio::time::timeout(FOLLOW_UP_TIMEOUT, asked)
+            .await
+            .unwrap_or(Diagnosis::Unknown),
+    )
+}
+
 /// The one `control.services` call: open the route with the refused dial's credentials, read the list,
 /// and say whether it holds `service`. Nothing from the reply is printed, only whether the name is in it.
 async fn ask<S: Session>(
@@ -230,6 +280,11 @@ async fn ask<S: Session>(
     };
     // The read sends nothing; dropping the write half lets the node's reply complete.
     drop(writer);
+    listed(reader, service).await
+}
+
+/// Whether the list `reader` carries holds `service`. Nothing from it is printed.
+async fn listed(reader: impl tokio::io::AsyncRead + Unpin, service: &Service) -> Diagnosis {
     match read_catalog(reader).await {
         Ok(catalog)
             if catalog
