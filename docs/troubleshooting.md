@@ -77,6 +77,26 @@ that its `swoosh serve` is running and that both sides can reach the internet. I
 resolver, a line under the error names it (`resolver asked: <url>`); check that it is up
 and that the machine publishes to the same one.
 
+## "warning: a connection to me/nas failed"
+
+<!-- manual: needs a live peer -->
+```
+warning: a connection to me/nas failed: unreachable
+  Still listening for new connections.
+```
+
+One connection through `forward <port>` or `proxy` could not open; the others are not affected. The text
+after the colon is the cause:
+
+- `reached, but refused (unavailable: <why>)` or `(bad request: <why>)`: the machine answered and said no.
+- `unreachable`: no path to the machine, or it did not answer in time.
+- `interrupted`, or `interrupted (<why>)`: the stream broke as it opened.
+- `too many connections here`: wait for one to close.
+
+The name is the machine's, or `that machine` or `the link's machine` if it has none. The line prints once;
+it prints again only after a later connection works. A connection that opened never warns, whatever ends it.
+To stop, press ctrl-c.
+
 ## A revoke did not take effect
 
 A revoke lands live: the gate re-reads the denylist when its file changes

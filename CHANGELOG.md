@@ -37,6 +37,14 @@ All notable changes to swoosh, newest first.
   side ends cleanly and, if you sent anything, the other machine holds it; any other end prints
   `error: connection lost` and exits 1, with or without `swoosh serve` running. With a file or pipe on stdin, it
   no longer cuts the upload when the other side finishes first.
+- **`forward <port>` and `proxy` keep listening when one connection fails, and say so once.** A connection that
+  could not open prints `warning: a connection to me/nas failed: <why>` on stderr, then nothing more until a
+  connection works again. A connection that opened never warns, whatever ends it. This holds by `swoosh serve`
+  and without it. A machine that refuses you mid-run ends the run with the refusal (`proxy` answers the
+  request with a `403` first). Without `serve`, a host that cuts the session ends `proxy` with
+  `error: connection lost`, as it ends `forward`. A `proxy` client waiting on a host that was cut gets
+  `proxy failed: connection lost`, and one mid-body is reset. The `502` body of `proxy` no longer carries raw
+  peer text.
 - **A forward to a port, or a TCP service you serve, that the other machine cuts off now ends with a reset, not a clean
   close.** A cut-off transfer no longer reads as complete. A forward's local client is also reset when the session
   is lost or the stream is refused.
