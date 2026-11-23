@@ -35,6 +35,9 @@ All notable changes to swoosh, newest first.
   exit 1; `send` stops there instead of skipping each file, and a `forward <port>` or `proxy` connection that fails later
   keeps its warning. Through `serve`, `ping`, `speed`, `status` and `send` also warn when this machine's standing
   is about to expire, as they do without it.
+- **`send` ends on a socket to `swoosh serve` that cannot be trusted.** It prints one line,
+  `error: refusing to trust the control path <path>: not this user's 0700 runtime dir/socket`, and exits 1, where it
+  printed a `skip` line per remaining file.
 - **`forward <port>` and `proxy` run through `swoosh serve` too.** If `serve` stops, both end with
   `error: swoosh serve stopped here and ended the connection to me/nas`. A `proxy` request that fails gets a
   `502` whose body is one line, `proxy failed: <what went wrong>`, and `proxy` still prints its URL first.
