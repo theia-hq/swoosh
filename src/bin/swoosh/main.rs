@@ -1352,6 +1352,8 @@ async fn dial_through_serve(
         socket: &socket,
     };
     let route = &route;
+    // Set once a `send` file prints `sent`, for the record's line below; no other verb sets it.
+    let sent = &core::cell::Cell::new(false);
     let verb = async |admitted| match dialing {
         Dialing::Ping(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
         Dialing::Speed(cmd) => {
@@ -1360,7 +1362,7 @@ async fn dial_through_serve(
         }
         Dialing::Status(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
         Dialing::Send(cmd) => {
-            cmd.through(source, route, machine, admitted, out, err)
+            cmd.through(source, route, machine, admitted, sent, out, err)
                 .await
         }
     };
@@ -1373,9 +1375,11 @@ async fn dial_through_serve(
     // were sent, so the verb ended clean and said nothing of it. Its line ends the run, once, after the
     // verb's own lines. A verb that ended on a line keeps it: a record made before one of its Opens is
     // what ended it. No `settle`: a beside Open dropped unanswered still never reads as `serve` stalled.
+    // A `send` that ended clean sent every file, so after a `sent` line nothing is left to send again.
     match (ended, source.went()) {
         (Ok(()), Some(gone)) => Err(match gone.why {
             GoneWhy::Skew => Skew.into(),
+            GoneWhy::Stopped if sent.get() => dial.stopped_line().after_all_sent().into(),
             GoneWhy::Stopped => dial.serve_stopped(),
             GoneWhy::Unresponsive => Unresponsive.into(),
         }),

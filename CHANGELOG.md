@@ -38,6 +38,8 @@ All notable changes to swoosh, newest first.
 - **`send` ends on a socket to `swoosh serve` that cannot be trusted.** It prints one line,
   `error: refusing to trust the control path <path>: not this user's 0700 runtime dir/socket`, and exits 1, where it
   printed a `skip` line per remaining file.
+- **`send` says what to rerun when `swoosh serve` stops after files were sent.** The ending asks to rerun without
+  the files already marked `sent`, or says every file was marked `sent` when none are left.
 - **`forward <port>` and `proxy` run through `swoosh serve` too.** If `serve` stops, both end with
   `error: swoosh serve stopped here and ended the connection to me/nas`. A `proxy` request that fails gets a
   `502` whose body is one line, `proxy failed: <what went wrong>`, and `proxy` still prints its URL first.

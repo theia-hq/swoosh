@@ -120,7 +120,19 @@ async fn resident(
     let root = swoosh::home::runtime_root().unwrap();
     std::fs::create_dir_all(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (lock, listener) = swoosh::serve::acquire_single(home, &root).await.unwrap();
+    // A sibling test's fork holds the last lock's O_CLOEXEC flock copy until its exec: wait, bounded.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let (lock, listener) = loop {
+        match swoosh::serve::acquire_single(home, &root).await {
+            Err(
+                swoosh::serve::SingleError::KeyChanging
+                | swoosh::serve::SingleError::AlreadyResident { .. },
+            ) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            taken => break taken.unwrap(),
+        }
+    };
     listener.set_nonblocking(true).unwrap();
     let listener = tokio::net::UnixListener::from_std(listener).unwrap();
     tokio::spawn(async move {

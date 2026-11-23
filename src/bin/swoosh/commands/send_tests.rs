@@ -9,6 +9,7 @@
 //! leak the bytes the prefix escaped.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use core::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -145,6 +146,7 @@ async fn by_own_bind<T: Transport, D: Discovery>(
             machine,
             ask,
             Admitted::unheard(),
+            &Cell::new(false),
             &mut out,
             &mut err,
         )
@@ -198,6 +200,7 @@ async fn through_socket(
             machine,
             ask,
             Admitted::unheard(),
+            &Cell::new(false),
             &mut out,
             &mut err,
         ),
@@ -361,6 +364,11 @@ async fn send_opens_one_bulk_stream_per_file_on_both_paths() {
 const SERVE_STOPPED: &str = "swoosh serve stopped here and ended the connection to me/nas\n  Commands here \
                              connect through it while it runs.\n  Run this command again to reconnect.";
 
+/// The line a run to `me/nas` ends with when `serve` is gone after a file printed `sent`, files left.
+const STOPPED_AFTER_SENT: &str = "swoosh serve stopped here and ended the connection to me/nas\n  Commands \
+                                  here connect through it while it runs.\n  Run this command again to \
+                                  reconnect, without the files already marked `sent`.";
+
 /// A row of [`send_ends_on_a_refusal_every_file_would_repeat`]: its tag, the resident's answer to every
 /// Open, and the line the run ends with.
 type Case = (&'static str, fn() -> Answer, String);
@@ -439,7 +447,8 @@ async fn send_ends_on_a_refusal_every_file_would_repeat() {
         );
     }
 
-    // Another version answering once this run's Opens attached is a restarted `serve`: the run's is gone.
+    // Another version answering once this run's Opens attached is a restarted `serve`: the run's is gone,
+    // after files printed `sent`.
     let mut served = Served::new("send-ends-restarted").await;
     let rig = Rig::default();
     let resident = scripted(
@@ -453,7 +462,7 @@ async fn send_ends_on_a_refusal_every_file_would_repeat() {
     let ran = through(&cmd, &served.home, &peer, None, &contacts).await;
     rig.stop.cancel();
     let report = ran.ended.expect_err("the run ended non-zero");
-    assert_eq!(format!("{report:#}"), SERVE_STOPPED);
+    assert_eq!(format!("{report:#}"), STOPPED_AFTER_SENT);
     assert!(!ran.err.contains("skip "), "{}", ran.err);
     let heard = tokio::time::timeout(ROW_BOUND, resident)
         .await
@@ -656,6 +665,57 @@ async fn send_ends_when_serve_stops_before_an_open_is_answered() {
         .unwrap()
         .unwrap();
     assert_eq!(file_opens(&heard).len(), 2);
+}
+
+/// Through `serve`, a run that ends on `serve` stopping after a file printed `sent` says to leave the
+/// sent files out of the rerun, since a bare rerun would send them again. Before any `sent` line, the
+/// run's line is `serve` stopping's own, unchanged.
+#[tokio::test]
+async fn a_serve_stopped_after_a_sent_file_ends_without_resending() {
+    let contacts = book();
+    let peer = typed(&contacts, "me/nas");
+
+    // One window's worth answered, then `serve` stops, before the last file's Open: that file opens only
+    // once one of the window printed `sent`.
+    let (dir, paths) = files("stopped-after-sent", MAX_INFLIGHT + 1);
+    let mut argv: Vec<&str> = paths.iter().map(String::as_str).collect();
+    argv.push("me/nas");
+    let cmd = send(&argv);
+    let mut served = Served::new("send-stopped-after-sent").await;
+    let rig = Rig::default();
+    let resident = scripted(
+        &mut served,
+        (0..MAX_INFLIGHT).map(|_| ack()).collect(),
+        &rig,
+    );
+    let ran = through(&cmd, &served.home, &peer, None, &contacts).await;
+    let _ = std::fs::remove_dir_all(dir);
+    let report = ran.ended.expect_err("the run ended non-zero");
+    assert_eq!(format!("{report:#}"), STOPPED_AFTER_SENT);
+    assert!(!report.is::<ThisMachine>(), "exit 1, not a usage error");
+    // The run ends at the first file to meet the stop; the files still in flight print nothing.
+    assert!(!sent_names(&ran.out).is_empty(), "{}", ran.out);
+    assert_eq!(ran.err, "", "no skip line");
+    tokio::time::timeout(ROW_BOUND, resident)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // `serve` stops before any file printed `sent`: the line is unchanged.
+    let (dir, paths) = files("stopped-before-sent", 1);
+    let cmd = send(&[paths[0].as_str(), "me/nas"]);
+    let mut served = Served::new("send-stopped-before-sent").await;
+    let rig = Rig::default();
+    let resident = scripted(&mut served, vec![Answer::Vanish], &rig);
+    let ran = through(&cmd, &served.home, &peer, None, &contacts).await;
+    let _ = std::fs::remove_dir_all(dir);
+    let report = ran.ended.expect_err("the run ended non-zero");
+    assert_eq!(format!("{report:#}"), SERVE_STOPPED);
+    assert!(sent_names(&ran.out).is_empty(), "{}", ran.out);
+    tokio::time::timeout(ROW_BOUND, resident)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 /// A machine reached once and then not is a path that dropped: the file whose open met it is skipped,
@@ -954,6 +1014,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
         };
         let (admitted, lookup) = crate::lookup(swoosh::learn::Asked::of(&peer));
         let (mut out, mut err) = (Vec::new(), Vec::new());
+        let sent = Cell::new(false);
         let (ended, _shown) = tokio::join!(
             cmd.run_send(
                 OwnBind::new(&peers, &home, node.node_id(), &cmd.credential()),
@@ -961,6 +1022,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
                 &peer,
                 ask,
                 admitted,
+                &sent,
                 &mut out,
                 &mut err,
             ),
@@ -1005,6 +1067,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
         };
         let (admitted, lookup) = crate::lookup(swoosh::learn::Asked::of(&peer));
         let (mut out, mut err) = (Vec::new(), Vec::new());
+        let sent = Cell::new(false);
         let _ = tokio::time::timeout(ROW_BOUND, async {
             tokio::join!(
                 cmd.run_send(
@@ -1013,6 +1076,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
                     &peer,
                     ask,
                     admitted,
+                    &sent,
                     &mut out,
                     &mut err
                 ),
@@ -1359,6 +1423,7 @@ async fn a_stalled_serve_ends_a_send_once() {
             &route,
             &peer,
             Admitted::unheard(),
+            &Cell::new(false),
             &mut out,
             &mut err,
         ),
