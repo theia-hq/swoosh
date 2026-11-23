@@ -26,6 +26,10 @@ All notable changes to swoosh, newest first.
   `status` reads `me/nas, path: direct, rtt 12.031 ms`; `ping` prints the device, then a `path:` row from a
   reading taken after the run. If that fails, the path is left out, stderr says
   `warning: could not read the path of this run`, and the exit code is unchanged.
+- **`speed`, `ping` and `status <machine>` print the same refusal with or without `swoosh serve`.** A machine that
+  refuses `speed` prints `error: stream refused: unavailable: <why>`, as `send` does, and `speed` prints its title
+  only once the stream is open. A `ping` or `status <machine>` that gets no answer in time prints
+  `me/nas: unreachable` either way; `speed` and `send` print an error whose words differ by path.
 - **A `swoosh serve` that stops answering is named, and the expiring-standing warning follows the run.** `ping`,
   `speed`, `status <machine>`, `send`, `forward` and `proxy` end with `error: swoosh serve on this machine did not answer` and
   exit 1; `send` stops there instead of skipping each file, and a `forward <port>` or `proxy` connection that fails later

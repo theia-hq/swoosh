@@ -84,10 +84,11 @@ impl Handler for Lookup {
     }
 }
 
-/// A `mem` transport that counts the sessions it accepts.
+/// A `mem` transport that counts the sessions it accepts and the ones it dials.
 struct Counted {
     inner: MemTransport,
     accepted: Arc<AtomicU32>,
+    dialed: Arc<AtomicU32>,
 }
 
 impl Transport for Counted {
@@ -106,6 +107,7 @@ impl Transport for Counted {
     }
 
     async fn connect(&self, addr: Addr) -> Result<Self::Session, bifrost::Error> {
+        self.dialed.fetch_add(1, Ordering::SeqCst);
         self.inner.connect(addr).await
     }
 
@@ -114,6 +116,7 @@ impl Transport for Counted {
         addr: Addr,
         updates: bifrost::HintStream,
     ) -> Result<Self::Session, bifrost::Error> {
+        self.dialed.fetch_add(1, Ordering::SeqCst);
         self.inner.connect_with_updates(addr, updates).await
     }
 
@@ -134,6 +137,7 @@ fn counted() -> (Node<Counted, NoDiscovery>, Arc<AtomicU32>) {
     let transport = Counted {
         inner: MemTransport::bind(),
         accepted: Arc::clone(&accepted),
+        dialed: Arc::default(),
     };
     (Node::new(transport, NoDiscovery), accepted)
 }
@@ -309,15 +313,7 @@ where
                 Beside::of(&outward, home, ctx.machine),
                 &Answering::with(Answer::Same),
                 async |admitted| {
-                    let ctx = swoosh::reaching::ReachCtx {
-                        contacts: ctx.contacts,
-                        machine: ctx.machine,
-                        bound: ctx.bound,
-                        present: ctx.present,
-                        membership: ctx.membership,
-                        home: ctx.home,
-                        admitted,
-                    };
+                    let ctx = swoosh::reaching::ReachCtx { admitted, ..ctx };
                     swoosh::reaching::Reaching::run(outward, node, ctx, &peers).await
                 },
             ),
@@ -391,6 +387,46 @@ fn a_dial_of_a_saved_machine_asks_its_root_once() {
         assert_eq!(asked.load(Ordering::SeqCst), 2, "asked on every dial");
         assert_eq!(accepted.load(Ordering::SeqCst), 2, "one session per dial");
         assert_eq!(again.told, "", "said once per new root");
+        cancel.cancel();
+    });
+}
+
+/// From a home that holds a badge, the ping presents it and the question presents nothing, so they ride
+/// different keys; the question still joins the ping's session rather than dialing a second.
+#[test]
+fn a_badged_home_asks_on_the_pings_own_session() {
+    on_a_big_stack(|| async {
+        let cancel = CancellationToken::new();
+        let (key, asked) = machine(Answers::Standing, cancel.clone());
+        let dialed = Arc::new(AtomicU32::new(0));
+        let node = Node::new(
+            Counted {
+                inner: MemTransport::bind(),
+                accepted: Arc::default(),
+                dialed: Arc::clone(&dialed),
+            },
+            NoDiscovery,
+        );
+        // Over `mem` the run binds the transport's key, so the badge is bound to that.
+        let home = desk("badged");
+        let root = TestRoot::seeded(YOUR_ROOT);
+        swoosh::config::write_signet(&swoosh::testkit::lock(), &home, root.node_id()).unwrap();
+        let badge = root
+            .device_badge(
+                node.node_id(),
+                SystemTime::now() + Duration::from_secs(3600),
+            )
+            .unwrap();
+        swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge).unwrap();
+        alice_laptop(&home, key).await;
+        ping_on(&node, &home, "alice/laptop").await;
+        node.close().await;
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "one question");
+        assert_eq!(
+            dialed.load(Ordering::SeqCst),
+            1,
+            "the question joined the ping's session"
+        );
         cancel.cancel();
     });
 }

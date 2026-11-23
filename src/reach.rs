@@ -1,11 +1,9 @@
-//! Reach a resolved [`Machine`]: one dial, bounded, and the one follow-up a refused dial to one of your
-//! own devices makes to learn why.
+//! Reach a resolved [`Machine`]: the lines a dial that reached nothing prints, and the one follow-up a
+//! refused dial to one of your own devices makes to learn why.
 //!
 //! A verb resolves its peer to exactly one machine before anything binds ([`Peer::machine`]), so every
-//! reach here dials one key. [`dial`] connects for a verb that drives the raw session; [`dial_service`]
-//! connects for one whose every stream is gated through one service request, handing back the connector
-//! beside the session. Both bound the attempt with [`DIAL_TIMEOUT`], so a wedged machine reads as
-//! unreachable rather than as a hang.
+//! reach here is to one key. Its streams come from a [`StreamSource`], whose dials are bounded there,
+//! so a wedged machine reads as unreachable rather than as a hang.
 //!
 //! [`Peer::machine`]: crate::peer::Peer::machine
 
@@ -32,50 +30,13 @@ pub const PING_SERVICE: &str = "ping";
 /// The speed service; see [`PING_SERVICE`].
 pub const SPEED_SERVICE: &str = "speed";
 
-/// How long to wait for a machine to connect before calling it unreachable. Ten seconds is generous for a
-/// real handshake (including iroh hole-punching) yet short enough that a dead machine does not feel like a
-/// hang.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long the follow-up to a refused dial may take, its own dial included: under [`DIAL_TIMEOUT`], since
-/// it runs where the person expects the verb to have ended, and a machine that admits it and never answers
+/// How long the follow-up to a refused dial may take, its own dial included: under a dial's own ten
+/// seconds, since it runs where the person expects the verb to have ended, and a machine that admits it and never answers
 /// must not hold the run open.
 pub const FOLLOW_UP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Connect to `machine`, typed as `target`, under the [`DIAL_TIMEOUT`]. `bound` is what this run bound, so
-/// a failure can point at the fix its bind needs.
-pub async fn dial<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
-    machine: &Machine,
-    target: &impl core::fmt::Display,
-    bound: &transport::Bound,
-) -> eyre::Result<T::Session> {
-    connect(node, machine.key())
-        .await
-        .map_err(|error| hint(unreached(target, error), bound))
-}
-
-/// Connect to `machine` for its gated `service`: the session and the connector every stream on it opens
-/// through, presenting `present` (the caller's membership badge or a link) and, for a signet-bound slip,
-/// `membership` in slot 2. The service handshake rides each stream later (the gate is per stream), so this
-/// bounds only reaching the machine, as [`dial`] does. The session is returned raw, so a second service
-/// can ride it beside the first.
-pub async fn dial_service<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
-    machine: &Machine,
-    target: &impl core::fmt::Display,
-    service: &Service,
-    present: Option<Link>,
-    membership: Option<Link>,
-    bound: &transport::Bound,
-) -> eyre::Result<(T::Session, Connector)> {
-    let session = dial(node, machine, target, bound).await?;
-    let connector = gated(machine.key(), Service::clone(service), present, membership);
-    Ok((session, connector))
-}
-
 /// The error for an open through the run's [`Peers`](crate::peers::Peers) that gave no stream: a dial that
-/// reached no session reads as [`dial`]'s does, with the fix `bound` needs; any other failure keeps its
+/// reached no session reads `could not reach <target>`, with the fix `bound` needs; any other failure keeps its
 /// chain, escaped, since it can carry the peer's text.
 pub fn open_failed(
     target: &impl core::fmt::Display,
@@ -95,26 +56,6 @@ pub fn open_failed(
 /// the escaper; the target is this machine's own word for the peer and prints as it is.
 fn unreached(target: &impl core::fmt::Display, error: eyre::Report) -> eyre::Report {
     eyre::eyre!("could not reach {target}: {}", escaped_report(error))
-}
-
-/// Connect to `key` under the [`DIAL_TIMEOUT`], mapping a timeout to a plain unreachable error.
-async fn connect<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
-    key: NodeId,
-) -> eyre::Result<T::Session> {
-    match tokio::time::timeout(DIAL_TIMEOUT, node.connect(key)).await {
-        Ok(Ok(session)) => Ok(session),
-        Ok(Err(error)) => {
-            tracing::debug!(peer = %key, %error, "machine unreachable");
-            Err(eyre::Report::new(error))
-        }
-        Err(_elapsed) => {
-            tracing::debug!(peer = %key, timeout = ?DIAL_TIMEOUT, "machine did not answer in time");
-            Err(eyre::eyre!(
-                "timed out after {DIAL_TIMEOUT:?} with no response"
-            ))
-        }
-    }
 }
 
 /// The connector for `service` on `key` presenting `present` in slot 1 and, when given, `membership` in
@@ -330,7 +271,7 @@ pub async fn read_catalog(
 /// Put the fact the bind mode explains under a reach failure, and the fix under that, so the error says
 /// what happened first and what to do next.
 ///
-/// Shared by [`dial`] and the probe verbs so a `could not reach` always carries the same remedy. A cause
+/// Shared by every dial's line so a `could not reach` always carries the same remedy. A cause
 /// the person may have set names both its spellings, since they may only ever have set the variable, and
 /// so does a remedy that removes one; a remedy that adds a flag names the flag alone, since a flag beats
 /// its variable.

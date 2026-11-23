@@ -804,6 +804,9 @@ async fn run() -> eyre::Result<()> {
     // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
     // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address
     // book. A reaching verb falls through to bind a transport below.
+    // The `--peer` addresses as each machine's hints, for a verb whose Opens through `serve` carry them:
+    // checked once, at the arm, and kept for the route.
+    let mut hints = std::collections::HashMap::new();
     let reach = match verb {
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
         // A bare `swoosh status` (no peer): this machine, from its own files. It never dials; with a
@@ -861,7 +864,7 @@ async fn run() -> eyre::Result<()> {
         // exchange that brings the restored root up to date binds a transport, under the key it wrote for.
         Verb::RootRestore(cmd) => {
             unused_reach(&["root", "restore"], &cmd.reach);
-            hints_or_usage(&["root", "restore"], &cmd.reach);
+            hints = hints_or_usage(&["root", "restore"], &cmd.reach);
             commands::through_serve::refuse_moot(&home, &cmd.reach).await?;
             Outward::RootRestore(Box::new(cmd.run_local(&home).await?))
         }
@@ -872,7 +875,7 @@ async fn run() -> eyre::Result<()> {
         // reach flag that exchange would never read is refused first, before the join writes anything.
         Verb::Join(cmd) => {
             unused_reach(&["join"], &cmd.reach);
-            hints_or_usage(&["join"], &cmd.reach);
+            hints = hints_or_usage(&["join"], &cmd.reach);
             commands::through_serve::refuse_moot(&home, &cmd.reach).await?;
             match cmd.run_local(&home).await? {
                 Some(from) => Outward::Join(join::JoinPull {
@@ -889,7 +892,7 @@ async fn run() -> eyre::Result<()> {
         // to offer the cut. A root's revoke runs whole here: it dials nobody.
         Verb::Revoke(cmd) => {
             unused_reach(&["revoke"], &cmd.reach);
-            hints_or_usage(&["revoke"], &cmd.reach);
+            hints = hints_or_usage(&["revoke"], &cmd.reach);
             commands::through_serve::refuse_moot(&home, &cmd.reach).await?;
             match cmd
                 .block(
@@ -959,7 +962,7 @@ async fn run() -> eyre::Result<()> {
                     | Outward::Status(_)
                     | Outward::Send(_)
             ) {
-                hints_or_usage(
+                hints = hints_or_usage(
                     &[verb_word.as_deref().unwrap_or_default()],
                     outward.reach_args(),
                 );
@@ -1031,28 +1034,26 @@ async fn run() -> eyre::Result<()> {
 
     // `speed`, `ping`, `status <machine>` and `send` while `serve` runs here: each stream, the stale-list
     // exchange beside it and the root question are each one Open there.
-    if matches!(
-        reach,
-        Outward::Speed(_) | Outward::Ping(_) | Outward::Status(_) | Outward::Send(_)
-    ) && let BindRole::Dialing(credential) = reach.bind_role()
+    if let Some(dialing) = Dialing::of(&reach)
+        && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
         && let Some((socket, probe)) = commands::through_serve::serve(&home).await?
     {
         // The connection that showed `serve` answers carries nothing: each Open takes one of its own.
         drop(probe);
-        let hints = hints_or_usage(
-            &[verb_word.as_deref().unwrap_or_default()],
-            reach.reach_args(),
-        );
-        return dial_through_serve(
-            reach,
-            &home,
+        let through = ThroughServe {
             machine,
             slip,
             socket,
             hints,
-            store.contacts(),
+            contacts: store.contacts(),
+        };
+        return dial_through_serve(
+            dialing,
+            Beside::of(&reach, &home, Some(machine)),
+            through,
+            learning::Asking::here(),
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         )
@@ -1100,10 +1101,6 @@ async fn run() -> eyre::Result<()> {
         // The connection that showed `serve` answers carries nothing, and would sit idle for the run:
         // each exchange takes one of its own.
         drop(probe);
-        let hints = hints_or_usage(
-            &[verb_word.as_deref().unwrap_or_default()],
-            reach.reach_args(),
-        );
         return exchange_through_serve(
             reach,
             &home,
@@ -1233,36 +1230,100 @@ fn hints_or_usage(
         .unwrap_or_else(|error| usage_error(path, &error.to_string()))
 }
 
-/// Run a dialing verb through the `serve` on `socket`: its streams, the stale-list exchange beside it and
-/// the root question are each one Open there, with `hints` riding the Opens to their own machine.
+/// A dialing verb that runs through `serve` when one answers here, read once from the verb.
+enum Dialing<'a> {
+    Ping(&'a commands::ping::PingCmd),
+    Speed(&'a commands::speed::SpeedCmd),
+    Status(&'a status::StatusCmd),
+    Send(&'a commands::send::SendCmd),
+}
+
+impl<'a> Dialing<'a> {
+    /// `outward`, when it is a dialing verb with streams of its own through `serve`.
+    fn of(outward: &'a Outward) -> Option<Self> {
+        match outward {
+            Outward::Ping(cmd) => Some(Self::Ping(cmd)),
+            Outward::Speed(cmd) => Some(Self::Speed(cmd)),
+            Outward::Status(cmd) => Some(Self::Status(cmd)),
+            Outward::Send(cmd) => Some(Self::Send(cmd)),
+            Outward::Serve(_)
+            | Outward::Proxy(_)
+            | Outward::Forward(_)
+            | Outward::Stop(_)
+            | Outward::Sync(_)
+            | Outward::Invite(_)
+            | Outward::Join(_)
+            | Outward::Revoke(_)
+            | Outward::RootRestore(_) => None,
+        }
+    }
+
+    /// The verb's reach flags.
+    fn reach_args(&self) -> &transport::ReachArgs {
+        match self {
+            Self::Ping(cmd) => &cmd.reach,
+            Self::Speed(cmd) => &cmd.reach,
+            Self::Status(cmd) => &cmd.reach,
+            Self::Send(cmd) => &cmd.reach,
+        }
+    }
+
+    /// The service the verb's stream to `machine` asks for.
+    fn service(&self, machine: &Machine) -> eyre::Result<nauthy::Service> {
+        Ok(match self {
+            Self::Ping(_) => swoosh::reach::PING_SERVICE.parse()?,
+            Self::Speed(_) => swoosh::reach::SPEED_SERVICE.parse()?,
+            Self::Status(_) => status::StatusCmd::service(machine)?,
+            Self::Send(cmd) => nauthy::Service::clone(&cmd.service),
+        })
+    }
+}
+
+/// The `serve` a dialing verb runs through, and what its Opens carry: the machine, the link it was
+/// typed as, if one was, and the addresses typed for each machine.
+struct ThroughServe<'a> {
+    machine: &'a Machine,
+    slip: Option<nauthy::Link>,
+    socket: swoosh::node_client::UidSocket,
+    hints: std::collections::HashMap<bifrost::NodeId, swoosh::peers::Hints>,
+    /// This home's book, to name the machine.
+    contacts: &'a Contacts,
+}
+
+/// Run a dialing verb through the `serve` on `through.socket`: its streams, the stale-list exchange
+/// beside it and the root question are each one Open there, with the hints riding the Opens to their
+/// own machine. Each verb's body is the one its own bind runs, worded for this path by its route.
 ///
 /// A reach flag `serve` makes moot refuses before anything is opened. The expiring-badge warning the own
 /// bind prints before its bind prints here before the first Open, keyed to the key `serve` runs as. What
 /// runs beside the verb ends with it and prints nothing of its own; a beside Open dropped unanswered is
 /// never asked about, so a slow machine never reads as `serve` stalled. One that met `serve` gone or of
-/// another version ends a run the verb ended clean with that line, once. Its lines go to `out` and `err`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the run's two writers ride beside what it dials"
-)]
+/// another version ends a run the verb ended clean with that line, once. A root the machine showed is
+/// told after the run, asking as `asking` says. Its lines go to `out` and `err`.
 async fn dial_through_serve(
-    outward: Outward,
-    home: &Home,
-    machine: &Machine,
-    slip: Option<nauthy::Link>,
-    socket: swoosh::node_client::UidSocket,
-    hints: std::collections::HashMap<bifrost::NodeId, swoosh::peers::Hints>,
-    contacts: &Contacts,
+    dialing: Dialing<'_>,
+    beside: Beside<'_>,
+    through: ThroughServe<'_>,
+    asking: learning::Asking,
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
+    use commands::route::Route;
     use commands::through_serve::{Dial, Moot, Skew, Unresponsive};
     use swoosh::node_client::NodeClient as _;
     use swoosh::streams::GoneWhy;
 
-    if let Some(moot) = Moot::first(outward.reach_args()) {
+    if let Some(moot) = Moot::first(dialing.reach_args()) {
         return Err(moot.into());
     }
+    let ThroughServe {
+        machine,
+        slip,
+        socket,
+        hints,
+        contacts,
+    } = through;
+    let home = beside.home;
     let socket = std::rc::Rc::new(socket);
     let source = swoosh::streams::Tracked::new(
         swoosh::streams::Resident::new(std::rc::Rc::clone(&socket)),
@@ -1277,53 +1338,36 @@ async fn dial_through_serve(
         Ok(Err(error)) => tracing::debug!(%error, "serve's status for the badge's warning failed"),
         Err(_elapsed) => tracing::debug!("serve's status for the badge's warning took too long"),
     }
-    let service = match &outward {
-        Outward::Ping(_) => swoosh::reach::PING_SERVICE.parse()?,
-        Outward::Speed(_) => swoosh::reach::SPEED_SERVICE.parse()?,
-        Outward::Status(_) => status::StatusCmd::service(machine)?,
-        Outward::Send(cmd) => nauthy::Service::clone(&cmd.service),
-        _ => eyre::bail!(NOT_DIALING),
-    };
+    let service = dialing.service(machine)?;
     let dial = Dial {
         machine,
         service: &service,
         slip,
-        reach: outward.reach_args(),
+        reach: dialing.reach_args(),
         contacts,
     };
-    let beside = Beside::of(&outward, home, Some(machine));
-    let (source, socket, dial) = (&source, &socket, &dial);
-    let verb = async |admitted| match &outward {
-        Outward::Ping(cmd) => {
-            cmd.through(source, dial, socket, machine, admitted, out, err)
+    let source = &source;
+    let route = Route::Serve {
+        dial: &dial,
+        socket: &socket,
+    };
+    let route = &route;
+    let verb = async |admitted| match dialing {
+        Dialing::Ping(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
+        Dialing::Speed(cmd) => {
+            cmd.measure(source, route, machine, admitted, out, err)
                 .await
         }
-        Outward::Speed(cmd) => {
-            cmd.through(source, dial, socket, machine, admitted, out, err)
+        Dialing::Status(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
+        Dialing::Send(cmd) => {
+            cmd.through(source, route, machine, admitted, out, err)
                 .await
         }
-        Outward::Status(cmd) => {
-            cmd.through(source, dial, socket, machine, admitted, out, err)
-                .await
-        }
-        Outward::Send(cmd) => {
-            cmd.through(source, dial, socket, machine, admitted, out, err)
-                .await
-        }
-        // Refused with the service above, before anything was opened.
-        _ => eyre::bail!(NOT_DIALING),
     };
     let (ended, shown) = run_verb(beside, &swoosh::sync::SourceDial::new(source, home), verb).await;
     // Told once the run is done, as by own bind: a question at the terminal can wait on the person.
     if let Some(shown) = shown {
-        learning::tell(
-            home,
-            &shown,
-            learning::Asking::here(),
-            &mut swoosh::passphrase::Terminal,
-            err,
-        )
-        .await;
+        learning::tell(home, &shown, asking, &mut swoosh::passphrase::Terminal, err).await;
     }
     // A record none of the verb's Opens met: `serve` went, or answered in another version, after they
     // were sent, so the verb ended clean and said nothing of it. Its line ends the run, once, after the
@@ -1338,9 +1382,6 @@ async fn dial_through_serve(
         (ended, _) => ended,
     }
 }
-
-/// The internal error for a verb the dialing route does not run: a root-dispatch bug.
-const NOT_DIALING: &str = "internal: a verb that dials no stream of its own reached the dialing route (root-dispatch bug)";
 
 /// Run an exchange verb's exchanges through the `serve` on `socket`: each is one Open there, on Main with
 /// no slip, `hints` riding the Opens to their own machine. A reach flag `serve` makes moot refuses before
@@ -1622,15 +1663,7 @@ where
             // The question may borrow what the verb opens through, so the context is the run's for as
             // long.
             let verb = async |admitted| {
-                let ctx = reaching::ReachCtx {
-                    contacts: ctx.contacts,
-                    machine: ctx.machine,
-                    bound: ctx.bound,
-                    present: ctx.present,
-                    membership: ctx.membership,
-                    home: ctx.home,
-                    admitted,
-                };
+                let ctx = reaching::ReachCtx { admitted, ..ctx };
                 outward.run(node, ctx, &peers).await
             };
             run_verb(beside, &swoosh::sync::SourceDial::new(&own, home), verb).await
@@ -1681,6 +1714,9 @@ mod learn_root_tests;
 #[cfg(test)]
 #[path = "machine_args_tests.rs"]
 mod machine_args_tests;
+#[cfg(test)]
+#[path = "probe_route_tests.rs"]
+mod probe_route_tests;
 #[cfg(test)]
 #[path = "revoke_by_key_tests.rs"]
 mod revoke_by_key_tests;

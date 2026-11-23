@@ -9,14 +9,14 @@
 //! in which a relayed iroh link may hole-punch up to direct: a slow number then reads as "it relayed",
 //! not a mystery.
 //!
-//! While `swoosh serve` runs here, the run is one observed Open through it on a connection of its own:
-//! the path is sampled there each second beside the run and read once more by a Finish after it, so
-//! the line names this run's connection at its end. Otherwise the verb binds its own, as before.
+//! The run is one stream on a connection of its own, never a held session, so the rate and the path are
+//! this run's. By own bind the path is read from that connection after the transfer, while it is still
+//! open; while `swoosh serve` runs here, the stream is one observed Open through it, the path sampled
+//! there each second beside the run and read once more by a Finish after it.
 
 use core::convert::Infallible;
 use core::time::Duration;
 use std::io::{self, Write};
-use std::rc::Rc;
 use std::time::Instant;
 
 use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
@@ -25,19 +25,19 @@ use measure::{
     Limit, MethodRefusal, Mode, Progress, ProtocolError, Refusal, SpeedReport, Speedtest,
     Throughput,
 };
-use nauthy::{Link, Service};
+use nauthy::Service;
 use swoosh::escape::{Escaped, causes};
 use swoosh::learn::Admitted;
-use swoosh::node_client::UidSocket;
-use swoosh::observation::{Observed, Observer, PathSource};
+use swoosh::observation::{Follow, Observed};
 use swoosh::peer::{Machine, Peer};
+use swoosh::peers::Hints;
 use swoosh::reach;
-use swoosh::serve::control_codec::OpenLane;
-use swoosh::streams::{Resident, Tracked};
-use swoosh::transport::{self, ReachArgs};
+use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
+use swoosh::streams::{Ask, Observing, OwnBind, Unopened};
+use swoosh::transport::ReachArgs;
 
-use crate::commands::machine;
-use crate::commands::through_serve::{self, Dial};
+use crate::commands::route::Route;
+use crate::commands::{machine, through_serve};
 
 /// How often a running speed test prints its current rate. One second matches iperf's default report
 /// interval and reads as a live, once-a-second heartbeat without flooding the terminal.
@@ -99,12 +99,12 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         ))
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `speed` reads the resolved machine, the
-    /// `transport` label, and the resolved `present` badge.
+    /// Uniform dispatch: one stream on a connection of its own to the machine resolved before the bind,
+    /// presenting what the open reads from the home, or an `anyone` link alone.
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
         node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
+        ctx: swoosh::reaching::ReachCtx<'p>,
         peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
@@ -115,133 +115,75 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `speed` ran without its machine resolved (root-dispatch bug)");
         };
-        self.run_speed(
-            node,
-            peers,
+        let credential = swoosh::credential::Credential::dialing(&self.peer, reach::SPEED_SERVICE);
+        let route = Route::Own {
+            peer: &self.peer,
+            bound: ctx.bound,
+            this: node.node_id(),
+        };
+        self.measure(
+            OwnBind::new(peers, ctx.home, node.node_id(), &credential),
+            &route,
             machine,
-            ctx.bound,
-            ctx.present,
-            ctx.membership,
             ctx.admitted,
+            &mut io::stdout(),
+            &mut io::stderr(),
         )
         .await
     }
 }
 
 impl SpeedCmd {
-    /// Dial the machine on a connection of its own, run the transfer while a ticker prints the rate each
-    /// interval, then report the settled connection path and the per-direction totals.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the uniform reach context, unpacked"
-    )]
-    async fn run_speed<'n, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        peers: &swoosh::peers::Peers<'n, T, D>,
-        machine: &Machine,
-        bound: &transport::Bound,
-        present: Option<Link>,
-        membership: Option<Link>,
-        admitted: Admitted<'_>,
-    ) -> eyre::Result<()>
-    where
-        T::Session: 'static,
-    {
-        let mode = self.mode();
-        let limit = self.limit();
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
-        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
-        // link-as-peer through that same resolver, so the verb never threads a slip itself.
-        let service: Service = reach::SPEED_SERVICE.parse()?;
-        // Isolated, never a held session: the rate and the path line it prints belong to this run's own
-        // connection, not to whatever else shares a session to the machine.
-        let session = peers
-            .isolated(machine.key(), swoosh::peers::Hints::NONE)
-            .await
-            .map_err(|error| reach::open_failed(&self.peer, error, bound))?;
-        let connector = reach::gated(
-            machine.key(),
-            Service::clone(&service),
-            Option::clone(&present),
-            Option::clone(&membership),
-        );
-        // Its first admitted stream tells the composition root it may ask which root vouches for the machine.
-        let session = admitted.watch(session, connector);
-        let label = machine.label();
-        println!("{}", title(&label, mode));
-        let outcome = transfer(mode, limit, &session, core::future::pending()).await;
-        // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but refused the
-        // run, so name what refused it (a missing method, a rate limit, a busy service) rather than
-        // reporting a zero-byte transfer over the elapsed window. A Layer-2 method refusal means the
-        // stream was admitted but not the method; anything else (a Layer-1 gate refusal) means the dial
-        // itself was refused.
-        let report = match outcome {
-            Ok(report) => report,
-            // The machine refused this machine the service: the dial refusal, once. One of your devices is
-            // asked why first, over a second connection, since the gated session opens nothing but `speed`.
-            Err(ProtocolError::Refused(Refusal::Stream(bifrost::Refusal::NotAdmitted))) => {
-                let diagnosis =
-                    reach::diagnose_over(node, machine, &service, present, membership).await;
-                return Err(machine::refused(machine, &service, diagnosis));
-            }
-            Err(ProtocolError::Refused(refusal)) => {
-                let line = refusal_line(&label, &refusal);
-                eyre::bail!("{line}");
-            }
-            Err(error) => {
-                eyre::bail!("{}", failed_line(&error));
-            }
-        };
-
-        // Read the settled path now: the transfer gave hole-punching time to land. The composition root
-        // closes the node once anything still running beside the verb has ended.
-        println!("{}", path_line(&session.conn_info()));
-        print_totals(&report);
-        Ok(())
-    }
-}
-
-impl SpeedCmd {
-    /// Run through `serve` on `socket` as `dial` asks, printing on `out` and `err`. Once the Open
-    /// attaches, `admitted` gets its question, asked through `source`.
+    /// Measure throughput to `machine` over one stream from `source` on a connection of its own,
+    /// printing on `out` and `err`, as `route` words what it meets: the title once the stream is open,
+    /// a rate each interval, then the connection's path and the per-direction totals. A machine that
+    /// refuses the service `NotAdmitted` prints the refusal as the error, after one of your devices is
+    /// asked why through `source`, on Main. Once the stream is admitted, `admitted` gets its question,
+    /// asked through `source`.
     ///
     /// # Errors
     ///
     /// The run's line: a refusal, a cut, or `serve` gone.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the run's two writers ride beside its source and socket"
-    )]
-    pub async fn through<'s>(
+    pub async fn measure<'s, S: Observing + Copy + 's>(
         &self,
-        source: &'s Tracked<Resident>,
-        dial: &Dial<'_>,
-        socket: &Rc<UidSocket>,
+        source: S,
+        route: &Route<'_>,
         machine: &Machine,
         admitted: Admitted<'s>,
         out: &mut impl Write,
         err: &mut impl Write,
     ) -> eyre::Result<()> {
-        // Isolated, as by own bind, and observed: the rate and the path it prints belong to this run's
-        // own connection, and the path is read there, through `serve`, after the run.
-        let (session, observer) = match dial.observed(socket, OpenLane::Isolated).await {
-            Ok(opened) => opened,
-            Err(unattached) => return Err(dial.unattached(unattached, &**socket).await),
+        let service: Service = reach::SPEED_SERVICE.parse()?;
+        // Isolated, never a held session: the rate and the path line it prints belong to this run's own
+        // connection, not to whatever else shares a session to the machine.
+        let ask = Ask {
+            peer: machine.key(),
+            hints: Hints::NONE,
+            service: Service::clone(&service),
+            lane: OpenLane::Isolated,
+            slip: self.peer.self_present(),
+        };
+        let (session, follow) = match source.observed(&ask).await {
+            Ok(observed) => observed,
+            Err(Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted))) => {
+                let diagnosis = reach::diagnose_through(&source, machine, &service, ask.slip).await;
+                return Err(machine::refused(machine, &service, diagnosis));
+            }
+            Err(unopened) => return Err(route.line(unopened, machine).await),
         };
         admitted.asked_through(source, machine.key());
         let (mode, label) = (self.mode(), machine.label());
-        // A title that cannot be written ends the run as a failure, Finished all the same.
+        // A title that cannot be written ends the run as a failure, finished all the same.
         if let Err(error) = writeln!(out, "{}", title(&label, mode)) {
-            return Err(through_serve::failed(error.into(), observer, err).await);
+            return Err(through_serve::failed(error.into(), follow, err).await);
         }
         observed(
             mode,
             self.limit(),
             &session,
-            observer,
+            follow,
             &label,
-            async |own| dial.cut_or(socket, own).await,
+            async |own| route.cut_or(own).await,
             out,
             err,
         )
@@ -280,25 +222,26 @@ fn path_line(info: &ConnInfo) -> String {
     format!("path: {}", reach::conn_path(info))
 }
 
-/// The transfer over `session`, one stream through `serve`, beside `observer`, printing on `out` and
-/// `err`. A measured run is Finished and then prints its path row and totals; a failed run prints its
-/// error first and is Finished after. `cut` turns a broken run's own line into the one it prints, asking
-/// `serve` whether it stopped.
+/// The transfer over `session`, one stream, beside `observer`, printing on `out` and `err`. A measured
+/// run is finished and then prints its path row, read from the run's own connection after the transfer
+/// (which gave hole-punching time to land), and its totals; a failed run prints its error first and is
+/// finished after. `cut` turns a broken run's own line into the one it prints, asking `serve` whether it
+/// stopped.
 #[expect(
     clippy::too_many_arguments,
     reason = "the run, its observer and the lines it prints to"
 )]
-async fn observed<P: PathSource, S: Session>(
+async fn observed<S: Session>(
     mode: Mode,
     limit: Limit,
     session: &S,
-    mut observer: Observer<P>,
+    mut observer: impl Follow,
     label: &str,
     cut: impl AsyncFnOnce(eyre::Report) -> eyre::Report,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> eyre::Result<()> {
-    let report = match transfer(mode, limit, session, observer.watch()).await {
+    let report = match transfer(mode, limit, session, observer.moves(|_| {})).await {
         Ok(report) => report,
         Err(ProtocolError::Refused(refusal)) => {
             let line = eyre::eyre!("{}", refusal_line(label, &refusal));
@@ -315,7 +258,7 @@ async fn observed<P: PathSource, S: Session>(
     Ok(())
 }
 
-/// Print the path row of a run through `serve` from its final observation, the Finish's, to `out`. When
+/// Print the path row of a run from its final reading to `out`. When
 /// that failed there is no row; `err` carries a warning, and the run's own result and exit stay as they
 /// are.
 fn print_path(observed: Observed, out: &mut impl Write, err: &mut impl Write) -> io::Result<()> {

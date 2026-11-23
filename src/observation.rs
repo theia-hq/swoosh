@@ -193,6 +193,43 @@ impl<P: PathSource> Observer<P> {
     }
 }
 
+/// How a run follows the path of the connection its stream rides: beside the run, then once after it.
+///
+/// Through `swoosh serve` that is an [`Observer`] of the Open's receipt, which samples and then
+/// Finishes; by own bind it is the session the stream rides, read from the session itself.
+pub trait Follow {
+    /// The path as last read; the open's report before the first reading.
+    fn latest(&self) -> ConnInfo;
+
+    /// Hand each reading to `on_move` until dropped.
+    fn moves(&mut self, on_move: impl FnMut(&ConnInfo)) -> impl Future<Output = Infallible>;
+
+    /// The final reading, after the run.
+    fn finish(self) -> impl Future<Output = Observed>;
+
+    /// [`finish`](Self::finish) for a failed run, whose result does not wait on the reading: within
+    /// `grace`, else `None`.
+    fn finish_within(self, grace: Duration) -> impl Future<Output = Option<Observed>>;
+}
+
+impl<P: PathSource> Follow for Observer<P> {
+    fn latest(&self) -> ConnInfo {
+        self.latest.clone()
+    }
+
+    fn moves(&mut self, on_move: impl FnMut(&ConnInfo)) -> impl Future<Output = Infallible> {
+        self.watch_with(on_move)
+    }
+
+    fn finish(self) -> impl Future<Output = Observed> {
+        Self::finish(self)
+    }
+
+    fn finish_within(self, grace: Duration) -> impl Future<Output = Option<Observed>> {
+        Self::finish_within(self, grace)
+    }
+}
+
 /// [`SPACING`] after `start`. A clock that cannot hold it leaves the next query unspaced rather than
 /// panicking or waiting forever.
 fn after_spacing(start: Instant) -> Instant {

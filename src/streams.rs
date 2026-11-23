@@ -7,7 +7,7 @@
 //! proven-only route, else this home's standing as it reads at that open. An `anyone` run's own bind
 //! presents the link alone and reads nothing of the home.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -21,9 +21,10 @@ use tokio::io::{self, AsyncRead, AsyncWrite};
 use crate::credential::Credential;
 use crate::home::Home;
 use crate::node_client::{self, Connected, UidSocket};
-use crate::observation::{Observer, Receipt};
+use crate::observation::{Follow, Observer, Receipt};
 use crate::peers::{
-    Half, Hints, Lane, OPEN_TIMEOUT, OpenError, Peers, Presents, Unpresentable, presents,
+    Half, Held, Hints, Isolated, Lane, OPEN_TIMEOUT, OpenError, Peers, Presents, SessionPath,
+    Unpresentable, presents,
 };
 use crate::serve::control_codec::{
     ControlError, MalformedOpen, Observation, OpenLane, OpenRead, OpenRefusal, OpenRequest,
@@ -90,8 +91,9 @@ impl Unopened {
     /// Whether every later open of this run would repeat this, so the run ends here, a listener's run
     /// included. The peer's `NotAdmitted` is a ruling on this machine the wire says not to
     /// retry, an ended standing's remedy is the person's, the peer being this machine and a malformed
-    /// Open both belong to the fixed ask, and with no resident there is none to ask. Anything else
-    /// belongs to that one stream. A verb with a fixed set of streams may end on more.
+    /// Open both belong to the fixed ask, with no resident there is none to ask, and a control socket
+    /// that cannot be trusted fails the same check at every later connect. Anything else belongs to
+    /// that one stream. A verb with a fixed set of streams may end on more.
     pub fn ends_run(&self) -> bool {
         match self {
             Self::Refused(
@@ -101,7 +103,8 @@ impl Unopened {
             )
             | Self::ServeGone
             | Self::Skew
-            | Self::Malformed(_) => true,
+            | Self::Malformed(_)
+            | Self::Control(ControlError::Untrusted { .. }) => true,
             Self::Refused(
                 OpenRefusal::Peer(PeerRefusal::BadRequest(_) | PeerRefusal::Unavailable(_))
                 | OpenRefusal::PeerUnreadable(_)
@@ -187,6 +190,104 @@ impl<S: StreamSource> StreamSource for &S {
     }
     fn stalled(&self) -> impl Future<Output = bool> {
         S::stalled(self)
+    }
+}
+
+/// A source that also follows the path of the connection each stream rides, for a verb that prints it.
+pub trait Observing: StreamSource {
+    /// The one stream, as a session a verb written over a session runs on.
+    type Session: Session;
+    /// What follows the path of the connection the stream rides.
+    type Follow: Follow;
+
+    /// One admitted stream as [`open`](StreamSource::open) gives it, and what follows its connection's
+    /// path from the attach on.
+    fn observed(
+        &self,
+        ask: &Ask,
+    ) -> impl Future<Output = Result<(Self::Session, Self::Follow), Unopened>>;
+}
+
+impl<S: Observing> Observing for &S {
+    type Session = S::Session;
+    type Follow = S::Follow;
+
+    fn observed(
+        &self,
+        ask: &Ask,
+    ) -> impl Future<Output = Result<(Self::Session, Self::Follow), Unopened>> {
+        S::observed(self, ask)
+    }
+}
+
+/// One admitted stream as a session that hands it out once: what a verb written over a session runs
+/// on, on both paths.
+///
+/// [`peer`](Session::peer) is the key the stream was asked for. By own bind the transport proves it.
+/// Through the resident it is claimed by the process answering the socket, which is checked to run as
+/// this user and to be the pid `serve.lock` records; neither check holds against a process running as
+/// this user, which can bind the path and rewrite `serve.lock`. `H` holds what the stream's place and
+/// connection need held, so it stays taken while the session lives. The connection belongs elsewhere,
+/// so `wait_closed` never resolves and `close` ends nothing. `accept_bi` refuses, and so does a second
+/// `open_bi`: there is one stream.
+pub struct OneStream<W, R, H = ()> {
+    peer: NodeId,
+    info: ConnInfo,
+    stream: RefCell<Option<(W, R)>>,
+    _held: H,
+}
+
+impl<W, R, H> OneStream<W, R, H> {
+    /// The stream `opened` to `peer`, holding `held` for as long as the session lives.
+    pub fn new(peer: NodeId, opened: Opened<W, R>, held: H) -> Self {
+        let Opened { info, write, read } = opened;
+        Self {
+            peer,
+            info,
+            stream: RefCell::new(Some((write, read))),
+            _held: held,
+        }
+    }
+}
+
+impl<W, R, H> Session for OneStream<W, R, H>
+where
+    W: AsyncWrite + WriteEnd + Unpin + Send,
+    R: AsyncRead + Unpin + Send,
+{
+    type Write = W;
+    type Read = R;
+
+    fn peer(&self) -> NodeId {
+        self.peer
+    }
+
+    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        self.stream
+            .borrow_mut()
+            .take()
+            .ok_or(bifrost::Error::Closed)
+    }
+
+    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        Err(bifrost::Error::Closed)
+    }
+
+    async fn wait_closed(&self) {
+        core::future::pending().await
+    }
+
+    fn close(&self) {}
+
+    /// The path as the stream attached. A verb that reports its path reads it from what follows the
+    /// connection ([`Observing::observed`]).
+    fn conn_info(&self) -> ConnInfo {
+        self.info.clone()
+    }
+
+    /// The path as the stream attached, as a path that never moves.
+    fn path_changes(&self) -> bifrost::PathChanges {
+        bifrost::PathChanges::fixed(self.info.path.clone())
     }
 }
 
@@ -309,11 +410,11 @@ impl<S: StreamSource> Tracked<S> {
     }
 }
 
-impl<S: StreamSource> StreamSource for Tracked<S> {
-    type Write = S::Write;
-    type Read = S::Read;
-
-    async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
+impl<S: StreamSource> Tracked<S> {
+    /// Start an open of `ask`: the outcome every later open meets once the source went away, else the
+    /// note that it waits on its reply, and the ask with the addresses typed for its machine when it
+    /// carries none of its own.
+    fn start(&self, ask: &Ask) -> Result<(Waiting<'_>, Option<Ask>), Unopened> {
         if let Some(gone) = self.gone.get() {
             return Err(gone.why.unopened());
         }
@@ -321,31 +422,41 @@ impl<S: StreamSource> StreamSource for Tracked<S> {
             unanswered: &self.unanswered,
             peer: Some(ask.peer),
         };
-        let opened = match self.hints.get(&ask.peer) {
-            Some(hints) if ask.hints.as_slice().is_empty() => {
-                let hinted = Ask {
-                    peer: ask.peer,
-                    hints: hints.clone(),
-                    service: Service::clone(&ask.service),
-                    lane: ask.lane,
-                    slip: Option::clone(&ask.slip),
-                };
-                self.source.open(&hinted).await
-            }
-            _ => self.source.open(ask).await,
+        let hinted = match self.hints.get(&ask.peer) {
+            Some(hints) if ask.hints.as_slice().is_empty() => Some(Ask {
+                peer: ask.peer,
+                hints: hints.clone(),
+                service: Service::clone(&ask.service),
+                lane: ask.lane,
+                slip: Option::clone(&ask.slip),
+            }),
+            _ => None,
         };
-        match &opened {
-            Err(Unopened::Control(ControlError::Timeout { .. })) => {}
+        Ok((waiting, hinted))
+    }
+
+    /// An open to `peer` came back: answered unless its reply wait timed out, and the source's going
+    /// kept when `unopened` says it went.
+    fn heard(&self, waiting: Waiting<'_>, peer: NodeId, unopened: Option<&Unopened>) {
+        match unopened {
+            Some(Unopened::Control(ControlError::Timeout { .. })) => {}
             _ => waiting.answered(),
         }
-        opened.inspect_err(|unopened| {
-            if let Some(why) = GoneWhy::of(unopened) {
-                self.record(Gone {
-                    peer: ask.peer,
-                    why,
-                });
-            }
-        })
+        if let Some(why) = unopened.and_then(GoneWhy::of) {
+            self.record(Gone { peer, why });
+        }
+    }
+}
+
+impl<S: StreamSource> StreamSource for Tracked<S> {
+    type Write = S::Write;
+    type Read = S::Read;
+
+    async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
+        let (waiting, hinted) = self.start(ask)?;
+        let opened = self.source.open(hinted.as_ref().unwrap_or(ask)).await;
+        self.heard(waiting, ask.peer, opened.as_ref().err());
+        opened
     }
 
     async fn stalled(&self) -> bool {
@@ -361,6 +472,19 @@ impl<S: StreamSource> StreamSource for Tracked<S> {
             });
         }
         gone
+    }
+}
+
+// Filled and recorded as its `open` is.
+impl<S: Observing> Observing for Tracked<S> {
+    type Session = S::Session;
+    type Follow = S::Follow;
+
+    async fn observed(&self, ask: &Ask) -> Result<(Self::Session, Self::Follow), Unopened> {
+        let (waiting, hinted) = self.start(ask)?;
+        let observed = self.source.observed(hinted.as_ref().unwrap_or(ask)).await;
+        self.heard(waiting, ask.peer, observed.as_ref().err());
+        observed
     }
 }
 
@@ -427,24 +551,39 @@ impl<'p, 'n, T: Transport, D: Discovery> OwnBind<'p, 'n, T, D> {
     }
 
     /// One stream on a connection of its own, which the stream's halves hold between them: it closes
-    /// once both have dropped.
+    /// once both, and any other holder of the connection, have dropped.
     async fn isolated(
         &self,
         ask: &Ask,
         presents: Presents,
-    ) -> Result<Opened<<Self as StreamSource>::Write, <Self as StreamSource>::Read>, Unopened> {
-        let connection = self.peers.isolated(ask.peer, ask.hints.clone()).await?;
+    ) -> Result<
+        (
+            Opened<<Self as StreamSource>::Write, <Self as StreamSource>::Read>,
+            Rc<Isolated<T::Session>>,
+        ),
+        Unopened,
+    > {
+        let connection = Rc::new(self.peers.isolated(ask.peer, ask.hints.clone()).await?);
         let connector = presents.connector(ask.peer, Service::clone(&ask.service));
         // Bulk's deadline: nothing is evicted and nothing races this open.
         let (write, read) =
-            match tokio::time::timeout(OPEN_TIMEOUT, connector.open_on(&connection)).await {
+            match tokio::time::timeout(OPEN_TIMEOUT, connector.open_on(&*connection)).await {
                 Ok(Ok(halves)) => halves,
                 Ok(Err(error)) => return Err(OpenError::Open(error).into()),
                 Err(_elapsed) => return Err(Unopened::Own(OpenError::Timeout)),
             };
         let info = connection.conn_info();
-        let (write, read) = connection.lend(write, read);
-        Ok(Opened { info, write, read })
+        let (write, read) = Rc::clone(&connection).lend(write, read);
+        Ok((Opened { info, write, read }, connection))
+    }
+
+    /// The lane `ask` rides, or `None` for a connection of its own.
+    fn lane(ask: &Ask) -> Option<Lane> {
+        match ask.lane {
+            OpenLane::Main => Some(Lane::Main),
+            OpenLane::Bulk => Some(Lane::Bulk),
+            OpenLane::Isolated => None,
+        }
     }
 }
 
@@ -463,10 +602,8 @@ impl<T: Transport, D: Discovery> StreamSource for OwnBind<'_, '_, T, D> {
 
     async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
         let presents = self.presents(ask).await?;
-        let lane = match ask.lane {
-            OpenLane::Main => Lane::Main,
-            OpenLane::Bulk => Lane::Bulk,
-            OpenLane::Isolated => return self.isolated(ask, presents).await,
+        let Some(lane) = Self::lane(ask) else {
+            return Ok(self.isolated(ask, presents).await?.0);
         };
         let (info, _end, write, read) = self
             .peers
@@ -479,6 +616,44 @@ impl<T: Transport, D: Discovery> StreamSource for OwnBind<'_, '_, T, D> {
             )
             .await?;
         Ok(Opened { info, write, read })
+    }
+}
+
+// The transport's own halves, split from the lease the session keeps: `measure` drops both at the end of
+// its run, when the session drops too, so the place is held for as long either way.
+impl<T: Transport, D: Discovery> Observing for OwnBind<'_, '_, T, D> {
+    type Session =
+        OneStream<<T::Session as Session>::Write, <T::Session as Session>::Read, Held<T::Session>>;
+    type Follow = SessionPath<T::Session>;
+
+    async fn observed(&self, ask: &Ask) -> Result<(Self::Session, Self::Follow), Unopened> {
+        let presents = self.presents(ask).await?;
+        let (opened, follow) = match Self::lane(ask) {
+            Some(lane) => {
+                let (info, end, write, read) = self
+                    .peers
+                    .open_attached(
+                        ask.peer,
+                        ask.hints.clone(),
+                        Service::clone(&ask.service),
+                        lane,
+                        presents,
+                    )
+                    .await?;
+                (Opened { info, write, read }, SessionPath::Held(end))
+            }
+            None => {
+                let (opened, connection) = self.isolated(ask, presents).await?;
+                (opened, SessionPath::Isolated(connection))
+            }
+        };
+        let Opened { info, write, read } = opened;
+        let (write, held) = write.split();
+        let (read, _same) = read.split();
+        Ok((
+            OneStream::new(ask.peer, Opened { info, write, read }, held),
+            follow,
+        ))
     }
 }
 
@@ -543,11 +718,7 @@ impl Resident {
 
     /// Send `ask` as an observed Open on `connected`: the stream, and the observer that follows its
     /// connection through this socket, read from the Attached report on.
-    ///
-    /// # Errors
-    ///
-    /// As [`attach`](Self::attach).
-    pub async fn observed(
+    async fn attach_observed(
         &self,
         connected: Connected,
         ask: &Ask,
@@ -568,18 +739,40 @@ impl Resident {
     }
 }
 
+impl Resident {
+    /// A control connection of its own for one Open: a refused connect with `serve.lock` free is the
+    /// resident gone.
+    async fn connect(&self) -> Result<Connected, Unopened> {
+        match self.socket.connected().await {
+            Ok(connected) => Ok(connected),
+            Err(ControlError::NoResident) if self.socket.lock_free().await => {
+                Err(Unopened::ServeGone)
+            }
+            Err(error) => Err(Unopened::Control(error)),
+        }
+    }
+
+    /// What an Open that attached nothing means for the run: another version answering after one of
+    /// its Opens attached is a restarted resident, and a cut before the reply with none answering now
+    /// is the resident gone.
+    async fn settled(&self, unopened: Unopened) -> Unopened {
+        match unopened {
+            Unopened::Skew if self.attached.get() => Unopened::ServeGone,
+            Unopened::Control(error) if self.socket.gone().await => {
+                tracing::debug!(%error, "an open through serve was cut before its reply, and serve is gone");
+                Unopened::ServeGone
+            }
+            unopened => unopened,
+        }
+    }
+}
+
 impl StreamSource for Resident {
     type Write = Upload;
     type Read = OpenRead;
 
     async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
-        let connected = match self.socket.connected().await {
-            Ok(connected) => connected,
-            Err(ControlError::NoResident) if self.socket.lock_free().await => {
-                return Err(Unopened::ServeGone);
-            }
-            Err(error) => return Err(Unopened::Control(error)),
-        };
+        let connected = self.connect().await?;
         match Self::attach(connected, ask, Observation::Unobserved).await {
             Ok((Opened { info, write, read }, _unobserved)) => {
                 self.attached.set(true);
@@ -589,12 +782,7 @@ impl StreamSource for Resident {
                     read,
                 })
             }
-            Err(Unopened::Skew) if self.attached.get() => Err(Unopened::ServeGone),
-            Err(Unopened::Control(error)) if self.socket.gone().await => {
-                tracing::debug!(%error, "an open through serve was cut before its reply, and serve is gone");
-                Err(Unopened::ServeGone)
-            }
-            Err(unopened) => Err(unopened),
+            Err(unopened) => Err(self.settled(unopened).await),
         }
     }
 
@@ -606,6 +794,28 @@ impl StreamSource for Resident {
     /// Asked of the socket, bounded: a status gets no reply in time while `serve.lock` is held.
     async fn stalled(&self) -> bool {
         self.socket.stalled().await
+    }
+}
+
+impl Observing for Resident {
+    type Session = OneStream<Upload, OpenRead>;
+    type Follow = Observer;
+
+    /// An observed Open on a control connection of its own, connected and mapped as
+    /// [`open`](StreamSource::open)'s is.
+    async fn observed(&self, ask: &Ask) -> Result<(Self::Session, Self::Follow), Unopened> {
+        let connected = self.connect().await?;
+        match self.attach_observed(connected, ask).await {
+            Ok((Opened { info, write, read }, observer)) => {
+                let opened = Opened {
+                    info,
+                    write: Upload::from(write),
+                    read,
+                };
+                Ok((OneStream::new(ask.peer, opened, ()), observer))
+            }
+            Err(unopened) => Err(self.settled(unopened).await),
+        }
     }
 }
 

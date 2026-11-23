@@ -21,23 +21,21 @@
 //! only a busy `serve`, a `serve` that stopped under the pipe, a different `serve` version and a reach
 //! flag `serve` makes moot have lines of their own.
 
-use core::cell::RefCell;
 use core::ops::ControlFlow;
 use std::collections::HashMap;
-use std::rc::Rc;
 
-use bifrost::{ConnInfo, NodeId, PathChanges, Refusal};
+use bifrost::{ConnInfo, NodeId, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, escaped_report};
 use swoosh::node_client::{Connected, NodeClient, UidSocket};
-use swoosh::observation::{Observed, Observer, PathSource};
+use swoosh::observation::{Follow, Observed};
 use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::{Hints, HintsError};
 use swoosh::serve::control_codec::{
     ControlError, Observation, OpenLane, OpenRead, OpenRefusal, OpenWrite, PeerRefusal,
 };
-use swoosh::streams::{Ask, Opened, Resident, Unopened, Upload};
+use swoosh::streams::{Ask, Opened, Resident, Unopened};
 use swoosh::transport::ReachArgs;
 use tokio::io::{self, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -269,6 +267,10 @@ impl Dial<'_> {
                     Unattached::Failed(self.cut(socket).await)
                 }
             }
+            // A socket that cannot be trusted keeps its own error, never a cut's.
+            Unopened::Control(error @ ControlError::Untrusted { .. }) => {
+                Unattached::Failed(error.into())
+            }
             Unopened::Control(error) => {
                 tracing::debug!(%error, "an open through serve failed before its reply");
                 Unattached::Failed(self.cut(socket).await)
@@ -289,31 +291,6 @@ impl Dial<'_> {
             Unattached::Refused(refusal) => self.refused(refusal, serve).await,
             Unattached::Failed(report) => report,
         }
-    }
-
-    /// Open the verb's one stream through `serve` on a control connection of its own, on `lane`,
-    /// observed: the stream as a session, and the observer that follows its connection through `socket`,
-    /// read from the Attached report on.
-    ///
-    /// # Errors
-    ///
-    /// As [`open`](Self::open), with the resident's refusal kept typed, or no `serve` to connect to.
-    pub async fn observed(
-        &self,
-        socket: &Rc<UidSocket>,
-        lane: OpenLane,
-    ) -> Result<(OneStream, Observer), Unattached> {
-        let ask = self.ask(lane)?;
-        let connected = self.connect(socket).await?;
-        let (opened, observer) = match Resident::new(Rc::clone(socket))
-            .observed(connected, &ask)
-            .await
-        {
-            Ok(observed) => observed,
-            Err(unopened) => return Err(self.unopened(unopened, socket).await),
-        };
-        let session = OneStream::new(self.machine.key(), opened.info, opened.read, opened.write);
-        Ok((session, observer))
     }
 
     /// Prove that the peer admits a listener's Open before its start lines print, so a refusal is one
@@ -614,14 +591,14 @@ pub struct Reported;
 /// reference go at the end of its retention instead.
 const FAILED_FINISH_GRACE: core::time::Duration = core::time::Duration::from_secs(1);
 
-/// End a run through `serve` that failed after its Open attached: print `report` on `err` as the
-/// composition root prints a run's error, then Finish `observer`, in this task, before the process
-/// exits. The error never waits on a reading it does not show, and the resident lets the reference go
-/// now rather than at the end of its retention. The Finish gets what is left of its spacing plus
+/// End a run that failed after its stream attached: print `report` on `err` as the composition root
+/// prints a run's error, then Finish `observer`, in this task, before the process exits. The error never
+/// waits on a reading it does not show, and through `serve` the resident lets the reference go now
+/// rather than at the end of its retention; by own bind the reading is the session's, at once. The Finish gets what is left of its spacing plus
 /// [`FAILED_FINISH_GRACE`], and is dropped past that. Returns [`Reported`].
-pub async fn failed<P: PathSource>(
+pub async fn failed(
     report: eyre::Report,
-    observer: Observer<P>,
+    observer: impl Follow,
     err: &mut impl std::io::Write,
 ) -> eyre::Report {
     crate::print_error(&report, err);
@@ -632,12 +609,12 @@ pub async fn failed<P: PathSource>(
     Reported.into()
 }
 
-/// End a run through `serve` whose result is `ended`, its own lines already printed: a failure as
+/// End a run whose result is `ended`, its own lines already printed: a failure as
 /// [`failed`] ends one, a success once its observation is Finished, so no exit leaves the reference to
 /// the resident's retention.
-pub async fn ended<P: PathSource>(
+pub async fn ended(
     ended: eyre::Result<()>,
-    observer: Observer<P>,
+    observer: impl Follow,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
     match ended {
@@ -680,69 +657,6 @@ pub fn final_path(
             writeln!(err, "warning: could not read the path of this run")?;
             Ok(None)
         }
-    }
-}
-
-/// One stream through `serve`, as a session that hands out that stream once: what a verb written over a
-/// session, such as `speed`'s measurement, runs on.
-///
-/// Through `serve`, [`peer`](bifrost::Session::peer) is the key the verb asked for, as claimed by the
-/// process answering the socket. That process is checked to run as this user and to be the pid
-/// `serve.lock` records, and neither check holds against a process running as this user, which can bind
-/// the path and rewrite `serve.lock`; by own bind the transport proves the peer. The resident holds the
-/// connection, so `wait_closed` never resolves and `close` ends nothing. `accept_bi` refuses, and so does
-/// a second `open_bi`: `serve` gave one stream.
-pub struct OneStream {
-    peer: NodeId,
-    info: ConnInfo,
-    stream: RefCell<Option<(Upload, OpenRead)>>,
-}
-
-impl OneStream {
-    /// The stream `serve` attached to `peer`, its path reading `info` as it attached.
-    pub fn new(peer: NodeId, info: ConnInfo, read: OpenRead, write: OpenWrite) -> Self {
-        Self {
-            peer,
-            info,
-            stream: RefCell::new(Some((Upload::from(write), read))),
-        }
-    }
-}
-
-impl bifrost::Session for OneStream {
-    type Write = Upload;
-    type Read = OpenRead;
-
-    fn peer(&self) -> NodeId {
-        self.peer
-    }
-
-    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-        self.stream
-            .borrow_mut()
-            .take()
-            .ok_or(bifrost::Error::Closed)
-    }
-
-    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-        Err(bifrost::Error::Closed)
-    }
-
-    async fn wait_closed(&self) {
-        core::future::pending().await
-    }
-
-    fn close(&self) {}
-
-    /// The path as the stream attached. A verb that reports its path reads it from its observer, which
-    /// asks `serve`; this cannot.
-    fn conn_info(&self) -> ConnInfo {
-        self.info.clone()
-    }
-
-    /// The path as the stream attached, as a path that never moves: only `serve` can tell it moved.
-    fn path_changes(&self) -> PathChanges {
-        PathChanges::fixed(self.info.path.clone())
     }
 }
 
