@@ -16,6 +16,7 @@
 //! its hints ignored, and never causes a second dial.
 
 use core::cell::{Cell, RefCell};
+use core::convert::Infallible;
 use core::fmt;
 use core::net::SocketAddr;
 use core::pin::Pin;
@@ -27,8 +28,8 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use bifrost::{ConnInfo, Discovery, Node, NodeId, PathChanges, Session, Transport, WriteEnd};
-use futures::FutureExt as _;
 use futures::future::{LocalBoxFuture, Shared};
+use futures::{FutureExt as _, StreamExt as _};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::{Connector, WrongPeer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -36,8 +37,9 @@ use tokio::time::Instant;
 
 use crate::credential::Credential;
 use crate::home::Home;
+use crate::observation::{Follow, Observed};
 use crate::reaching::ResolveError;
-use crate::serve::PROVEN_ROUTES;
+use crate::serve::{LOOKUP_ROOT_SERVICE, PROVEN_ROUTES};
 
 pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 // A Bulk or Isolated open's deadline. Neither caller waits on its open with anything racing it, so the
@@ -395,13 +397,23 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
             peer,
             carry: presents.carry(lane),
         };
+        // The root question rides a session already held to the peer: it presents nothing, so it adds
+        // no grant, and a second handshake for a 2 s question would cost more than it asks.
+        let joined = (service.as_str() == LOOKUP_ROOT_SERVICE
+            && matches!(presents, Presents::Standing(None)))
+        .then(|| self.held(peer, lane))
+        .flatten();
         let connector = presents.connector(peer, service);
         let deadline = match lane {
             Lane::Main => MAIN_OPEN_TIMEOUT,
             Lane::Bulk => OPEN_TIMEOUT,
         };
-        let (mut entry, reused) = self.session(&key, &hints).await?;
-        let mut retry = reused;
+        // A joined session is treated as a reused one: a retryable failure redials once under the
+        // lookup's own key, and the eviction touches only a session held under that key.
+        let (mut entry, mut retry) = match joined {
+            Some(entry) => (entry, true),
+            None => self.session(&key, &hints).await?,
+        };
         loop {
             let mut active = Active::new(Rc::clone(&entry));
             let start = Instant::now();
@@ -485,6 +497,33 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
             tokio::time::sleep(SWEEP_INTERVAL).await;
             self.sweep_at(Instant::now());
         }
+    }
+
+    /// A held session to `peer` on `lane` that presents this home, under any standing or none, open now:
+    /// never a slip's, whose session is shared only by the identical slip. Of several, one with a stream
+    /// or an open on it now, then the one whose last open succeeded latest, never whichever the map's
+    /// order gives first; between two alike the pick is still the map's.
+    fn held(&self, peer: NodeId, lane: Lane) -> Option<Rc<Entry<T::Session>>> {
+        self.entries
+            .borrow()
+            .iter()
+            .filter_map(|(key, slot)| match (key, slot) {
+                (
+                    Key {
+                        peer: held,
+                        carry: Carry::Home { lane: on, .. },
+                    },
+                    Slot::Ready(entry),
+                ) if *held == peer
+                    && *on == lane
+                    && entry.session.wait_closed().now_or_never().is_none() =>
+                {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .max_by_key(|entry| (entry.live.get() > 0, entry.opened.get()))
+            .map(Rc::clone)
     }
 
     /// The held session for `key`, joining a dial in flight or starting one. Only a dial this call
@@ -741,7 +780,7 @@ impl Drop for Budget {
 /// lane and its session's activity, or the isolated connection it rides, which closes then.
 enum Lease<S: Session> {
     Lane { _active: Active<S>, _budget: Budget },
-    Isolated { _connection: Isolated<S> },
+    Isolated { _connection: Rc<Isolated<S>> },
 }
 
 struct Active<S: Session> {
@@ -790,6 +829,73 @@ impl<S: Session> SessionEnd<S> {
     pub(crate) fn conn_info(&self) -> ConnInfo {
         self.0.session.conn_info()
     }
+
+    /// The session's path as the transport selects it: the path in force first, then each change.
+    pub(crate) fn path_changes(&self) -> PathChanges {
+        self.0.session.path_changes()
+    }
+}
+
+/// The path of the session an own bind's stream rides, read from the session itself. Holding it keeps
+/// that session open.
+pub enum SessionPath<S: Session> {
+    /// A held session on Main or Bulk.
+    Held(SessionEnd<S>),
+    /// An isolated connection, open until this and the stream's halves have dropped.
+    Isolated(Rc<Isolated<S>>),
+}
+
+impl<S: Session> SessionPath<S> {
+    fn conn_info(&self) -> ConnInfo {
+        match self {
+            Self::Held(end) => end.conn_info(),
+            Self::Isolated(connection) => connection.conn_info(),
+        }
+    }
+
+    fn path_changes(&self) -> PathChanges {
+        match self {
+            Self::Held(end) => end.path_changes(),
+            Self::Isolated(connection) => connection.path_changes(),
+        }
+    }
+}
+
+// Read from the session: a reading never fails, and a move is delivered as the transport selects it.
+impl<S: Session> Follow for SessionPath<S> {
+    fn latest(&self) -> ConnInfo {
+        self.conn_info()
+    }
+
+    /// Each path the session reports, the one in force first, as the session's report with that path.
+    /// A stream of changes that ends (a path that never moves) leaves this pending, never spinning.
+    async fn moves(&mut self, mut on_move: impl FnMut(&ConnInfo)) -> Infallible {
+        let mut changes = self.path_changes();
+        while let Some(path) = changes.next().await {
+            on_move(&ConnInfo {
+                path,
+                ..self.conn_info()
+            });
+        }
+        core::future::pending().await
+    }
+
+    async fn finish(self) -> Observed {
+        Observed {
+            last: Ok(self.conn_info()),
+            earlier: None,
+        }
+    }
+
+    async fn finish_within(self, _grace: Duration) -> Option<Observed> {
+        Some(self.finish().await)
+    }
+}
+
+/// A stream's place on its lane, or its isolated connection, held apart from its halves: the halves
+/// handed to a caller that needs the transport's own, with this kept beside them.
+pub struct Held<S: Session> {
+    _lease: Rc<Lease<S>>,
 }
 
 impl<S: Session> Clone for SessionEnd<S> {
@@ -803,6 +909,19 @@ impl<S: Session> Clone for SessionEnd<S> {
 pub struct Half<H, S: Session> {
     inner: H,
     _lease: Rc<Lease<S>>,
+}
+
+impl<H, S: Session> Half<H, S> {
+    /// The transport's half, and what it held: the place stays taken, and the connection open, until
+    /// the [`Held`] and every other half sharing it have dropped.
+    pub(crate) fn split(self) -> (H, Held<S>) {
+        (
+            self.inner,
+            Held {
+                _lease: self._lease,
+            },
+        )
+    }
 }
 
 impl<H: AsyncRead + Unpin, S: Session> AsyncRead for Half<H, S> {
@@ -865,7 +984,7 @@ impl<S: Session> Isolated<S> {
     /// Hand out `write` and `read`, a stream opened on this connection, as halves that hold the
     /// connection between them: it stays open, and keeps its place, until both have dropped.
     pub(crate) fn lend(
-        self,
+        self: Rc<Self>,
         write: S::Write,
         read: S::Read,
     ) -> (Half<S::Write, S>, Half<S::Read, S>) {

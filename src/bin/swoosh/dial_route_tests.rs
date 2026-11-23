@@ -77,7 +77,18 @@ async fn dialed_to(
     let ended = tokio::time::timeout(
         bound,
         crate::dial_through_serve(
-            outward, home, &machine, None, socket, hints, &contacts, &mut out, err,
+            crate::Dialing::of(&outward).unwrap(),
+            crate::Beside::of(&outward, home, Some(&machine)),
+            crate::ThroughServe {
+                machine: &machine,
+                slip: None,
+                socket,
+                hints,
+                contacts: &contacts,
+            },
+            crate::commands::learning::Asking::NoTerminal,
+            &mut out,
+            err,
         ),
     )
     .await
@@ -237,6 +248,20 @@ fn dialing_verbs_through_serve_make_the_stale_exchange() {
                 assert_eq!(sync.lane, OpenLane::Main, "{argv:?}");
                 assert_eq!(sync.slip, None, "{argv:?}");
                 assert_eq!(sync.hints, vec![NAS_HINT.parse().unwrap()], "{argv:?}");
+                // The verb's own Opens carry them too.
+                let own: Vec<&Heard> = opens(&events)
+                    .into_iter()
+                    .filter(|open| open.service != "control.sync")
+                    .collect();
+                assert!(!own.is_empty(), "{argv:?}");
+                for open in own {
+                    assert_eq!(
+                        open.hints,
+                        vec![NAS_HINT.parse().unwrap()],
+                        "{argv:?}: {}",
+                        open.service
+                    );
+                }
             }
             assert_eq!(
                 printed[0], printed[1],
@@ -707,5 +732,91 @@ fn a_stalled_serve_ends_a_send_of_many_files_once() {
             assert!(took < Duration::from_secs(65), "{sends_first}: {took:?}");
         }
         let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+/// A device's list of what it serves, naming `entries`, as `control.services` answers it.
+fn catalog_of(entries: &[&str]) -> Vec<u8> {
+    let gate = nauthy::Gate::rooted(
+        TestRoot::seeded(7).verify_key(),
+        nauthy::Denylist::load(std::env::temp_dir().join("swoosh-dialroute-no-revocations"))
+            .unwrap(),
+    );
+    let mut router = tightbeam::tunnel::Router::new(gate);
+    for entry in entries {
+        router = swoosh::serve::bind_entry(router, entry, [0u8; 32], &[]).unwrap();
+    }
+    router
+        .catalog(Some(
+            swoosh::serve::CONTROL_SERVICES_SERVICE.parse().unwrap(),
+        ))
+        .encode()
+        .unwrap()
+}
+
+/// Through `serve`, `ping` and `speed` refused `NotAdmitted` by one of your devices ask it why: one
+/// `control.services` Open on Main, apart from the verb's own (Isolated for `speed`), and the refusal
+/// carries the diagnosis. To a contact's machine there is no follow-up.
+#[test]
+fn a_refused_ping_through_serve_names_the_cause() {
+    on_a_big_stack(async || {
+        for (argv, lane, error) in [
+            (
+                &["ping", "me/nas", "-c", "1"][..],
+                OpenLane::Main,
+                "me/nas refused ping\n  ping was turned off or removed on nas, or nas is too busy to \
+                 take it now.\n  On nas, run this to see which:\n    swoosh status",
+            ),
+            (
+                &["speed", "me/nas", "-n", "1024"],
+                OpenLane::Isolated,
+                "me/nas does not serve speed\n  Only nas can add it; on nas, run:\n    swoosh \
+                 service add speed",
+            ),
+        ] {
+            let mut served = a_device(&format!("refused-cause-{}", argv[0]), false).await;
+            let rig = Rig::default();
+            let resident = routed(
+                &mut served,
+                |service| match service {
+                    "control.services" => Reply::Exchange(catalog_of(&["ping"])),
+                    _ => Reply::Refuse(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
+                },
+                &rig,
+            );
+            let printed = dialed(&served.home, argv).await;
+            rig.stop.cancel();
+            let events = resident.await.unwrap();
+            assert_eq!(printed.error.as_deref(), Some(error), "{argv:?}");
+            assert!(printed.out.is_empty(), "{argv:?}");
+            let heard: Vec<_> = opens(&events)
+                .iter()
+                .map(|open| (open.service.as_str(), open.lane))
+                .collect();
+            assert_eq!(
+                heard,
+                [(argv[0], lane), ("control.services", OpenLane::Main)],
+                "{argv:?}"
+            );
+        }
+
+        // To a contact's machine: the refusal alone, no follow-up.
+        let mut served = bobs_contact("refused-contact").await;
+        let rig = Rig::default();
+        let resident = routed(
+            &mut served,
+            |_| Reply::Refuse(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
+            &rig,
+        );
+        let printed = dialed(&served.home, &["ping", "bob/nas", "-c", "1"]).await;
+        rig.stop.cancel();
+        let events = resident.await.unwrap();
+        assert!(printed.error.is_some());
+        assert!(
+            !opens(&events)
+                .iter()
+                .any(|open| open.service == "control.services"),
+            "no follow-up to a contact"
+        );
     });
 }

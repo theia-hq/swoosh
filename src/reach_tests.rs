@@ -134,31 +134,23 @@ fn escaped_unreached(target: &Peer) -> String {
     )
 }
 
-// `dial`, the raw reach `proxy` takes: a target the dial did not reach prints the connect's cause chain,
-// and a cause can be the peer's own text.
+// A target an open's dial did not reach prints the connect's cause chain, and a cause can be the peer's
+// own text.
 #[tokio::test]
 async fn a_hostile_connect_failure_prints_escaped() {
     let (node, target, machine) = unreachable();
     let bound = bound(false);
-    let Err(error) = dial(&node, &machine, &target, &bound).await else {
-        panic!("a dial the peer closed is an error");
-    };
-    assert_eq!(format!("{error:#}"), escaped_unreached(&target));
-}
-
-// `dial_service`, the gated reach `ping` and `status` take: the same chain, by its own path.
-#[tokio::test]
-async fn a_hostile_service_connect_failure_prints_escaped() {
-    let (node, target, machine) = unreachable();
-    let bound = bound(false);
-    let service = PING_SERVICE
-        .parse::<Service>()
-        .expect("ping is a service name");
-    let Err(error) = dial_service(&node, &machine, &target, &service, None, None, &bound).await
+    let peers = crate::peers::Peers::new(&node);
+    let Err(error) = peers
+        .isolated(machine.key(), crate::peers::Hints::NONE)
+        .await
     else {
         panic!("a dial the peer closed is an error");
     };
-    assert_eq!(format!("{error:#}"), escaped_unreached(&target));
+    assert_eq!(
+        format!("{:#}", open_failed(&target, error, &bound)),
+        escaped_unreached(&target)
+    );
 }
 
 /// The key of `me/nas` in [`yours`].
@@ -255,7 +247,7 @@ async fn a_follow_up_that_times_out_claims_no_cause() {
     let (found, _) = diagnosed(vec![Script::Silent]).await;
     assert_eq!(found, Some(Diagnosis::Unknown));
     assert!(started.elapsed() >= FOLLOW_UP_TIMEOUT);
-    assert!(FOLLOW_UP_TIMEOUT < DIAL_TIMEOUT);
+    assert!(FOLLOW_UP_TIMEOUT < crate::peers::DIAL_TIMEOUT);
 
     let busy = bifrost::Refusal::Unavailable {
         detail: bifrost::RefusalDetail::bounded("busy"),

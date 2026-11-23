@@ -116,15 +116,7 @@ async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
                 Beside::of(&outward, home, ctx.machine),
                 dial,
                 async |admitted| {
-                    let ctx = swoosh::reaching::ReachCtx {
-                        contacts: ctx.contacts,
-                        machine: ctx.machine,
-                        bound: ctx.bound,
-                        present: ctx.present,
-                        membership: ctx.membership,
-                        home: ctx.home,
-                        admitted,
-                    };
+                    let ctx = swoosh::reaching::ReachCtx { admitted, ..ctx };
                     swoosh::reaching::Reaching::run(outward, &node, ctx, &peers).await
                 },
             ),

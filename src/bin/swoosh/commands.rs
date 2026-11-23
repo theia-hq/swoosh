@@ -14,6 +14,7 @@ pub mod ping;
 pub mod proxy;
 pub mod revoke;
 pub mod root;
+pub mod route;
 pub mod send;
 pub mod serve;
 pub mod service;

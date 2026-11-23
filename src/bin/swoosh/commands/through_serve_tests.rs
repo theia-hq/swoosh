@@ -17,7 +17,7 @@ use swoosh::serve::control_codec::{
 };
 use swoosh::transport::ReachArgs;
 
-use super::{Busy, Dial, Moot, OneStream, Skew, StandingEnded, Stream, ThisMachine};
+use super::{Busy, Dial, Moot, Skew, StandingEnded, Stream, ThisMachine};
 use crate::commands::connect::{ConnectionLost, Machine};
 
 /// The key of `me/nas`.
@@ -33,6 +33,15 @@ pub(crate) fn book() -> Contacts {
 
 pub(crate) fn machine(contacts: &Contacts, typed: &str) -> PeerMachine {
     typed.parse::<Peer>().unwrap().machine(contacts).unwrap()
+}
+
+/// A home with nothing in it, under `tag`: a standing that reads as none, so a stream by own bind
+/// presents nothing.
+pub(crate) fn empty_home(tag: &str) -> swoosh::home::Home {
+    let dir = std::env::temp_dir().join(format!("swoosh-probe-home-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    swoosh::home::Home::resolve(Some(dir)).unwrap()
 }
 
 /// A dialing verb with one stream, parsed as the binary parses it.
@@ -66,7 +75,6 @@ impl Dialing {
         machine: &PeerMachine,
         contacts: &Contacts,
     ) -> Ran {
-        use swoosh::learn::Admitted;
         use swoosh::streams::{Resident, Tracked};
 
         let socket = Rc::new(swoosh::node_client::UidSocket::resolve(home).unwrap());
@@ -89,13 +97,56 @@ impl Dialing {
             reach,
             contacts,
         };
+        let route = crate::commands::route::Route::Serve {
+            dial: &dial,
+            socket: &socket,
+        };
+        self.run(&source, &route, machine).await
+    }
+
+    /// Run the verb by own bind over `peers`, from `home` as `this`, to `machine`, with no question
+    /// asked.
+    pub(crate) async fn by_own_bind<T: bifrost::Transport, D: bifrost::Discovery>(
+        &self,
+        peers: &swoosh::peers::Peers<'_, T, D>,
+        home: &swoosh::home::Home,
+        this: NodeId,
+        machine: &PeerMachine,
+    ) -> Ran {
+        let (peer, service) = match self {
+            Self::Ping(cmd) => (&cmd.peer, swoosh::reach::PING_SERVICE),
+            Self::Status(cmd) => (cmd.peer.as_ref().unwrap(), swoosh::reach::PING_SERVICE),
+            Self::Speed(cmd) => (&cmd.peer, swoosh::reach::SPEED_SERVICE),
+        };
+        let bound = swoosh::transport::Bound {
+            local: false,
+            reach: swoosh::transport::Reach::default(),
+        };
+        let route = crate::commands::route::Route::Own {
+            peer,
+            bound: &bound,
+            this,
+        };
+        let credential = swoosh::credential::Credential::dialing(peer, service);
+        let own = swoosh::streams::OwnBind::new(peers, home, this, &credential);
+        self.run(own, &route, machine).await
+    }
+
+    /// The verb's one body over `source`, as `route` words it.
+    async fn run(
+        &self,
+        source: impl swoosh::streams::Observing + Copy,
+        route: &crate::commands::route::Route<'_>,
+        machine: &PeerMachine,
+    ) -> Ran {
+        use swoosh::learn::Admitted;
+
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let ended = match self {
             Self::Ping(cmd) => {
-                cmd.through(
-                    &source,
-                    &dial,
-                    &socket,
+                cmd.probe(
+                    source,
+                    route,
                     machine,
                     Admitted::unheard(),
                     &mut out,
@@ -104,10 +155,9 @@ impl Dialing {
                 .await
             }
             Self::Status(cmd) => {
-                cmd.through(
-                    &source,
-                    &dial,
-                    &socket,
+                cmd.probe(
+                    source,
+                    route,
                     machine,
                     Admitted::unheard(),
                     &mut out,
@@ -116,10 +166,9 @@ impl Dialing {
                 .await
             }
             Self::Speed(cmd) => {
-                cmd.through(
-                    &source,
-                    &dial,
-                    &socket,
+                cmd.measure(
+                    source,
+                    route,
                     machine,
                     Admitted::unheard(),
                     &mut out,
@@ -573,7 +622,15 @@ async fn delivered_through_serve_writes_no_end_and_waits_for_its_caller() {
 
     let mut served = Served::new("delivered").await;
     let (stream, mut conn) = attached(&mut served, direct()).await;
-    let session = OneStream::new(nas(), stream.info, stream.read, stream.write);
+    let session = swoosh::streams::OneStream::new(
+        nas(),
+        swoosh::streams::Opened {
+            info: stream.info,
+            write: swoosh::streams::Upload::from(stream.write),
+            read: stream.read,
+        },
+        (),
+    );
     let (upload, _download) = session.open_bi().await.unwrap();
     let mut delivered = Box::pin(upload.delivered());
     assert!(futures::poll!(delivered.as_mut()).is_pending());
@@ -600,7 +657,15 @@ async fn one_stream_hands_out_its_stream_once() {
 
     let mut served = Served::new("onestream").await;
     let (stream, _conn) = attached(&mut served, direct()).await;
-    let session = OneStream::new(nas(), stream.info, stream.read, stream.write);
+    let session = swoosh::streams::OneStream::new(
+        nas(),
+        swoosh::streams::Opened {
+            info: stream.info,
+            write: swoosh::streams::Upload::from(stream.write),
+            read: stream.read,
+        },
+        (),
+    );
     assert_eq!(session.peer(), nas());
     assert_eq!(session.conn_info(), direct());
     assert!(matches!(

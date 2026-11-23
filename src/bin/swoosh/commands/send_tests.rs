@@ -234,17 +234,21 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
 
     // As the dialing route runs it: the warning, the exchange and the lookup beside it read the home too.
     let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
+    let outward = crate::Outward::Send(cmd);
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let ended = tokio::time::timeout(
         ROW_BOUND,
         crate::dial_through_serve(
-            crate::Outward::Send(cmd),
-            &served.home,
-            &peer,
-            None,
-            socket,
-            std::collections::HashMap::new(),
-            &contacts,
+            crate::Dialing::of(&outward).unwrap(),
+            crate::Beside::of(&outward, &served.home, Some(&peer)),
+            crate::ThroughServe {
+                machine: &peer,
+                slip: None,
+                socket,
+                hints: std::collections::HashMap::new(),
+                contacts: &contacts,
+            },
+            crate::commands::learning::Asking::NoTerminal,
             &mut out,
             &mut err,
         ),
@@ -1317,7 +1321,8 @@ async fn a_refused_send_to_your_device_ends_with_one_refusal() {
 
 /// A `serve` that takes an Open and then answers nothing, a status included, has stalled: every file would
 /// stall on it. The first file to confirm it ends the run with the stall's two lines, once and with no
-/// `skip` before them, and no file's Open follows; files already sent stay sent.
+/// `skip` before them. What follows the stall, and what was sent before it, are pinned by
+/// `a_stalled_serve_ends_a_send_of_many_files_once`.
 #[tokio::test]
 async fn a_stalled_serve_ends_a_send_once() {
     tokio::time::pause();
@@ -1342,13 +1347,16 @@ async fn a_stalled_serve_ends_a_send_once() {
         reach: &cmd.reach,
         contacts: &contacts,
     };
+    let route = Route::Serve {
+        dial: &dial,
+        socket: &socket,
+    };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let ended = tokio::time::timeout(
         core::time::Duration::from_secs(600),
         cmd.through(
             &source,
-            &dial,
-            &socket,
+            &route,
             &peer,
             Admitted::unheard(),
             &mut out,
@@ -1384,4 +1392,36 @@ async fn a_refused_connect_under_a_held_lock_is_a_cut_for_send() {
     let skipped = skips(&ran.err);
     assert_eq!(skipped.len(), 1, "{}", ran.err);
     assert_eq!(skipped[0].1, "connection lost");
+}
+
+/// A control socket that stops passing the trust check, here a `serve.lock` that names another process,
+/// fails it again at every later connect: the run ends on the first file's open with that one line,
+/// never a `skip` per file.
+#[tokio::test]
+async fn an_untrusted_socket_ends_a_send_once() {
+    let mut served = Served::new("send-untrusted").await;
+    let _listener = served.listener();
+    let socket = Rc::new(swoosh::node_client::UidSocket::resolve(&served.home).unwrap());
+    // The resolve's path checks passed; the connect's own check reads the pid `serve.lock` records.
+    std::fs::write(served.home.serve_lock(), "1\n").unwrap();
+    let (dir, paths) = files("untrusted", 3);
+    let mut argv: Vec<&str> = paths.iter().map(String::as_str).collect();
+    argv.push("me/nas");
+    let cmd = send(&argv);
+    let contacts = book();
+    let peer = typed(&contacts, "me/nas");
+    let ran = through_socket(&cmd, socket, &peer, None, &contacts).await;
+    let _ = std::fs::remove_dir_all(dir);
+    let report = format!("{:#}", ran.ended.expect_err("the run ended non-zero"));
+    assert!(
+        report.starts_with("refusing to trust the control path "),
+        "{report}"
+    );
+    assert!(!report.contains("could not be sent"), "{report}");
+    assert_eq!(ran.err, "", "no skip line");
+    assert_eq!(
+        ran.out,
+        format!("sending to {}...\n", peer.key()),
+        "nothing sent"
+    );
 }

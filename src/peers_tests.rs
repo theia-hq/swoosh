@@ -2409,3 +2409,287 @@ impl Session for ProbeSession {
 /// What every exchange presents: this home's standing, never a slip.
 const FAMILY: crate::credential::Credential =
     crate::credential::Credential::Family { present: None };
+
+/// The root question presents nothing, and rides a session this home's standing already holds to the
+/// peer on its lane rather than dialing a second: one connection for a dial's stream and its lookup. A
+/// slip's session is never joined, and neither is a held one by a pick-up, which keeps a session of its
+/// own.
+#[tokio::test]
+async fn the_lookup_rides_the_verbs_held_session() {
+    let lookup = || {
+        crate::serve::LOOKUP_ROOT_SERVICE
+            .parse::<Service>()
+            .unwrap()
+    };
+    let renewal = || RENEWAL_SERVICE.parse::<Service>().unwrap();
+
+    // The verb's stream presents the badge; the lookup, nothing.
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _verb = peers
+        .open(
+            peer(),
+            Hints::NONE,
+            service(),
+            Main,
+            Standing(Some(badge(1))),
+        )
+        .await
+        .unwrap();
+    let _lookup = peers
+        .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(probe.state.dials.get(), 1, "one connection for both");
+
+    // Beside a slip's session alone, the lookup dials its own.
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let slip = Slip {
+        slip: badge(1),
+        membership: None,
+    };
+    let _verb = peers
+        .open(peer(), Hints::NONE, service(), Main, slip)
+        .await
+        .unwrap();
+    let _lookup = peers
+        .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(
+        probe.state.dials.get(),
+        2,
+        "a slip's session is never joined"
+    );
+
+    // A pick-up beside a held session dials its own.
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _verb = peers
+        .open(
+            peer(),
+            Hints::NONE,
+            service(),
+            Main,
+            Standing(Some(badge(1))),
+        )
+        .await
+        .unwrap();
+    let _pick_up = peers
+        .open(peer(), Hints::NONE, renewal(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(
+        probe.state.dials.get(),
+        2,
+        "a pick-up keeps a session of its own"
+    );
+}
+
+/// A lookup's open that fails on a joined session is treated as one on a reused session. On a held
+/// badge session it redials once under the lookup's own key, and the badge session stays held; on the
+/// lookup's own session it evicts that and redials once, as any reused session does; and a stall on a
+/// joined session redials nothing and evicts nothing it does not own.
+#[tokio::test(start_paused = true)]
+async fn a_failed_join_redials_once_under_the_lookups_key() {
+    let lookup = || {
+        crate::serve::LOOKUP_ROOT_SERVICE
+            .parse::<Service>()
+            .unwrap()
+    };
+
+    // (a) A joined badge session fails retryably: one dial of the lookup's own, and the open lands.
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _verb = peers
+        .open(
+            peer(),
+            Hints::NONE,
+            service(),
+            Main,
+            Standing(Some(badge(1))),
+        )
+        .await
+        .unwrap();
+    probe.state.fail_opens.set(1);
+    let _lookup = peers
+        .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(probe.state.dials.get(), 2, "one redial");
+    assert_eq!(peers.entries.borrow().len(), 2, "the badge session held");
+    assert!(probe.state.closed.borrow().is_empty(), "nothing evicted");
+
+    // ... and a redial that fails too ends there: never a third dial.
+    let probe = Probe::new([Script::Lists(vec![])]);
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _verb = peers
+        .open(
+            peer(),
+            Hints::NONE,
+            service(),
+            Main,
+            Standing(Some(badge(1))),
+        )
+        .await
+        .unwrap();
+    probe.state.fail_opens.set(2);
+    assert!(matches!(
+        peers
+            .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+            .await,
+        Err(OpenError::Open(bifrost::Error::Closed))
+    ));
+    assert_eq!(probe.state.dials.get(), 2, "one redial, not two");
+
+    // (b) The lookup's own session, reused, fails retryably: evicted and redialed once.
+    let probe = Probe::new((0..2).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    drop(
+        peers
+            .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+            .await
+            .unwrap(),
+    );
+    probe.state.fail_opens.set(1);
+    let _lookup = peers
+        .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(probe.state.dials.get(), 2, "one redial");
+    assert_eq!(*probe.state.closed.borrow(), vec![1], "its own was evicted");
+    assert_eq!(peers.entries.borrow().len(), 1);
+
+    // (c) An open on a joined badge session stalls: no redial, and the badge session stays held.
+    let probe = Probe::new([Script::Lists(vec![])]);
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _verb = peers
+        .open(
+            peer(),
+            Hints::NONE,
+            service(),
+            Main,
+            Standing(Some(badge(1))),
+        )
+        .await
+        .unwrap();
+    probe.state.hold_next.set(1);
+    assert!(matches!(
+        peers
+            .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+            .await,
+        Err(OpenError::Timeout)
+    ));
+    assert_eq!(probe.state.dials.get(), 1, "a stall never redials");
+    assert_eq!(peers.entries.borrow().len(), 1, "the badge session held");
+    assert!(probe.state.closed.borrow().is_empty(), "nothing evicted");
+}
+
+/// Of several sessions a lookup could join, it takes one with a stream on it, then the one whose last
+/// open succeeded latest, whatever the map's order: here the other one stalls every open, so a wrong
+/// pick times out.
+#[tokio::test(start_paused = true)]
+async fn a_lookup_joins_the_session_last_shown_to_answer() {
+    let lookup = || {
+        crate::serve::LOOKUP_ROOT_SERVICE
+            .parse::<Service>()
+            .unwrap()
+    };
+
+    // Neither has a stream live: the later success wins.
+    let probe = Probe::new((0..3).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    for generation in [1, 2] {
+        drop(
+            peers
+                .open(
+                    peer(),
+                    Hints::NONE,
+                    service(),
+                    Main,
+                    Standing(Some(badge(generation))),
+                )
+                .await
+                .unwrap(),
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    probe.state.stalled.borrow_mut().push(1);
+    let _lookup = peers
+        .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(probe.state.dials.get(), 2, "it joined the later session");
+
+    // A live stream outranks a later success.
+    let probe = Probe::new((0..3).map(|_| Script::Lists(vec![])));
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let _live = peers
+        .open(
+            peer(),
+            Hints::NONE,
+            service(),
+            Main,
+            Standing(Some(badge(1))),
+        )
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    drop(
+        peers
+            .open(
+                peer(),
+                Hints::NONE,
+                service(),
+                Main,
+                Standing(Some(badge(2))),
+            )
+            .await
+            .unwrap(),
+    );
+    probe.state.stalled.borrow_mut().push(2);
+    let _lookup = peers
+        .open(peer(), Hints::NONE, lookup(), Main, Standing(None))
+        .await
+        .unwrap();
+    assert_eq!(probe.state.dials.get(), 2, "it joined the live session");
+}
+
+/// A session whose path never moves ends its stream of changes after the one in force: following it
+/// delivers that path once and then waits, never re-reading the ended stream, so the run beside it goes
+/// on.
+#[tokio::test(start_paused = true)]
+async fn a_path_stream_that_ends_delivers_once_and_waits() {
+    use crate::observation::Follow as _;
+
+    let probe = Probe::new([Script::Lists(vec![])]);
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let (_, end, _writer, _reader) = peers
+        .open_attached(peer(), Hints::NONE, service(), Main, Standing(None))
+        .await
+        .unwrap();
+    let mut path = super::SessionPath::Held(end);
+    let mut delivered = 0;
+    let started = tokio::time::Instant::now();
+    tokio::select! {
+        never = path.moves(|info| {
+            delivered += 1;
+            assert_eq!(delivered, 1, "an ended stream is not read again");
+            assert_eq!(info.path, Path::Unknown);
+        }) => match never {},
+        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+    }
+    assert_eq!(delivered, 1);
+    assert_eq!(started.elapsed(), Duration::from_secs(1), "the run went on");
+}

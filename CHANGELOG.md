@@ -26,11 +26,18 @@ All notable changes to swoosh, newest first.
   `status` reads `me/nas, path: direct, rtt 12.031 ms`; `ping` prints the device, then a `path:` row from a
   reading taken after the run. If that fails, the path is left out, stderr says
   `warning: could not read the path of this run`, and the exit code is unchanged.
+- **`speed`, `ping` and `status <machine>` print the same refusal with or without `swoosh serve`.** A machine that
+  refuses `speed` prints `error: stream refused: unavailable: <why>`, as `send` does, and `speed` prints its title
+  only once the stream is open. A `ping` or `status <machine>` that gets no answer in time prints
+  `me/nas: unreachable` either way; `speed` and `send` print an error whose words differ by path.
 - **A `swoosh serve` that stops answering is named, and the expiring-standing warning follows the run.** `ping`,
   `speed`, `status <machine>`, `send`, `forward` and `proxy` end with `error: swoosh serve on this machine did not answer` and
   exit 1; `send` stops there instead of skipping each file, and a `forward <port>` or `proxy` connection that fails later
   keeps its warning. Through `serve`, `ping`, `speed`, `status` and `send` also warn when this machine's standing
   is about to expire, as they do without it.
+- **`send` ends on a socket to `swoosh serve` that cannot be trusted.** It prints one line,
+  `error: refusing to trust the control path <path>: not this user's 0700 runtime dir/socket`, and exits 1, where it
+  printed a `skip` line per remaining file.
 - **`forward <port>` and `proxy` run through `swoosh serve` too.** If `serve` stops, both end with
   `error: swoosh serve stopped here and ended the connection to me/nas`. A `proxy` request that fails gets a
   `502` whose body is one line, `proxy failed: <what went wrong>`, and `proxy` still prints its URL first.

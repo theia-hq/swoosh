@@ -3,27 +3,24 @@
 //! A root cannot be computed from a machine's key. But when `alice/laptop` was saved with a key alice gave
 //! you, the transport proves that key when the machine answers, and the standing it hands over proves
 //! which root vouches for it: a root that vouches for that key, only as trustworthy as whoever holds it.
-//! A dial asks once its first stream is admitted, on the root route ([`LOOKUP_ROOT_SERVICE`]) of the
-//! session it dialed, and only for a machine saved as one of a person's other than yours; `sync` asks every
-//! such machine of a person with no root saved. The answer teaches nothing unless the standing verifies
-//! under the root it names, is bound to the key dialed, and outlives now.
+//! A dial asks once its first stream is admitted, on the root route ([`LOOKUP_ROOT_SERVICE`]), through
+//! the source that stream came from, and only for a machine saved as one of a person's other than
+//! yours; `sync` asks every such machine of a person with no root saved. The answer teaches nothing
+//! unless the standing verifies under the root it names, is bound to the key dialed, and outlives now.
 //!
 //! What was learned is never followed on its own: an empty slot is offered to the person, who says yes or
 //! no; a root that differs from the one saved is a conflict to warn about, never a replace. Each machine
 //! remembers the root it last showed (its `seen_root`, kept on this machine only), so the offer and the
 //! warning come once per new root, not once per dial. The words are the binary's.
 
-use core::cell::Cell;
 use core::time::Duration;
-use std::rc::Rc;
 use std::time::SystemTime;
 
-use bifrost::{ConnInfo, NodeId, PathChanges, Session};
+use bifrost::NodeId;
 use futures::StreamExt as _;
 use futures::future::LocalBoxFuture;
 use nauthy::{Link, Service};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
-use tightbeam::tunnel::Connector;
 use tokio::sync::oneshot;
 
 use crate::contacts::{Contacts, ContactsStore, DeviceLabel, ME, Petname, Taken};
@@ -132,8 +129,8 @@ impl Found {
 }
 
 /// Open the root route to `key` through `source`, presenting nothing, on Main, and read its one answer:
-/// the standing on a hit, `None` on a miss. A refusal of any kind is the same miss to the asker, as on
-/// [`ask_on`].
+/// the standing on a hit, `None` on a miss. A full pool or a key the route does not know is refused
+/// before a stream opens, and a refusal of any kind is the same miss to the asker.
 ///
 /// # Errors
 ///
@@ -158,35 +155,6 @@ pub async fn ask_through(
         Err(other) => return Err(FetchError::Unopened(other)),
     };
     crate::renewal::read_answer(opened.read).await
-}
-
-/// The standing `session`'s peer hands over on its root route, or `None` on a miss or a failure, logged.
-async fn answer<S: Session>(session: &S) -> Option<Link> {
-    match ask_on(session, session.peer()).await {
-        Ok(standing) => standing,
-        Err(error) => {
-            tracing::debug!(%error, "the root lookup failed");
-            None
-        }
-    }
-}
-
-/// Open the root route on `session` to `key`, presenting nothing, and read its one answer: the standing on
-/// a hit, `None` on a miss. A full pool or a key the route does not know is refused before a stream opens,
-/// which to the asker is the same miss.
-pub async fn ask_on<S: Session>(session: &S, key: NodeId) -> Result<Option<Link>, FetchError> {
-    let service: Service = LOOKUP_ROOT_SERVICE
-        .parse()
-        .map_err(|error| eyre::eyre!("{error}"))?;
-    let (_writer, reader) = match Connector::to_node(key, service, None)
-        .open_on(session)
-        .await
-    {
-        Ok(halves) => halves,
-        Err(bifrost::Error::Refused(_)) => return Ok(None),
-        Err(other) => return Err(eyre::eyre!(other).into()),
-    };
-    crate::renewal::read_answer(reader).await
 }
 
 /// The root `standing` teaches about the machine `device`: only when it verifies under the root it names,
@@ -339,73 +307,6 @@ impl<'s> Admitted<'s> {
                 }
             }
         }));
-    }
-
-    /// `session`, gated through `connector` on every stream it opens, giving this signal the first time one
-    /// is admitted.
-    pub fn watch<S: Session + 'static>(self, session: S, connector: Connector) -> Watched<'s, S> {
-        let Self(signal) = self;
-        Watched {
-            session: Rc::new(session),
-            connector,
-            signal: Cell::new(signal),
-        }
-    }
-}
-
-/// A dialed session whose every stream is gated through one service request, as a service session's is,
-/// and that hands over the root question when its first stream is admitted ([`Admitted::watch`]).
-///
-/// The question rides this same session, and holds it (an `Rc`, since a dial runs on one task) so it stays
-/// open until the question ends, past the verb if it must.
-pub struct Watched<'s, S> {
-    session: Rc<S>,
-    connector: Connector,
-    // A `Cell`: a stream opens through `&self`, and the sender is taken once, by whichever open admits
-    // first. Never shared across threads, since the session is not.
-    signal: Cell<Option<oneshot::Sender<Question<'s>>>>,
-}
-
-impl<S: Session + 'static> Session for Watched<'_, S> {
-    type Write = S::Write;
-    type Read = S::Read;
-
-    fn peer(&self) -> NodeId {
-        self.session.peer()
-    }
-
-    /// A stream returns only once the host admitted it, so the first that returns is the signal.
-    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-        let halves = self.connector.open_on(&*self.session).await?;
-        if let Some(signal) = self.signal.take() {
-            let held = Rc::clone(&self.session);
-            // Nobody listening any more is no failure of the verb's.
-            let _ = signal.send(Box::pin(async move { answer(&*held).await }));
-        }
-        Ok(halves)
-    }
-
-    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-        // A service client never accepts peer-opened streams; refusing keeps the view total.
-        Err(bifrost::Error::Stream(
-            "a service-scoped session does not accept inbound streams".into(),
-        ))
-    }
-
-    async fn wait_closed(&self) {
-        self.session.wait_closed().await;
-    }
-
-    fn close(&self) {
-        self.session.close();
-    }
-
-    fn conn_info(&self) -> ConnInfo {
-        self.session.conn_info()
-    }
-
-    fn path_changes(&self) -> PathChanges {
-        self.session.path_changes()
     }
 }
 

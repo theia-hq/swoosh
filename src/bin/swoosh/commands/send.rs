@@ -15,19 +15,17 @@
 
 use core::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
-use bifrost::{Discovery, Node, NodeId, Refusal, Session, Transport};
+use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::Service;
-use swoosh::escape::{Escaped, EscapedPath, causes, escaped_report};
+use swoosh::escape::{Escaped, EscapedPath};
 use swoosh::learn::Admitted;
-use swoosh::node_client::UidSocket;
 use swoosh::peer::{Machine, Peer};
-use swoosh::peers::{Hints, OpenError};
+use swoosh::peers::Hints;
 use swoosh::reach;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
 use swoosh::streams::{Ask, OwnBind, Resident, StreamSource, Tracked, Unopened};
@@ -35,9 +33,9 @@ use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
 use transfer::wire::{Blob, Transfer};
 
-use crate::commands::connect::ConnectionLost;
 use crate::commands::machine;
-use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachine, Unresponsive};
+use crate::commands::route::{Route, peer_error};
+use crate::commands::through_serve::Unresponsive;
 
 /// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
@@ -109,14 +107,6 @@ impl swoosh::reaching::Reaching for SendCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `send` ran without its machine resolved (root-dispatch bug)");
         };
-        let ask = Ask {
-            peer: machine.key(),
-            // The addresses typed for the machine reach this run's dials through its discovery.
-            hints: Hints::NONE,
-            service: self.service.clone(),
-            lane: SEND_LANE,
-            slip: self.peer.self_present(),
-        };
         let route = Route::Own {
             peer: &self.peer,
             bound: ctx.bound,
@@ -126,7 +116,7 @@ impl swoosh::reaching::Reaching for SendCmd {
             OwnBind::new(peers, ctx.home, node.node_id(), &self.credential()),
             &route,
             machine,
-            ask,
+            self.ask(machine),
             ctx.admitted,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
@@ -145,33 +135,43 @@ impl SendCmd {
         swoosh::credential::Credential::dialing(&self.peer, self.service.as_str())
     }
 
-    /// Run through `serve` on `socket` as `dial` asks, each file one Open from `source`, printing on `out`
-    /// and `err`. The first admitted file gives `admitted` its question, asked through `source`.
+    /// Each file's Open to `machine`, on both paths. It carries no addresses: by own bind the typed ones
+    /// reach the run's dials through its discovery, and through `serve` the source fills them in.
+    fn ask(&self, machine: &Machine) -> Ask {
+        Ask {
+            peer: machine.key(),
+            hints: Hints::NONE,
+            service: self.service.clone(),
+            lane: SEND_LANE,
+            slip: self.peer.self_present(),
+        }
+    }
+
+    /// Run through `serve` as `route` words it, each file one Open from `source`, printing on `out` and
+    /// `err`. The first admitted file gives `admitted` its question, asked through `source`.
     ///
     /// # Errors
     ///
     /// The run's line, or how many files could not be sent.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the run's two writers ride beside its source and socket"
-    )]
     pub async fn through<'s>(
         &self,
         source: &'s Tracked<Resident>,
-        dial: &Dial<'_>,
-        socket: &Rc<UidSocket>,
+        route: &Route<'_>,
         machine: &Machine,
         admitted: Admitted<'s>,
         out: &mut impl std::io::Write,
         err: &mut impl std::io::Write,
     ) -> eyre::Result<()> {
-        let ask = match dial.ask(SEND_LANE) {
-            Ok(ask) => ask,
-            Err(unattached) => return Err(dial.unattached(unattached, &**socket).await),
-        };
-        let route = Route::Serve { dial, socket };
-        self.run_send(source, &route, machine, ask, admitted, out, err)
-            .await
+        self.run_send(
+            source,
+            route,
+            machine,
+            self.ask(machine),
+            admitted,
+            out,
+            err,
+        )
+        .await
     }
 
     /// Push every named file to `machine`, each over its own stream from `source` as `ask` asks for it,
@@ -283,64 +283,6 @@ impl SendCmd {
     }
 }
 
-/// The path a run's streams take, for the line an open that gave no stream prints: each path prints its
-/// own line for the same outcome.
-enum Route<'a> {
-    /// By own bind: the machine as typed and what the run bound, for an unreachable one's line, and the
-    /// key it bound, for an ended standing's remedy.
-    Own {
-        peer: &'a Peer,
-        bound: &'a swoosh::transport::Bound,
-        this: NodeId,
-    },
-    /// Through `serve`: the dial's lines, and its socket to ask whether `serve` went.
-    Serve {
-        dial: &'a Dial<'a>,
-        socket: &'a UidSocket,
-    },
-}
-
-impl Route<'_> {
-    /// The line `unopened` prints for `machine`: by own bind, the cause chain as a transport's failure
-    /// prints it; through `serve`, the routed verbs' line for it.
-    async fn line(&self, unopened: Unopened, machine: &Machine) -> eyre::Report {
-        let (peer, bound, this) = match self {
-            Self::Serve { dial, socket } => {
-                let unattached = dial.unopened(unopened, socket).await;
-                return dial.unattached(unattached, *socket).await;
-            }
-            Self::Own { peer, bound, this } => (*peer, *bound, *this),
-        };
-        match unopened {
-            Unopened::Refused(OpenRefusal::Peer(refusal)) => {
-                peer_error(&bifrost::Error::Refused(Refusal::from(refusal)))
-            }
-            Unopened::Refused(OpenRefusal::StandingEnded) => StandingEnded(Some(this)).into(),
-            Unopened::Refused(OpenRefusal::NotHere) => ThisMachine::of(machine).into(),
-            Unopened::Refused(OpenRefusal::Busy) => Busy.into(),
-            Unopened::Refused(OpenRefusal::Unreachable(detail)) => {
-                peer_error(&bifrost::Error::Connect(detail.to_string().into()))
-            }
-            Unopened::Refused(OpenRefusal::Timeout) => {
-                peer_error(&bifrost::Error::Connect("timed out".into()))
-            }
-            Unopened::Refused(
-                OpenRefusal::Broken(detail) | OpenRefusal::PeerUnreadable(detail),
-            ) => peer_error(&bifrost::Error::Stream(detail.to_string().into())),
-            Unopened::Own(error @ OpenError::Unreachable(_)) => {
-                reach::open_failed(peer, error, bound)
-            }
-            Unopened::Own(error) => peer_error(&error),
-            Unopened::Home(report) => peer_error(report.as_ref()),
-            // The resident's own outcomes, which a run that bound its own never meets.
-            Unopened::ServeError(reason) => escaped_report(eyre::eyre!(reason)),
-            Unopened::Skew => Skew.into(),
-            Unopened::Malformed(malformed) => malformed.into(),
-            Unopened::ServeGone | Unopened::Control(_) => ConnectionLost.into(),
-        }
-    }
-}
-
 /// What a run holds to hand over its root question once a file stream is admitted: the signal, taken
 /// by the first, and the source and key the question asks through. It also knows whether any file was
 /// admitted, which decides what a machine not reached means.
@@ -431,14 +373,6 @@ async fn send_named<'s, S: StreamSource + Copy + 's>(
         .await
         .map_err(|error| Unsent::Failed(peer_error(&error)))?;
     Ok(blob.len())
-}
-
-/// A failed stream or transfer as the skip line prints it: the cause chain, `outer: inner`, through the
-/// shared escaper. The chain can carry the receiver's text (a refusal detail, the reason it gave for
-/// closing), so it is escaped here, where it enters, and not on the skip line, which would escape the
-/// paths [`render_path`] already escaped a second time.
-fn peer_error(error: &dyn core::error::Error) -> eyre::Report {
-    eyre::eyre!("{}", Escaped(&causes(error)))
 }
 
 /// Render a path for a line or an error context through the shared escaper, as the `sent` line renders

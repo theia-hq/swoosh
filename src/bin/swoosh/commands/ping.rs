@@ -12,32 +12,30 @@
 //! moment the transport selects another; through `serve` from the samples its observer takes each second,
 //! so a move may land a probe late. The `ping(8)` summary still follows the live lines.
 //!
-//! While `swoosh serve` runs here, the run is one observed Open through it on its held session to the
-//! machine: every probe rides that one stream, and the block's `path:` is read by a Finish after the run.
+//! The run is one stream on Main, the session the rest of this home's traffic rides to the machine, and
+//! every probe rides it: by own bind on the run's held session, read from that session after the run;
+//! while `swoosh serve` runs here, one observed Open through it, its `path:` read by a Finish after the run.
 
 use core::cell::RefCell;
-use core::future::Future;
 use core::time::Duration;
 use std::io::{self, Write};
-use std::rc::Rc;
 
-use bifrost::{Discovery, Node, Path, PathChanges, Session, Transport};
+use bifrost::{Discovery, Node, Path, Session, Transport};
 use clap::Args;
-use futures::StreamExt as _;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
-use nauthy::{Link, Service};
+use nauthy::Service;
 use swoosh::escape::{Escaped, causes};
 use swoosh::learn::Admitted;
-use swoosh::node_client::UidSocket;
-use swoosh::observation::{Observer, PathSource};
+use swoosh::observation::Follow;
 use swoosh::peer::{Machine, Peer};
+use swoosh::peers::Hints;
 use swoosh::reach;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
-use swoosh::streams::{Resident, Tracked};
+use swoosh::streams::{Ask, Observing, OwnBind, StreamSource, Unopened};
 use swoosh::transport::{self, ReachArgs};
 
-use crate::commands::machine;
-use crate::commands::through_serve::{self, Dial, Unattached};
+use crate::commands::route::Route;
+use crate::commands::{machine, through_serve};
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
@@ -88,13 +86,13 @@ impl swoosh::reaching::Reaching for PingCmd {
         ))
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `ping` reads the resolved machine, the
-    /// `transport` label, and the resolved `present` badge.
+    /// Uniform dispatch: one stream on the run's held Main session to the machine resolved before the
+    /// bind, presenting what the open reads from the home, or an `anyone` link alone.
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
         node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        _peers: &'p swoosh::peers::Peers<'n, T, D>,
+        ctx: swoosh::reaching::ReachCtx<'p>,
+        peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
         T::Session: 'static,
@@ -104,170 +102,115 @@ impl swoosh::reaching::Reaching for PingCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `ping` ran without its machine resolved (root-dispatch bug)");
         };
-        self.run_ping(
-            node,
+        let credential = swoosh::credential::Credential::dialing(&self.peer, reach::PING_SERVICE);
+        let route = Route::Own {
+            peer: &self.peer,
+            bound: ctx.bound,
+            this: node.node_id(),
+        };
+        self.probe(
+            OwnBind::new(peers, ctx.home, node.node_id(), &credential),
+            &route,
             machine,
-            ctx.bound,
-            ctx.present,
-            ctx.membership,
             ctx.admitted,
+            &mut io::stdout(),
+            &mut io::stderr(),
         )
         .await
     }
 }
 
 impl PingCmd {
-    /// Dial the machine, probe it, and print its path and RTT summary. A machine that refuses the probe
-    /// `NotAdmitted` prints the dial refusal on stderr instead (one of your devices is asked why); any
-    /// other outcome prints its line, and only an answered probe exits green.
-    async fn run_ping<T: Transport, D: Discovery>(
-        self,
-        node: &Node<T, D>,
-        machine: &Machine,
-        bound: &transport::Bound,
-        present: Option<Link>,
-        membership: Option<Link>,
-        admitted: Admitted<'_>,
-    ) -> eyre::Result<()>
-    where
-        T::Session: 'static,
-    {
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver: slot 1 (`present`) is
-        // the link typed as the peer or the member badge, slot 2 (`membership`) is a fleet badge only for a
-        // signet-bound slip. The verb never threads a slip itself, so it cannot desync the two.
-        let plan = self.plan();
-        let label = machine.label();
-        let service: Service = reach::PING_SERVICE.parse()?;
-        let session = match reach::dial_service(
-            node,
-            machine,
-            &self.peer,
-            &service,
-            Option::clone(&present),
-            Option::clone(&membership),
-            bound,
-        )
-        .await
-        {
-            // Its first admitted probe stream tells the composition root it may ask which root vouches for
-            // the machine.
-            Ok((session, connector)) => admitted.watch(session, connector),
-            Err(_error) => {
-                println!("{label}: unreachable");
-                return reach::Outcome::Unreachable.into_result(&self.peer, bound);
-            }
-        };
-        // With `-v`, print a line per probe as it lands, and a path line for the path in force and each
-        // change the session reports, so the moment a relayed link flips to direct is visible live. The
-        // observer borrows the session read-only, alongside the run's own read-only borrow.
-        let report = if self.verbose {
-            let probes = plan.observing(&session, |probe| {
-                println!("{}", probe_line(&label, probe));
-            });
-            watching(session.path_changes(), probes, |path| {
-                println!("{}", path_line(&label, path));
-            })
-            .await
-        } else {
-            plan.run(&session).await
-        };
-        let outcome = match report {
-            Ok(report) => {
-                print_block(
-                    &mut io::stdout(),
-                    &label,
-                    || Ok(Some(session.conn_info().path)),
-                    &report,
-                )?;
-                reach::Outcome::Healthy
-            }
-            // The machine refused this machine the service: the dial refusal, on stderr, once. One of your
-            // devices is asked why first, over a second connection, since the gated session opens nothing
-            // but `ping`.
-            Err(ProtocolError::Refused(Refusal::Stream(bifrost::Refusal::NotAdmitted))) => {
-                let diagnosis =
-                    reach::diagnose_over(node, machine, &service, present, membership).await;
-                return Err(machine::refused(machine, &service, diagnosis));
-            }
-            // The node was REACHED but refused this probe some other way: a distinct line that says so (not
-            // a healthy machine with 100% loss, and NOT "unreachable"), rendering the typed refusal so a
-            // refusal reads descriptively and is never doubled (`refused (refused)`).
-            Err(ProtocolError::Refused(refusal)) => {
-                println!("{}", refused_line(&label, &refusal));
-                reach::Outcome::Refused
-            }
-            // The node was REACHED and the exchange then broke. The full cause chain is rendered because
-            // the outer half of a stream failure is routinely the useless half.
-            Err(error) => {
-                println!("{}", failed_line(&label, &error));
-                reach::Outcome::Failed
-            }
-        };
-
-        // The composition root closes the node once anything still running beside the verb has ended, so
-        // the last frames land and iroh shuts down cleanly.
-        outcome.into_result(&self.peer, bound)
-    }
-}
-
-impl PingCmd {
-    /// Run through `serve` on `socket` as `dial` asks, printing on `out` and `err`. Once the Open
-    /// attaches, `admitted` gets its question, asked through `source`.
+    /// Probe `machine` over one stream from `source` on Main, printing on `out` and `err`, as `route`
+    /// words what it meets: its path and RTT summary, or the line for how far it got, and only an
+    /// answered probe exits green. A machine that refuses the probe `NotAdmitted` prints the refusal as
+    /// the error, after one of your devices is asked why through `source`. Once the stream is admitted,
+    /// `admitted` gets its question, asked through `source`.
     ///
     /// # Errors
     ///
-    /// The run's line: a refusal, a cut, or `serve` gone.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the run's two writers ride beside its source and socket"
-    )]
-    pub async fn through<'s>(
+    /// The run's line: unreached, a refusal, a broken probe, or `serve` gone.
+    pub async fn probe<'s, S: Observing + Copy + 's>(
         &self,
-        source: &'s Tracked<Resident>,
-        dial: &Dial<'_>,
-        socket: &Rc<UidSocket>,
+        source: S,
+        route: &Route<'_>,
         machine: &Machine,
         admitted: Admitted<'s>,
         out: &mut impl Write,
         err: &mut impl Write,
     ) -> eyre::Result<()> {
-        // Main: the held session the rest of this home's traffic through `serve` rides to the machine,
-        // so the round trip and the path are the ones that traffic gets.
-        let (session, observer) = match dial.observed(socket, OpenLane::Main).await {
-            Ok(opened) => opened,
-            Err(Unattached::Refused(refusal)) => match own_line(&machine.label(), refusal) {
-                Ok((line, outcome)) => {
-                    writeln!(out, "{line}")?;
-                    return outcome.unbound_result(&self.peer);
-                }
-                Err(refusal) => {
-                    return Err(dial
-                        .unattached(Unattached::Refused(refusal), &**socket)
-                        .await);
-                }
-            },
-            Err(failed) => return Err(dial.unattached(failed, &**socket).await),
+        // Main: the held session the rest of this home's traffic rides to the machine, so the round trip
+        // and the path are the ones that traffic gets.
+        let ask = Ask {
+            peer: machine.key(),
+            hints: Hints::NONE,
+            service: reach::PING_SERVICE.parse()?,
+            lane: OpenLane::Main,
+            slip: self.peer.self_present(),
+        };
+        let (session, follow) = match source.observed(&ask).await {
+            Ok(observed) => observed,
+            Err(unopened) => {
+                return self.unopened(unopened, source, route, machine, out).await;
+            }
         };
         admitted.asked_through(source, machine.key());
-        self.observed(
-            &session,
-            observer,
-            machine,
-            async || dial.stopped(socket).await,
-            out,
-            err,
-        )
-        .await
+        let stopped = async || route.stopped().await;
+        self.observed(&session, follow, machine, stopped, out, err)
+            .await
     }
 
-    /// The probes over `session`, one stream through `serve`, beside `observer`, printing on `out` and
-    /// `err`. A measured run is Finished and then printed, its `path:` the Finish's; a failed run prints
-    /// its line and its error first, and is Finished after. Before a broken run blames the machine,
-    /// `stopped` asks whether `serve` itself went: then its line stands alone, with nothing on stdout.
-    async fn observed<P: PathSource, S: Session>(
+    /// The line an open that gave no stream prints, and the run's exit: the same words on both paths,
+    /// except where `route` words the outcome its own way.
+    async fn unopened(
+        &self,
+        unopened: Unopened,
+        source: impl StreamSource,
+        route: &Route<'_>,
+        machine: &Machine,
+        out: &mut impl Write,
+    ) -> eyre::Result<()> {
+        let label = machine.label();
+        let (line, outcome) = match unopened {
+            unreached if unreached.unreached() => {
+                tracing::debug!(?unreached, "the probe did not reach the machine");
+                (format!("{label}: unreachable"), reach::Outcome::Unreachable)
+            }
+            // The machine refused this machine the service: the refusal, on stderr, once. One of your
+            // devices is asked why first, through the same source.
+            Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted)) => {
+                let service: Service = reach::PING_SERVICE.parse()?;
+                let slip = self.peer.self_present();
+                let diagnosis = reach::diagnose_through(&source, machine, &service, slip).await;
+                return Err(machine::refused(machine, &service, diagnosis));
+            }
+            // The machine was REACHED but refused this probe some other way: a distinct line that says
+            // so, not a healthy machine with 100% loss, and NOT "unreachable".
+            Unopened::Refused(OpenRefusal::Peer(refusal)) => {
+                let refusal = Refusal::Stream(bifrost::Refusal::from(refusal));
+                (refused_line(&label, &refusal), reach::Outcome::Refused)
+            }
+            Unopened::Refused(
+                OpenRefusal::Broken(detail) | OpenRefusal::PeerUnreadable(detail),
+            ) => (
+                failed_cause_line(&label, &detail.to_string()),
+                reach::Outcome::Failed,
+            ),
+            other => return Err(route.line(other, machine).await),
+        };
+        writeln!(out, "{line}")?;
+        route.result(outcome, &self.peer)
+    }
+
+    /// The probes over `session`, one stream, beside `follow`, printing on `out` and `err`. A measured
+    /// run is finished and then printed, its `path:` the final reading's; a failed run prints its line
+    /// and its error first, and is finished after. Before a broken run blames the machine, `stopped`
+    /// asks whether `serve` itself went: then its line stands alone, with nothing on stdout. A run that
+    /// opened its stream reached the machine, so its exit names no bind.
+    async fn observed<S: Session>(
         &self,
         session: &S,
-        mut observer: Observer<P>,
+        mut follow: impl Follow,
         machine: &Machine,
         stopped: impl AsyncFnOnce() -> Option<eyre::Report>,
         out: &mut impl Write,
@@ -277,35 +220,37 @@ impl PingCmd {
         let report = if self.verbose {
             // Both live callbacks print, one per probe and one per move, so they share the writer.
             let live = RefCell::new(&mut *out);
-            let mut shown = observer.latest().path.clone();
+            let mut shown = follow.latest().path;
             let written = writeln!(live.borrow_mut(), "{}", path_line(&label, &shown));
             if let Err(error) = written {
-                return Err(through_serve::failed(error.into(), observer, err).await);
+                return Err(through_serve::failed(error.into(), follow, err).await);
             }
             // A live row that cannot be written is dropped: the block after the run, which carries the
             // result, reports the failed write.
             let probes = self.plan().observing(session, |probe| {
                 let _ = writeln!(live.borrow_mut(), "{}", probe_line(&label, probe));
             });
-            let moves = observer.watch_with(|info| {
+            let moves = follow.moves(|info| {
                 if info.path != shown {
                     shown = info.path.clone();
                     let _ = writeln!(live.borrow_mut(), "{}", path_line(&label, &shown));
                 }
             });
             tokio::select! {
-                report = probes => report,
+                // Biased, so a move that landed prints before the probe line that follows it.
+                biased;
                 never = moves => match never {},
+                report = probes => report,
             }
         } else {
             tokio::select! {
                 report = self.plan().run(session) => report,
-                never = observer.watch() => match never {},
+                never = follow.moves(|_| {}) => match never {},
             }
         };
         let (line, outcome) = match report {
             Ok(report) => {
-                let observed = observer.finish().await;
+                let observed = follow.finish().await;
                 // A cut folds into loss rather than an error, and then the Finish fails too: ask whether
                 // `serve` went before warning about a path, since its stop is the run's real end.
                 if observed.last.is_err()
@@ -321,27 +266,22 @@ impl PingCmd {
                 print_block(out, &label, path, &report)?;
                 return Ok(());
             }
-            // No session here to ask one of your devices why, so the refusal names no cause it cannot
-            // tell, as an Open refused this way does.
-            Err(ProtocolError::Refused(Refusal::Stream(bifrost::Refusal::NotAdmitted))) => {
-                let service: Service = reach::PING_SERVICE.parse()?;
-                let refused = machine::refused(machine, &service, None);
-                return Err(through_serve::failed(refused, observer, err).await);
-            }
             Err(ProtocolError::Refused(refusal)) => {
                 (refused_line(&label, &refusal), reach::Outcome::Refused)
             }
-            // A broken run asks whether `serve` went first: then the machine is not to blame.
+            // A broken run asks whether `serve` went first: then the machine is not to blame. The full
+            // cause chain is rendered because the outer half of a stream failure is routinely the
+            // useless half.
             Err(error) => match stopped().await {
-                Some(gone) => return Err(through_serve::failed(gone, observer, err).await),
+                Some(gone) => return Err(through_serve::failed(gone, follow, err).await),
                 None => (failed_line(&label, &error), reach::Outcome::Failed),
             },
         };
-        // A line that cannot be written ends the run as a failure, Finished all the same.
+        // A line that cannot be written ends the run as a failure, finished all the same.
         if let Err(error) = writeln!(out, "{line}") {
-            return Err(through_serve::failed(error.into(), observer, err).await);
+            return Err(through_serve::failed(error.into(), follow, err).await);
         }
-        through_serve::ended(outcome.unbound_result(&self.peer), observer, err).await
+        through_serve::ended(outcome.unbound_result(&self.peer), follow, err).await
     }
 
     /// The probes this run sends.
@@ -386,27 +326,6 @@ fn print_block(
         )?;
     }
     Ok(())
-}
-
-/// Drive `probes` to its end while every path `changes` reports goes to `said`: the path in force first,
-/// before the first probe is sent, then each change as the transport selects it. Polled on this task, so a
-/// change prints between the probe lines it fell between, and nothing outlives the run: a change after the
-/// last probe is not printed, and a stream that ended (a transport whose path never moves) simply stops.
-async fn watching<R>(
-    changes: PathChanges,
-    probes: impl Future<Output = R>,
-    mut said: impl FnMut(&Path),
-) -> R {
-    let mut changes = changes.fuse();
-    let mut probes = core::pin::pin!(probes);
-    loop {
-        tokio::select! {
-            // Biased, so the path in force, ready at once, prints before the first probe line.
-            biased;
-            Some(path) = changes.next() => said(&path),
-            report = &mut probes => return report,
-        }
-    }
 }
 
 /// One path line: `<label>, path: <path>`, printed under `-v` for the path in force and for each change.
@@ -454,64 +373,27 @@ fn failed_cause_line(label: &str, cause: &str) -> String {
     )
 }
 
-/// The line `ping` prints, and how far it got, for an Open through `serve` the resident refused, where
-/// the own bind prints its own line for the same outcome; the refusal back where the line is the
-/// resident's (its cap, an ended standing, this machine, or a peer that did not admit the probe). A
-/// timeout reads `unreachable`: the resident cannot say whether the dial or the stream timed out, and
-/// `unreachable` never claims a reach that did not happen.
-fn own_line(label: &str, refusal: OpenRefusal) -> Result<(String, reach::Outcome), OpenRefusal> {
-    match refusal {
-        OpenRefusal::Unreachable(detail) => {
-            tracing::debug!(%detail, "serve did not reach the machine");
-            Ok((format!("{label}: unreachable"), reach::Outcome::Unreachable))
-        }
-        OpenRefusal::Timeout => {
-            tracing::debug!("serve's open to the machine timed out");
-            Ok((format!("{label}: unreachable"), reach::Outcome::Unreachable))
-        }
-        OpenRefusal::Peer(PeerRefusal::NotAdmitted) => Err(refusal),
-        OpenRefusal::Peer(peer) => {
-            let refusal = Refusal::Stream(bifrost::Refusal::from(peer));
-            Ok((refused_line(label, &refusal), reach::Outcome::Refused))
-        }
-        OpenRefusal::Broken(detail) | OpenRefusal::PeerUnreadable(detail) => Ok((
-            failed_cause_line(label, &detail.to_string()),
-            reach::Outcome::Failed,
-        )),
-        OpenRefusal::Busy | OpenRefusal::StandingEnded | OpenRefusal::NotHere => Err(refusal),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use bifrost::Relay;
+    use bifrost::{PathChanges, Relay};
 
     use super::*;
 
-    const RTT: Option<Duration> = Some(Duration::from_millis(24));
-
     /// `ping` to one of your devices that refuses it prints the dial refusal once, as the error, after
-    /// asking the device why over a second connection to it; nothing reaches stdout.
+    /// asking the device why through the same run's source; nothing reaches stdout.
     #[tokio::test]
     async fn a_refused_ping_to_your_device_names_the_cause() {
-        use clap::Parser as _;
         use swoosh::testkit::{Script, ScriptedPeer};
 
-        #[derive(clap::Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            ping: PingCmd,
-        }
+        use crate::commands::through_serve::tests::Dialing;
 
         let key = bifrost::NodeId::from_ed25519_secret(&[0x67; 32]);
         let mut contacts = swoosh::contacts::Contacts::default();
         contacts
             .save(&"me/nas".parse().expect("a device"), key)
             .expect("the name is free");
-        let cmd = Wrap::try_parse_from(["x", "me/nas"])
-            .expect("ping parses")
-            .ping;
-        let machine = cmd.peer.machine(&contacts).expect("one machine");
+        let cmd = Dialing::of(&["ping", "me/nas"]);
+        let machine = crate::commands::through_serve::tests::machine(&contacts, "me/nas");
         let peer = ScriptedPeer::new(
             key,
             [
@@ -520,21 +402,13 @@ mod tests {
             ],
         );
         let node = Node::new(peer.clone(), bifrost::NoDiscovery);
-        let bound = transport::Bound {
-            local: false,
-            reach: transport::Reach::default(),
-        };
-        let error = cmd
-            .run_ping(
-                &node,
-                &machine,
-                &bound,
-                None,
-                None,
-                swoosh::learn::Admitted::unheard(),
-            )
-            .await
-            .expect_err("a refused ping exits non-zero");
+        let peers = swoosh::peers::Peers::new(&node);
+        let home = crate::commands::through_serve::tests::empty_home("ping-refused");
+        let ran = cmd
+            .by_own_bind(&peers, &home, node.node_id(), &machine)
+            .await;
+        assert!(ran.out.is_empty(), "{}", ran.out);
+        let error = ran.ended.expect_err("a refused ping exits non-zero");
         assert_eq!(
             format!("{error:#}"),
             "me/nas refused ping\n  ping was turned off or removed on nas, or nas is too busy to take it \
@@ -847,18 +721,11 @@ mod tests {
         let busy = bifrost::Refusal::Unavailable {
             detail: bifrost::RefusalDetail::bounded("busy"),
         };
-        for (refused, line, error) in [
-            (
-                busy,
-                "me/nas: reached, but refused (unavailable: busy)\n",
-                "stderr: error: me/nas: reached, but refused",
-            ),
-            (
-                bifrost::Refusal::NotAdmitted,
-                "",
-                "stderr: error: me/nas refused ping",
-            ),
-        ] {
+        for (refused, line, error) in [(
+            busy,
+            "me/nas: reached, but refused (unavailable: busy)\n",
+            "stderr: error: me/nas: reached, but refused",
+        )] {
             let ((out, log, ended), asked) =
                 through_serve_with(&["-c", "1"], &Echo::refusing(refused), [], Some("gone")).await;
             assert!(!asked, "a refusal proves serve relayed an answer");
@@ -935,66 +802,6 @@ mod tests {
         );
     }
 
-    /// Through `serve`, an Open the resident refused prints the own bind's line on stdout and its
-    /// error, with no reach hint; a timeout reads `unreachable`. The resident's own refusals, and a
-    /// peer that did not admit the probe, keep the resident's line.
-    #[test]
-    fn an_open_refused_through_serve_prints_the_own_binds_line() {
-        use swoosh::serve::control_codec::{OpenRefusal, PeerRefusal};
-
-        let detail = || bifrost::RefusalDetail::bounded("busy");
-        let peer: Peer = "me/nas".parse().expect("a machine");
-        for (refusal, line, error) in [
-            (
-                OpenRefusal::Unreachable(detail()),
-                "me/nas: unreachable",
-                "could not reach me/nas",
-            ),
-            (
-                OpenRefusal::Timeout,
-                "me/nas: unreachable",
-                "could not reach me/nas",
-            ),
-            (
-                OpenRefusal::Peer(PeerRefusal::Unavailable(detail())),
-                "me/nas: reached, but refused (unavailable: busy)",
-                "me/nas: reached, but refused",
-            ),
-            (
-                OpenRefusal::Peer(PeerRefusal::BadRequest(detail())),
-                "me/nas: reached, but refused (bad request: busy)",
-                "me/nas: reached, but refused",
-            ),
-            (
-                OpenRefusal::Broken(bifrost::RefusalDetail::bounded("reset\r")),
-                r"me/nas: reached, but the probe failed (reset\r)",
-                "me/nas: reached, but the probe failed",
-            ),
-            (
-                OpenRefusal::PeerUnreadable(detail()),
-                "me/nas: reached, but the probe failed (busy)",
-                "me/nas: reached, but the probe failed",
-            ),
-        ] {
-            let (printed, outcome) = own_line("me/nas", refusal).expect("the own bind's line");
-            assert_eq!(printed, line);
-            let report = outcome.unbound_result(&peer).expect_err("exit 1");
-            assert_eq!(format!("{report:#}"), error);
-        }
-        for resident in [
-            OpenRefusal::Peer(PeerRefusal::NotAdmitted),
-            OpenRefusal::Busy,
-            OpenRefusal::StandingEnded,
-            OpenRefusal::NotHere,
-        ] {
-            assert!(own_line("me/nas", resident).is_err());
-        }
-    }
-
-    /// How long a test lets `watching` run before calling it hung: a run that waits on a stream that never
-    /// ends fails here instead of hanging the suite.
-    const HUNG: Duration = Duration::from_secs(5);
-
     /// A relayed path through `host`, as iroh names one: by the relay's URL.
     fn relayed(host: &str) -> Path {
         Path::Relayed(Relay::from(
@@ -1031,78 +838,6 @@ mod tests {
             reach::Outcome::default().max(reach::Outcome::Failed),
             reach::Outcome::Healthy,
             "one broken device must not leave the run's verdict green"
-        );
-    }
-
-    /// `-v` prints the path the session reports: the one in force before the first probe, then a line for
-    /// each change, between the probe lines it fell between. The stream here is the session's, not a sample
-    /// per probe: a relayed session that punches to direct mid-run says so once, at the change.
-    #[tokio::test]
-    async fn ping_v_prints_a_line_when_the_path_changes() {
-        let lines = core::cell::RefCell::new(Vec::new());
-        let (changed, change) = futures::channel::mpsc::unbounded();
-        changed
-            .unbounded_send(relayed("relay.example"))
-            .expect("the stream is open");
-        let probes = async {
-            for seq in 0..3 {
-                // The punch lands after the second probe.
-                if seq == 2 {
-                    changed
-                        .unbounded_send(Path::Direct)
-                        .expect("the stream is open");
-                    tokio::task::yield_now().await;
-                }
-                let line = probe_line("alice/macbook", Probe { seq, rtt: RTT });
-                lines.borrow_mut().push(line);
-                tokio::task::yield_now().await;
-            }
-        };
-        let run = watching(PathChanges::new(change), probes, |path| {
-            lines.borrow_mut().push(path_line("alice/macbook", path));
-        });
-        tokio::time::timeout(HUNG, run)
-            .await
-            .expect("the run ends with its last probe, not with the stream");
-        assert_eq!(
-            lines.into_inner(),
-            [
-                "alice/macbook, path: relayed through relay.example",
-                "alice/macbook, seq 0 rtt 24.000 ms",
-                "alice/macbook, seq 1 rtt 24.000 ms",
-                "alice/macbook, path: direct",
-                "alice/macbook, seq 2 rtt 24.000 ms",
-            ]
-        );
-    }
-
-    /// A transport whose path never moves (mem) hands `-v` a stream that says its one path
-    /// and ends. That prints the one path line, then every probe still prints and the run completes: the
-    /// ended stream neither stops the probes nor stalls them.
-    #[tokio::test]
-    async fn ping_v_runs_every_probe_after_the_path_stream_ends() {
-        let lines = core::cell::RefCell::new(Vec::new());
-        let probes = async {
-            for seq in 0..3 {
-                let line = probe_line("alice/macbook", Probe { seq, rtt: RTT });
-                lines.borrow_mut().push(line);
-                tokio::task::yield_now().await;
-            }
-        };
-        let run = watching(PathChanges::fixed(Path::Direct), probes, |path| {
-            lines.borrow_mut().push(path_line("alice/macbook", path));
-        });
-        tokio::time::timeout(HUNG, run)
-            .await
-            .expect("the run ends with its last probe after the stream ended");
-        assert_eq!(
-            lines.into_inner(),
-            [
-                "alice/macbook, path: direct",
-                "alice/macbook, seq 0 rtt 24.000 ms",
-                "alice/macbook, seq 1 rtt 24.000 ms",
-                "alice/macbook, seq 2 rtt 24.000 ms",
-            ]
         );
     }
 

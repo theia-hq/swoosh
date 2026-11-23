@@ -4,7 +4,7 @@
 
 use bifrost::RefusalDetail;
 use measure::{MethodRefusal, Refusal};
-use swoosh::serve::control_codec::PathReply;
+use swoosh::serve::control_codec::{OpenLane, PathReply};
 
 use super::{failed_line, observed, path_line, print_path, refusal_line, title};
 
@@ -85,28 +85,21 @@ fn a_hostile_failure_cause_prints_escaped() {
 }
 
 /// `speed` to one of your devices that refuses it prints the dial refusal once, as the error, after asking
-/// the device why over a second connection to it: never the generic refusal line.
+/// the device why on a held Main session, apart from its own connection: never the generic refusal line.
 #[tokio::test]
 async fn a_refused_speed_to_your_device_names_the_cause() {
-    use clap::Parser as _;
+    use swoosh::streams::StreamSource as _;
     use swoosh::testkit::{Script, ScriptedPeer};
-    use swoosh::transport;
 
-    #[derive(clap::Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        speed: super::SpeedCmd,
-    }
+    use crate::commands::through_serve::tests::Dialing;
 
     let key = bifrost::NodeId::from_ed25519_secret(&[0x69; 32]);
     let mut contacts = swoosh::contacts::Contacts::default();
     contacts
         .save(&"me/nas".parse().expect("a device"), key)
         .expect("the name is free");
-    let cmd = Wrap::try_parse_from(["x", "me/nas"])
-        .expect("speed parses")
-        .speed;
-    let machine = cmd.peer.machine(&contacts).expect("one machine");
+    let cmd = Dialing::of(&["speed", "me/nas"]);
+    let machine = crate::commands::through_serve::tests::machine(&contacts, "me/nas");
     let peer = ScriptedPeer::new(
         key,
         [
@@ -115,22 +108,12 @@ async fn a_refused_speed_to_your_device_names_the_cause() {
         ],
     );
     let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
-    let bound = transport::Bound {
-        local: false,
-        reach: transport::Reach::default(),
-    };
     let peers = swoosh::peers::Peers::new(&node);
+    let home = crate::commands::through_serve::tests::empty_home("speed-own");
     let error = cmd
-        .run_speed(
-            &node,
-            &peers,
-            &machine,
-            &bound,
-            None,
-            None,
-            swoosh::learn::Admitted::unheard(),
-        )
+        .by_own_bind(&peers, &home, node.node_id(), &machine)
         .await
+        .ended
         .expect_err("a refused speed test exits non-zero");
     assert_eq!(
         format!("{error:#}"),
@@ -143,31 +126,32 @@ async fn a_refused_speed_to_your_device_names_the_cause() {
         .collect();
     assert_eq!(asked, ["speed", "control.services"]);
     assert_eq!(peer.dials(), 2, "its own connection, then the follow-up's");
+    // The follow-up's session was held on Main: a Main open after the run rides it.
+    let own = swoosh::streams::OwnBind::new(
+        &peers,
+        &home,
+        node.node_id(),
+        &swoosh::credential::Credential::Family { present: None },
+    );
+    let _ = own.open(&ask_for(key, "ping", OpenLane::Main)).await;
+    assert_eq!(peer.dials(), 2, "the follow-up rode a held Main session");
 }
 
 /// `speed` takes its connection from the run's owner as an isolated one, so the owner's per-peer cap
 /// holds it: with four isolated connections to the machine live, it is refused before it dials.
 #[tokio::test]
 async fn speed_opens_isolated() {
-    use clap::Parser as _;
     use swoosh::testkit::ScriptedPeer;
-    use swoosh::transport;
 
-    #[derive(clap::Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        speed: super::SpeedCmd,
-    }
+    use crate::commands::through_serve::tests::Dialing;
 
     let key = bifrost::NodeId::from_ed25519_secret(&[0x69; 32]);
     let mut contacts = swoosh::contacts::Contacts::default();
     contacts
         .save(&"me/nas".parse().expect("a device"), key)
         .expect("the name is free");
-    let cmd = Wrap::try_parse_from(["x", "me/nas"])
-        .expect("speed parses")
-        .speed;
-    let machine = cmd.peer.machine(&contacts).expect("one machine");
+    let cmd = Dialing::of(&["speed", "me/nas"]);
+    let machine = crate::commands::through_serve::tests::machine(&contacts, "me/nas");
     let peer = ScriptedPeer::new(key, []);
     let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
     let peers = swoosh::peers::Peers::new(&node);
@@ -180,21 +164,11 @@ async fn speed_opens_isolated() {
                 .expect("below the cap"),
         );
     }
-    let bound = transport::Bound {
-        local: false,
-        reach: transport::Reach::default(),
-    };
+    let home = crate::commands::through_serve::tests::empty_home("speed-own");
     let error = cmd
-        .run_speed(
-            &node,
-            &peers,
-            &machine,
-            &bound,
-            None,
-            None,
-            swoosh::learn::Admitted::unheard(),
-        )
+        .by_own_bind(&peers, &home, node.node_id(), &machine)
         .await
+        .ended
         .expect_err("a fifth isolated connection is refused");
     assert_eq!(
         format!("{error:#}"),
@@ -388,4 +362,163 @@ async fn a_failed_run_exits_within_a_second_of_a_stalled_finish() {
     assert!(ended.unwrap_err().is::<Reported>());
     assert_eq!(started.elapsed(), core::time::Duration::from_secs(1));
     assert_eq!(events.log().last().map(String::as_str), Some("Finish"));
+}
+
+/// An ask to `key` for `service` on `lane`, with nothing typed for it.
+fn ask_for(key: bifrost::NodeId, service: &str, lane: OpenLane) -> swoosh::streams::Ask {
+    swoosh::streams::Ask {
+        peer: key,
+        hints: swoosh::peers::Hints::NONE,
+        service: service.parse().expect("a service name"),
+        lane,
+        slip: None,
+    }
+}
+
+/// By own bind, `speed`'s stream is one isolated connection through `OwnBind`, never a held session:
+/// a Main open beside it rides the session already held. Its path is read from that connection after
+/// the transfer, while it is still open, and not from the held session: `speed` on a direct isolated
+/// connection beside a relayed Main session prints `path: direct`.
+#[tokio::test]
+async fn speed_own_bind_is_isolated_through_the_source() {
+    use bifrost::Session as _;
+    use swoosh::observation::Follow as _;
+    use swoosh::streams::{Observing as _, StreamSource as _};
+    use swoosh::testkit::{Script, ScriptedPeer};
+
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x69; 32]);
+    let peer = ScriptedPeer::new(key, [Script::Holds, Script::Holds, Script::Holds]);
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
+    let home = crate::commands::through_serve::tests::empty_home("speed-isolated");
+    let own = swoosh::streams::OwnBind::new(
+        &peers,
+        &home,
+        key,
+        &swoosh::credential::Credential::Family { present: None },
+    );
+    let _main = own
+        .open(&ask_for(key, "ping", OpenLane::Main))
+        .await
+        .expect("the held session's stream");
+    peer.set_path(0, relayed());
+    let (session, follow) = own
+        .observed(&ask_for(key, "speed", OpenLane::Isolated))
+        .await
+        .expect("the isolated stream");
+    assert_eq!(peer.dials(), 2, "a connection of its own");
+    peer.set_path(1, direct());
+    let halves = session.open_bi().await.expect("the one stream");
+    assert!(session.open_bi().await.is_err(), "one stream, once");
+    drop(halves);
+    let _beside = own
+        .open(&ask_for(key, "ping", OpenLane::Main))
+        .await
+        .expect("a second stream on Main");
+    assert_eq!(peer.dials(), 2, "the isolated connection was never held");
+    // The transfer has ended and its halves are gone; the session and the reading keep the connection.
+    assert_eq!(peer.closes(), 0, "still open when its path is read");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    print_path(follow.finish().await, &mut out, &mut err).expect("written");
+    assert_eq!(String::from_utf8(out).expect("text"), "path: direct\n");
+    assert!(err.is_empty());
+    drop(session);
+    assert_eq!(peer.closes(), 1, "closed once the run let it go");
+}
+
+/// A writer that moves the isolated connection's path to direct once the title is written: after the
+/// open has returned and before the transfer, as a transport's selection moves mid-run.
+struct MovesOnTitle<'a> {
+    peer: &'a swoosh::testkit::ScriptedPeer,
+    written: Vec<u8>,
+}
+
+impl std::io::Write for MovesOnTitle<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let titled = self.written.contains(&b'\n');
+        self.written.extend_from_slice(bytes);
+        if !titled && self.written.contains(&b'\n') {
+            self.peer.set_path(1, direct());
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// By own bind, a measured `speed` through its one body: one isolated connection beside a held Main
+/// session, the title once the stream is open, and a path row read from the isolated connection after
+/// the transfer. The Main session is relayed, and the isolated connection opens with no path and goes
+/// direct once the title is out: `path: direct`, never the Main session's path or the one it opened
+/// with.
+#[tokio::test]
+async fn speed_reads_its_own_path() {
+    use swoosh::streams::StreamSource as _;
+    use swoosh::testkit::{Script, ScriptedPeer};
+
+    use crate::commands::through_serve::tests::Dialing;
+
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x69; 32]);
+    let mut contacts = swoosh::contacts::Contacts::default();
+    contacts
+        .save(&"me/nas".parse().expect("a device"), key)
+        .expect("the name is free");
+    let machine = crate::commands::through_serve::tests::machine(&contacts, "me/nas");
+    // The machine's side of a 1024-byte download: the go-ahead, then the bytes.
+    let mut sourced = Vec::new();
+    measure::protocol::Response::Sourcing
+        .write(&mut sourced)
+        .await
+        .expect("written");
+    sourced.extend_from_slice(&[0; 1024]);
+    let peer = ScriptedPeer::new(key, [Script::Holds, Script::Says(sourced)]);
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let peers = swoosh::peers::Peers::new(&node);
+    let home = crate::commands::through_serve::tests::empty_home("speed-own-path");
+    let own = swoosh::streams::OwnBind::new(
+        &peers,
+        &home,
+        node.node_id(),
+        &swoosh::credential::Credential::Family { present: None },
+    );
+    let _main = own
+        .open(&ask_for(key, "ping", OpenLane::Main))
+        .await
+        .expect("the held session's stream");
+    peer.set_path(0, relayed());
+    let Dialing::Speed(cmd) = Dialing::of(&["speed", "me/nas", "-n", "1024"]) else {
+        unreachable!("speed parses as speed")
+    };
+    let bound = swoosh::transport::Bound {
+        local: false,
+        reach: swoosh::transport::Reach::default(),
+    };
+    let route = crate::commands::route::Route::Own {
+        peer: &cmd.peer,
+        bound: &bound,
+        this: node.node_id(),
+    };
+    let mut out = MovesOnTitle {
+        peer: &peer,
+        written: Vec::new(),
+    };
+    let mut err = Vec::new();
+    cmd.measure(
+        own,
+        &route,
+        &machine,
+        swoosh::learn::Admitted::unheard(),
+        &mut out,
+        &mut err,
+    )
+    .await
+    .expect("a measured run exits green");
+    assert_eq!(peer.dials(), 2, "one connection of its own beside Main");
+    let out = String::from_utf8(out.written).expect("text");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.first(), Some(&"speed test to me/nas (down)"), "{out}");
+    assert!(lines.contains(&"path: direct"), "{out}");
+    assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
 }

@@ -83,13 +83,20 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+/// One Open the resident answered: its service, the machine it was for, and the addresses it carried.
+struct Heard {
+    service: String,
+    peer: bifrost::NodeId,
+    hints: Vec<core::net::SocketAddr>,
+}
+
 /// A resident on `home`'s control socket, `serve.lock` held and the socket bound before it returns: it
 /// reads one request per connection, one connection at a time, and refuses each Open as busy, until
-/// `stop`. Resolves to the services of the Opens it answered.
+/// `stop`. Resolves to the Opens it answered.
 async fn resident(
     home: &Home,
     stop: tightbeam::tunnel::CancellationToken,
-) -> tokio::task::JoinHandle<Vec<String>> {
+) -> tokio::task::JoinHandle<Vec<Heard>> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = swoosh::home::runtime_root().unwrap();
@@ -112,7 +119,11 @@ async fn resident(
                     .await
                     .is_ok()
             {
-                heard.push(open.service().to_string());
+                heard.push(Heard {
+                    service: open.service().to_string(),
+                    peer: open.peer(),
+                    hints: open.hints().as_slice().to_vec(),
+                });
             }
         }
         drop(lock);
@@ -170,10 +181,37 @@ async fn sync_rides_the_resident_in_the_binary() {
     let heard = resident.await.unwrap();
     assert_eq!(status, Some(0), "{stderr}");
     assert_eq!(
-        heard,
+        heard
+            .iter()
+            .map(|open| open.service.as_str())
+            .collect::<Vec<_>>(),
         vec![swoosh::serve::SYNC_SERVICE; 2],
         "one Open per device: {stderr}"
     );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// With `serve` answering, `sync --peer <key>=<addr>` carries the address on that machine's Open and on
+/// no other: the addresses checked where the command line is read reach the Opens.
+#[tokio::test]
+async fn sync_carries_its_peer_addresses_through_the_resident() {
+    let home = device("ride-hints").await;
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, stop.clone()).await;
+    let nas = TestNode::seeded(NAS).node_id();
+    let hint = format!("{nas}=127.0.0.1:4433");
+    let (status, stderr) = swoosh(&home, &["sync", "--peer", &hint]).await;
+    stop.cancel();
+    let heard = resident.await.unwrap();
+    assert_eq!(status, Some(0), "{stderr}");
+    assert_eq!(heard.len(), 2, "{stderr}");
+    for open in &heard {
+        let expected = match open.peer == nas {
+            true => vec!["127.0.0.1:4433".parse().unwrap()],
+            false => Vec::new(),
+        };
+        assert_eq!(open.hints, expected, "{}", open.service);
+    }
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
