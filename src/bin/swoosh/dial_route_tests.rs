@@ -566,6 +566,41 @@ fn beside_opens_print_nothing_of_their_own() {
     });
 }
 
+/// Through `serve`, a `send` whose every file printed `sent`, then whose lookup beside it met another
+/// version (a restarted `serve`, so the run's is gone), ends saying every file was sent and advises no
+/// rerun, which would send them all again. It still exits non-zero.
+#[test]
+fn a_serve_gone_beside_a_whole_send_ends_without_resending() {
+    on_a_big_stack(async || {
+        let file = a_file("whole-send");
+        let mut served = bobs_contact("whole-send").await;
+        let rig = Rig::default();
+        let resident = routed(
+            &mut served,
+            |service| match service {
+                "lookup.root" => Reply::Version,
+                _ => Reply::Exchange(vec![1]),
+            },
+            &rig,
+        );
+        let printed = dialed(&served.home, &["send", &file, "bob/nas"]).await;
+        rig.stop.cancel();
+        resident.await.unwrap();
+        assert!(
+            printed.out.ends_with("sent note.txt (5 bytes)\n"),
+            "{printed:?}"
+        );
+        assert!(!printed.ok, "{printed:?}");
+        assert_eq!(
+            printed.error.as_deref(),
+            Some(
+                "swoosh serve stopped here and ended the connection to bob/nas\n  Commands here \
+                 connect through it while it runs.\n  Every file was marked `sent`."
+            )
+        );
+    });
+}
+
 /// A stderr the resident can read as it hears an Open.
 #[derive(Clone, Default)]
 struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);

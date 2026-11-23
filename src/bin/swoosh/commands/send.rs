@@ -35,7 +35,7 @@ use transfer::wire::{Blob, Transfer};
 
 use crate::commands::machine;
 use crate::commands::route::{Route, peer_error};
-use crate::commands::through_serve::Unresponsive;
+use crate::commands::through_serve::{ServeStopped, Unresponsive};
 
 /// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
@@ -118,6 +118,8 @@ impl swoosh::reaching::Reaching for SendCmd {
             machine,
             self.ask(machine),
             ctx.admitted,
+            // By own bind no `serve` can stop under the run, so nothing reads it.
+            &Cell::new(false),
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         )
@@ -148,17 +150,23 @@ impl SendCmd {
     }
 
     /// Run through `serve` as `route` words it, each file one Open from `source`, printing on `out` and
-    /// `err`. The first admitted file gives `admitted` its question, asked through `source`.
+    /// `err`. The first admitted file gives `admitted` its question, asked through `source`. `sent` is set
+    /// once a file prints `sent`, so a line for `serve` stopping after the run can say what is left.
     ///
     /// # Errors
     ///
     /// The run's line, or how many files could not be sent.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's two writers and what it sent ride beside its source"
+    )]
     pub async fn through<'s>(
         &self,
         source: &'s Tracked<Resident>,
         route: &Route<'_>,
         machine: &Machine,
         admitted: Admitted<'s>,
+        sent: &Cell<bool>,
         out: &mut impl std::io::Write,
         err: &mut impl std::io::Write,
     ) -> eyre::Result<()> {
@@ -168,6 +176,7 @@ impl SendCmd {
             machine,
             self.ask(machine),
             admitted,
+            sent,
             out,
             err,
         )
@@ -180,10 +189,11 @@ impl SendCmd {
     /// ends non-zero if any was. An outcome every later stream would repeat ends the run with its one
     /// line, never a `skip` per file: for `NotAdmitted`, after asking the machine why, and for a `serve`
     /// confirmed stalled, whose stall every file would meet. The first
-    /// admitted stream gives `admitted` its question, asked through `source`.
+    /// admitted stream gives `admitted` its question, asked through `source`. `sent` is set at each
+    /// `sent` line; a run that ends on `serve` stopping after one says not to send those files again.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the run's two writers ride beside its source"
+        reason = "the run's two writers and what it sent ride beside its source"
     )]
     async fn run_send<'s, S: StreamSource + Copy + 's>(
         &self,
@@ -192,6 +202,7 @@ impl SendCmd {
         machine: &Machine,
         ask: Ask,
         admitted: Admitted<'s>,
+        sent: &Cell<bool>,
         out: &mut impl std::io::Write,
         err: &mut impl std::io::Write,
     ) -> eyre::Result<()> {
@@ -229,12 +240,22 @@ impl SendCmd {
         }
         while let Some(result) = sending.next().await {
             match result {
-                Ok((name, len)) => writeln!(out, "sent {} ({len} bytes)", Escaped(&name))?,
+                Ok((name, len)) => {
+                    writeln!(out, "sent {} ({len} bytes)", Escaped(&name))?;
+                    sent.set(true);
+                }
                 // No later file would be admitted: the run ends here with one line, and the files still
                 // in flight are dropped.
                 Err((_, Unsent::Unopened(unopened))) if first.ends(&unopened) => {
                     drop(sending);
-                    return Err(self.ended(unopened, source, route, machine, ask).await);
+                    let line = self.ended(unopened, source, route, machine, ask).await;
+                    // The file that met it is unsent, so files remain: after a `sent` line, a bare rerun
+                    // would send that file again.
+                    return Err(match line.downcast::<ServeStopped>() {
+                        Ok(stopped) if sent.get() => stopped.after_sent().into(),
+                        Ok(stopped) => stopped.into(),
+                        Err(line) => line,
+                    });
                 }
                 Err((name, Unsent::Unopened(unopened))) => {
                     let line = route.line(unopened, machine).await;

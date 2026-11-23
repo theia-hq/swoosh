@@ -412,7 +412,12 @@ impl Dial<'_> {
 
     /// The line the run ends with when `serve` is gone.
     pub(crate) fn serve_stopped(&self) -> eyre::Report {
-        ServeStopped(Machine::of(self.contacts, self.machine.key()).to_string()).into()
+        self.stopped_line().into()
+    }
+
+    /// [`serve_stopped`](Self::serve_stopped)'s line, typed, for a verb that words it further.
+    pub(crate) fn stopped_line(&self) -> ServeStopped {
+        ServeStopped(Machine::of(self.contacts, self.machine.key()).to_string())
     }
 
     /// The line a refusal prints: the own bind's for the same outcome, except `Busy` and `NotHere`.
@@ -713,10 +718,38 @@ pub struct ServeStopped(String);
 )]
 pub struct StoppedAfterAct(pub(crate) String);
 
+/// `serve` stopped under a `send` after at least one file printed `sent`: a bare rerun would send those
+/// again, so the line says what is left.
+#[derive(Debug, thiserror::Error)]
+pub enum StoppedAfterSent {
+    /// Files remain unsent: the rerun leaves out the ones already sent.
+    #[error(
+        "swoosh serve stopped here and ended the connection to {0}\n  Commands here connect through it \
+         while it runs.\n  Run this command again to reconnect, without the files already marked `sent`."
+    )]
+    FilesLeft(String),
+    /// Every file printed `sent`: nothing is left to send, so no rerun is advised.
+    #[error(
+        "swoosh serve stopped here and ended the connection to {0}\n  Commands here connect through it \
+         while it runs.\n  Every file was marked `sent`."
+    )]
+    AllSent(String),
+}
+
 impl ServeStopped {
     /// The line for the connection to `machine`, as a line names it.
     pub(crate) fn to(machine: impl core::fmt::Display) -> Self {
         Self(machine.to_string())
+    }
+
+    /// This stop, met by a `send` with files still unsent after at least one printed `sent`.
+    pub(crate) fn after_sent(self) -> StoppedAfterSent {
+        StoppedAfterSent::FilesLeft(self.0)
+    }
+
+    /// This stop, met by a `send` after every one of its files printed `sent`.
+    pub(crate) fn after_all_sent(self) -> StoppedAfterSent {
+        StoppedAfterSent::AllSent(self.0)
     }
 }
 
