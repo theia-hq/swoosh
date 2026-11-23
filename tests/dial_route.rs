@@ -249,7 +249,8 @@ async fn crowded_hints_refuse_a_dialing_verb_first() {
         let home = device(&format!("crowded-{serving}"), 60).await;
         let file = a_file(&home);
         let port = ["forward", "me/nas", "ssh", "5432"].to_vec();
-        for verb in dialing(&file).into_iter().chain([port]) {
+        let proxy = ["proxy", "me/nas", "http://example.com/x"].to_vec();
+        for verb in dialing(&file).into_iter().chain([port, proxy]) {
             let mut argv = verb.clone();
             for hint in &crowded {
                 argv.extend(["--peer", hint.as_str()]);
@@ -276,6 +277,7 @@ async fn crowded_hints_refuse_a_dialing_verb_first() {
                 "forward" => {
                     "Usage: swoosh forward [OPTIONS] <machine> <service> <port | unix:<path> | ->"
                 }
+                "proxy" => "Usage: swoosh proxy [OPTIONS] <machine> <url>",
                 other => panic!("{other}: not a dialing verb"),
             };
             assert!(stderr.contains(usage), "{} {serving}: {stderr}", verb[0]);

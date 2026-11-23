@@ -121,14 +121,6 @@ async fn meeting(argv: &[&str], meets: fn() -> Option<Unopened>, route: &Route<'
     }
 }
 
-/// A dialing verb with no reach flag set, for the flags a [`Dial`] reads.
-fn no_reach_flags() -> crate::commands::ping::PingCmd {
-    let Dialing::Ping(cmd) = Dialing::of(&["ping", "me/nas"]) else {
-        unreachable!("ping parses as ping")
-    };
-    cmd
-}
-
 /// What a run printed on stdout, and its error as the composition root prints it.
 #[derive(Debug, PartialEq, Eq)]
 struct Printed {
@@ -313,12 +305,9 @@ fn one_open_table_for_the_probe_verbs() {
             .parse()
             .unwrap();
             let machine = machine(&contacts, "me/nas");
-            let reach = no_reach_flags();
             let dial = Dial {
                 machine: &machine,
                 service: &service,
-                slip: None,
-                reach: &reach.reach,
                 contacts: &contacts,
             };
             let serve = Route::Serve {
@@ -678,13 +667,10 @@ fn a_gone_met_beside_is_the_verbs_line_once() {
             assert_eq!(reached.get(), 1, "{gone}");
             let contacts = book();
             let machine = machine(&contacts, "me/nas");
-            let reach = no_reach_flags();
             let service = swoosh::reach::PING_SERVICE.parse().unwrap();
             let dial = Dial {
                 machine: &machine,
                 service: &service,
-                slip: None,
-                reach: &reach.reach,
                 contacts: &contacts,
             };
             let route = Route::Serve {
@@ -801,13 +787,10 @@ fn an_untrusted_socket_at_an_open_keeps_its_own_line() {
         let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
         let contacts = book();
         let machine = machine(&contacts, "me/nas");
-        let reach = no_reach_flags();
         let service = swoosh::reach::PING_SERVICE.parse().unwrap();
         let dial = Dial {
             machine: &machine,
             service: &service,
-            slip: None,
-            reach: &reach.reach,
             contacts: &contacts,
         };
         let untrusted = swoosh::serve::control_codec::ControlError::Untrusted {

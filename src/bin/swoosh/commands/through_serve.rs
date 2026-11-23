@@ -1,50 +1,34 @@
-//! Verbs that dial through a running `swoosh serve` rather than binding this home's key: `forward` and
-//! `proxy`, and `speed`, `ping` and `status <machine>`, which also follow their connection's path there.
+//! The resident's side of a dialing verb: finding a running `swoosh serve`, and the line each outcome
+//! of an Open through it prints.
 //!
-//! When `serve` answers on this home's control socket, the verb's stream is one Open there: this
+//! When `serve` answers on this home's control socket, each stream a verb opens is one Open there: this
 //! process binds nothing, reads no key and asks no passphrase, and the resident presents this home's
-//! standing (or the link typed as the machine). When no `serve` runs, the verb binds its own as before.
-//! Once `serve` has answered, a failure is reported, never retried by an own bind.
+//! standing (or the link typed as the machine). When no `serve` runs, the verb binds its own. Once
+//! `serve` has answered, a failure is reported, never retried by an own bind.
 //!
-//! `proxy` makes one Open per local connection, each on a control connection of its own, all on Bulk
-//! and none observed: it prints no path, so nothing would read a reference, and holding one per pipe for
-//! hours would keep a reach slot and the control pool busy for no reader. A pipe's outcome that every
-//! later Open would repeat ends the run with its line: `serve` gone, under the pipe or at its Open (its
-//! lock free, or a `serve` of another version answering), the machine's `NotAdmitted`, an ended
-//! standing, or the machine being this one. Any other (`Busy`, the machine unavailable or unreachable, a
-//! stream broken as it opened) ends that pipe alone: it goes to the log, and the first of a run of them
-//! to a [`PipeFailures`](crate::commands::connect::PipeFailures) warning, as by own bind. A pipe that
-//! attached is carried, whatever ends it: the log alone. `forward`'s port takes the dialing route, on
-//! the run's stream source.
+//! A verb's body is one on both paths, over the run's stream source, worded by its
+//! [`Route`](crate::commands::route::Route). What is left here is what only the resident's path has:
+//! [`serve`] to find it, the reach flags it makes moot ([`Moot`]) and the `--peer` hints its Opens carry
+//! ([`hints`]), the lines [`Dial`] words for an Open that attached nothing, and how a run whose path it
+//! observed ends ([`failed`], [`ended`]).
 
 use std::collections::HashMap;
 
 use bifrost::{ConnInfo, NodeId, Refusal};
-use nauthy::{Link, Service};
+use nauthy::Service;
 use swoosh::contacts::Contacts;
-use swoosh::escape::{Escaped, escaped_report};
+use swoosh::escape::escaped_report;
 use swoosh::node_client::{Connected, NodeClient, UidSocket};
 use swoosh::observation::{Follow, Observed};
 use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::{Hints, HintsError};
-use swoosh::serve::control_codec::{
-    ControlError, Observation, OpenLane, OpenRead, OpenRefusal, OpenWrite, PeerRefusal,
-};
-use swoosh::streams::{Ask, Opened, Resident, Unopened};
+use swoosh::serve::control_codec::{ControlError, OpenRefusal, PeerRefusal};
+use swoosh::streams::Unopened;
 use swoosh::transport::ReachArgs;
-use tokio::io::AsyncWriteExt as _;
 
-use crate::commands::connect::{ConnectionLost, Failure, Machine};
+use crate::commands::connect::{ConnectionLost, Machine};
 use crate::commands::machine;
 use crate::commands::route::peer_error;
-
-/// Whether a run took the resident's path.
-pub enum Routed {
-    /// No `serve` answers here: the verb binds its own.
-    OwnBind,
-    /// The verb ran through `serve`, to this end.
-    Ran(eyre::Result<()>),
-}
 
 /// A verb's dial, as the resident needs it.
 pub struct Dial<'a> {
@@ -52,11 +36,6 @@ pub struct Dial<'a> {
     pub machine: &'a PeerMachine,
     /// The service it asks for.
     pub service: &'a Service,
-    /// The link typed as the machine, if one was: the resident presents it as the slip.
-    pub slip: Option<Link>,
-    /// The verb's reach flags: `--peer` hints ride the Open; the rest cannot apply to a bind it does not
-    /// make.
-    pub reach: &'a ReachArgs,
     /// This home's book, to name the machine.
     pub contacts: &'a Contacts,
 }
@@ -128,74 +107,7 @@ pub fn hints(reach: &ReachArgs) -> eyre::Result<HashMap<NodeId, Hints>> {
 #[error("--peer or SWOOSH_PEER gives an address no machine can be reached at")]
 pub struct UnusableHint;
 
-/// A stream the resident attached: the path it rode as it attached, and its two halves as the socket
-/// gives them.
-pub type Stream = Opened<OpenWrite, OpenRead>;
-
 impl Dial<'_> {
-    /// Open the verb's one stream through `serve` on `connected`, on `lane`, asking for a reference to
-    /// its connection when `observation` says so. Every outcome that is not a stream is the line the
-    /// verb prints for it.
-    ///
-    /// # Errors
-    ///
-    /// A reach flag `serve` makes moot, more hints than one Open carries, the resident's or the peer's
-    /// refusal, or a cut.
-    pub async fn open(
-        &self,
-        socket: &UidSocket,
-        connected: Connected,
-        lane: OpenLane,
-        observation: Observation,
-    ) -> eyre::Result<Stream> {
-        match self.attach(socket, connected, lane, observation).await {
-            Ok(stream) => Ok(stream),
-            Err(unattached) => Err(self.unattached(unattached, socket).await),
-        }
-    }
-
-    /// [`open`](Self::open), with the resident's refusal kept typed for a verb that prints its own line
-    /// for it.
-    async fn attach(
-        &self,
-        socket: &UidSocket,
-        connected: Connected,
-        lane: OpenLane,
-        observation: Observation,
-    ) -> Result<Stream, Unattached> {
-        let ask = self.ask(lane)?;
-        match Resident::attach(connected, &ask, observation).await {
-            Ok((stream, _reference)) => Ok(stream),
-            Err(unopened) => Err(self.unopened(unopened, socket).await),
-        }
-    }
-
-    /// The Open this dial makes on `lane`, or the line for a reach flag `serve` makes moot or for more
-    /// hints than one Open carries.
-    pub(crate) fn ask(&self, lane: OpenLane) -> Result<Ask, Unattached> {
-        if let Some(moot) = Moot::first(self.reach) {
-            return Err(Unattached::Failed(moot.into()));
-        }
-        let key = self.machine.key();
-        let hints = Hints::new(
-            self.reach
-                .peer
-                .iter()
-                .filter(|hint| hint.node() == key)
-                .flat_map(|hint| hint.addrs().iter().copied()),
-        )
-        .map_err(|error| Unattached::Failed(error.into()))?;
-        Ok(Ask {
-            peer: key,
-            hints,
-            service: self.service.clone(),
-            lane,
-            // Cloned, never taken: a listener opens once per pipe, and an Open without the slip is
-            // refused by a peer that admits only the link.
-            slip: Option::clone(&self.slip),
-        })
-    }
-
     /// What an Open that attached nothing means to this dial: the resident's or the peer's refusal kept
     /// typed, else the line it prints. A control connection that failed before its reply is `serve`'s
     /// own line when `serve` is gone, else a cut. A reply that never came is [`Unresponsive`] only when
@@ -240,60 +152,6 @@ impl Dial<'_> {
         match unattached {
             Unattached::Refused(refusal) => self.refused(refusal, serve).await,
             Unattached::Failed(report) => report,
-        }
-    }
-
-    /// Prove that the peer admits a listener's Open before its start lines print, so a refusal is one
-    /// line and a non-zero exit rather than a listener that refuses every connection. The stream is
-    /// ended with End, so the peer reads a clean end of an empty upload, never a reset.
-    ///
-    /// # Errors
-    ///
-    /// As [`open`](Self::open), or the End could not be written.
-    pub async fn admit(&self, socket: &UidSocket, connected: Connected) -> eyre::Result<()> {
-        let mut stream = self
-            .open(socket, connected, LISTENER_LANE, Observation::Unobserved)
-            .await?;
-        match stream.write.shutdown().await {
-            Ok(()) => Ok(()),
-            Err(error) => Err(self.cut_or(socket, error.into()).await),
-        }
-    }
-
-    /// One listener pipe's Open, on a control connection of its own: a [`Connected`] carries one Open
-    /// and is spent by it.
-    ///
-    /// # Errors
-    ///
-    /// Why it attached nothing, sorted by what that does to the run ([`Unpiped`]).
-    pub async fn pipe(&self, socket: &UidSocket) -> Result<Stream, Unpiped> {
-        let connected = self.connect(socket).await.map_err(Unpiped::of)?;
-        match self
-            .attach(socket, connected, LISTENER_LANE, Observation::Unobserved)
-            .await
-        {
-            Ok(stream) => Ok(stream),
-            // The run's `serve` answered its admission in this version, so a `serve` answering in
-            // another is a restarted one: the run's is gone.
-            Err(Unattached::Failed(report)) if report.is::<Skew>() => {
-                Err(Unpiped::of(Unattached::Failed(self.serve_stopped())))
-            }
-            Err(unattached) => Err(Unpiped::of(unattached)),
-        }
-    }
-
-    /// A control connection of its own for one Open: a refused connect with `serve.lock` free is `serve`
-    /// gone, its own line. A socket that cannot be trusted keeps its own error, never a cut's. Any other
-    /// failure reads as an Open's that got no reply, so a live `serve` whose accept queue is full or that
-    /// stalled says what an Open to it says.
-    async fn connect(&self, socket: &UidSocket) -> Result<Connected, Unattached> {
-        match socket.connected().await {
-            Ok(connected) => Ok(connected),
-            Err(ControlError::NoResident) if socket.lock_free().await => {
-                Err(Unattached::Failed(self.serve_stopped()))
-            }
-            Err(error @ ControlError::Untrusted { .. }) => Err(Unattached::Failed(error.into())),
-            Err(error) => Err(self.unopened(Unopened::Control(error), socket).await),
         }
     }
 
@@ -388,73 +246,6 @@ pub enum Unattached {
     Refused(OpenRefusal),
     /// The Open failed some other way: the line it prints.
     Failed(eyre::Report),
-}
-
-impl Unattached {
-    /// What a listener's warning says of this failed Open, by the same rows as the own bind's. `None`
-    /// only for an outcome that ends the run, which never asks.
-    pub fn failure(&self) -> Option<Failure> {
-        match self {
-            Self::Refused(OpenRefusal::Peer(refusal)) => {
-                Some(Failure::refused(&Refusal::from(refusal.clone())))
-            }
-            Self::Refused(OpenRefusal::Unreachable(_) | OpenRefusal::Timeout) => {
-                Some(Failure::Unreachable)
-            }
-            Self::Refused(OpenRefusal::Broken(detail)) => Some(Failure::Interrupted(Some(
-                Escaped(detail.as_str()).to_string(),
-            ))),
-            // A refusal this build cannot read carries no detail the person can use.
-            Self::Refused(OpenRefusal::PeerUnreadable(_)) => Some(Failure::Interrupted(None)),
-            Self::Refused(OpenRefusal::Busy) => Some(Failure::Busy),
-            Self::Refused(OpenRefusal::StandingEnded | OpenRefusal::NotHere) => None,
-            // A stream that failed to open, as by own bind: the resident's error reply, a control
-            // connection that failed or was cut before its reply. Its reason is the log's.
-            Self::Failed(_) => Some(Failure::Interrupted(None)),
-        }
-    }
-}
-
-/// The lane a listener's Opens ride: its pipes are a fan-out, so they never take the slots the person's
-/// other traffic on Main needs.
-const LISTENER_LANE: OpenLane = OpenLane::Bulk;
-
-/// Why a listener pipe's Open attached no stream, sorted by what it does to the run.
-pub enum Unpiped {
-    /// Load or a path fault, which the next connection can pass: that pipe ends, the listener stays up.
-    Pipe(Unattached),
-    /// An outcome every later Open would repeat: the run ends with its line, after a `proxy` client's
-    /// answer, and never falls back to an own bind.
-    Ends(Unattached),
-}
-
-impl Unpiped {
-    /// Sort `unattached`. `serve` gone finds no `serve` for any later Open. `NotAdmitted` is a ruling on
-    /// this machine (a revoke or a pause) that the wire says not to retry, so listening on would refuse
-    /// every connection. An ended standing's remedy is the person's, and the own bind ends the same way
-    /// when the lease end cuts its session. `NotHere` belongs to the fixed request, so it repeats.
-    fn of(unattached: Unattached) -> Self {
-        let ends = match &unattached {
-            Unattached::Refused(refusal) => match refusal {
-                OpenRefusal::Peer(PeerRefusal::NotAdmitted)
-                | OpenRefusal::StandingEnded
-                | OpenRefusal::NotHere => true,
-                OpenRefusal::Peer(PeerRefusal::BadRequest(_) | PeerRefusal::Unavailable(_))
-                | OpenRefusal::PeerUnreadable(_)
-                | OpenRefusal::Unreachable(_)
-                | OpenRefusal::Timeout
-                | OpenRefusal::Broken(_)
-                | OpenRefusal::Busy => false,
-            },
-            // A cut before the reply whose ask found `serve` gone, or no `serve` to connect to.
-            Unattached::Failed(report) => report.is::<ServeStopped>(),
-        };
-        if ends {
-            Self::Ends(unattached)
-        } else {
-            Self::Pipe(unattached)
-        }
-    }
 }
 
 /// A run through `serve` that failed after its Open attached, its error already printed by [`failed`]:

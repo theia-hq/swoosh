@@ -24,14 +24,17 @@ request leaves from `nas`, and `Range` passes through, so a stopped download res
 
 If `swoosh serve` is running here, `proxy` runs through it. If `serve` stops, `proxy` ends, and the request in
 flight gets a `502` whose body is one line: `proxy failed: swoosh serve stopped here and ended the connection to
-me/nas`. Any other failed request gets the same shape, `proxy failed: <what went wrong>`, and `proxy` keeps listening. When
+me/nas`. Any other failed request gets the same shape, `proxy failed: <what went wrong>`, and `proxy` keeps listening. A request waiting when the run ends gets a `502` whose body is one line, `proxy failed: <what went wrong>`, whether `proxy` runs through `serve` or not. When
 the connection to the machine could not open, it prints one line on stderr,
-`warning: a connection to me/nas failed: <why>`, and no more until a request works again. A host cut while
-a request waits for its answer gives `proxy failed: connection lost`; one mid-body resets the client. If the machine refuses you after you started, the request gets a `403` and `proxy` ends with the
-refusal; if it cuts the session, `proxy` ends with `error: connection lost`. See
+`warning: a connection to me/nas failed: <why>`, and no more until a request works again. A host cut does not end `proxy`: the request waiting on it gets its own `502`, and one mid-body
+resets the client. If the machine refuses you after you started, the request gets a `403` and `proxy` ends with the
+refusal. A listener stays up across a dropped connection. It ends when a new connection is refused: a revoke, a lapsed badge
+or link, or `swoosh serve` stopping. See
 [troubleshooting](../../troubleshooting.md#warning-a-connection-to-menas-failed).
 
 **Things to know.** The machine must serve a proxy for that site (`swoosh serve proxy:<url>` there). Until it does, each
 request gets an error that names that line.
+
+The port is open to every account on this computer. Without your URL's token another account cannot fetch through it, but on a shared machine it can fill the connections `proxy` allows, so your own requests wait or fail until they close.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

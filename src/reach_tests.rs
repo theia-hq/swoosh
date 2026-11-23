@@ -114,8 +114,12 @@ const HOSTILE: &str = "closed by peer: no\r\u{1b}[2Kalice: 900 MiB/s\u{202e}";
 
 /// A node whose every dial fails with [`HOSTILE`] as the cause, the raw key it is asked to reach, and the
 /// machine that key resolves to.
-fn unreachable() -> (Node<HostilePeer, bifrost::NoDiscovery>, Peer, Machine) {
-    let node = Node::new(HostilePeer::Unreachable(HOSTILE), bifrost::NoDiscovery);
+fn unreachable() -> (
+    bifrost::Node<HostilePeer, bifrost::NoDiscovery>,
+    Peer,
+    Machine,
+) {
+    let node = bifrost::Node::new(HostilePeer::Unreachable(HOSTILE), bifrost::NoDiscovery);
     let target = HostilePeer::node_id()
         .to_string()
         .parse::<Peer>()
@@ -171,72 +175,73 @@ fn yours() -> Machine {
         .expect("one machine")
 }
 
-/// A link shown as a person would paste it, for the follow-up's slots.
-fn badge(seed: u8) -> Link {
-    crate::testkit::TestRoot::seeded(seed)
-        .device_badge(
-            crate::testkit::TestNode::seeded(0x52).node_id(),
-            nauthy::Request::expires_in(Duration::from_secs(3600)),
-        )
-        .expect("mint a badge")
-}
-
-/// Diagnose a refused `ssh` dial to [`yours`] against a gate that answers `script`, presenting `slots`.
-async fn diagnosed_with(
-    script: Vec<Script>,
-    slots: (Option<Link>, Option<Link>),
-) -> (Option<Diagnosis>, ScriptedPeer) {
+/// The follow-up to a refused `ssh` stream to [`yours`] by own bind, against a gate that answers
+/// `script`, presenting the standing a home under `tag` holds: what it found, the gate, and the badge
+/// the home presents.
+async fn diagnosed(tag: &str, script: Vec<Script>) -> (Option<Diagnosis>, ScriptedPeer, Link) {
     let peer = ScriptedPeer::new(nas(), script);
     let ssh = "ssh".parse::<Service>().expect("a service");
-    let node = Node::new(peer.clone(), bifrost::NoDiscovery);
-    let found = diagnose_over(&node, &yours(), &ssh, slots.0, slots.1).await;
-    (found, peer)
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let peers = crate::peers::Peers::new(&node);
+    let dir = std::env::temp_dir().join(format!("swoosh-reach-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::config::create_store_dir(&dir).expect("a store dir");
+    let home = crate::home::Home::resolve(Some(dir.clone())).expect("a home");
+    let root = crate::testkit::TestRoot::seeded(0x70);
+    crate::config::write_signet(&crate::testkit::lock(), &home, root.node_id()).expect("a signet");
+    let badge = root
+        .device_badge(
+            node.node_id(),
+            std::time::SystemTime::now() + Duration::from_secs(3600),
+        )
+        .expect("mint a badge");
+    crate::config::write_badge(&crate::testkit::lock(), &home, &badge).expect("a badge");
+    let credential = crate::credential::Credential::Family { present: None };
+    let own = crate::streams::OwnBind::new(&peers, &home, node.node_id(), &credential);
+    let found = diagnose_through(&own, &yours(), &ssh, None).await;
+    let _ = std::fs::remove_dir_all(dir);
+    (found, peer, badge)
 }
 
-/// [`diagnosed_with`] presenting a badge in each slot.
-async fn diagnosed(script: Vec<Script>) -> (Option<Diagnosis>, ScriptedPeer) {
-    diagnosed_with(script, (Some(badge(1)), Some(badge(2)))).await
-}
-
-// The follow-up to a refused dial asks `control.services` presenting the refused dial's own slots, both of
-// them: the route is member-only, so a call that presented nothing would always be refused and the line
-// would wrongly say the device does not count this machine as one of yours.
+// The follow-up to a refused stream asks `control.services` presenting what the refused stream
+// presented, the home's standing: the route is member-only, so a call that presented nothing would
+// always be refused and the line would wrongly say the device does not count this machine as one of
+// yours.
 #[tokio::test]
 async fn the_follow_up_presents_the_refused_dials_credential() {
-    let (present, membership) = (badge(1), badge(2));
-    let (found, peer) = diagnosed_with(
-        vec![Script::Lists(vec!["ping"])],
-        (Some(present.clone()), Some(membership.clone())),
-    )
-    .await;
+    let (found, peer, badge) = diagnosed("slots", vec![Script::Lists(vec!["ping"])]).await;
     assert_eq!(found, Some(Diagnosis::NotListed));
     let [request] = peer.requests().try_into().expect("one call");
     assert_eq!(request.service, CONTROL_SERVICES_SERVICE);
     assert_eq!(
         request.capability,
-        Some(present.to_string()),
-        "slot 1 is the refused dial's"
-    );
-    assert_eq!(
-        request.membership,
-        Some(membership.to_string()),
-        "slot 2 is the refused dial's"
+        Some(badge.to_string()),
+        "slot 1 is the refused stream's"
     );
 }
 
 // The three answers the follow-up can read: not listed, listed, and the call itself refused.
 #[tokio::test]
 async fn the_follow_up_reads_its_three_causes() {
-    for (script, cause) in [
-        (Script::Lists(vec!["ping", "speed"]), Diagnosis::NotListed),
-        (Script::Lists(vec!["ping", "ssh"]), Diagnosis::Listed),
+    for (tag, script, cause) in [
         (
+            "unlisted",
+            Script::Lists(vec!["ping", "speed"]),
+            Diagnosis::NotListed,
+        ),
+        (
+            "listed",
+            Script::Lists(vec!["ping", "ssh"]),
+            Diagnosis::Listed,
+        ),
+        (
+            "not-yours",
             Script::Refuse(bifrost::Refusal::NotAdmitted),
             Diagnosis::NotYours,
         ),
     ] {
-        let (found, _) = diagnosed(vec![script]).await;
-        assert_eq!(found, Some(cause));
+        let (found, _, _) = diagnosed(tag, vec![script]).await;
+        assert_eq!(found, Some(cause), "{tag}");
     }
 }
 
@@ -245,7 +250,8 @@ async fn the_follow_up_reads_its_three_causes() {
 #[tokio::test(start_paused = true)]
 async fn a_follow_up_that_times_out_claims_no_cause() {
     let started = tokio::time::Instant::now();
-    let (found, _) = diagnosed(vec![Script::Silent]).await;
+    // Admitted, then silent: a stream that never opens meets the open's own, shorter deadline first.
+    let (found, _, _) = diagnosed("silent", vec![Script::Holds]).await;
     assert_eq!(found, Some(Diagnosis::Unknown));
     assert!(started.elapsed() >= FOLLOW_UP_TIMEOUT);
     assert!(FOLLOW_UP_TIMEOUT < crate::peers::DIAL_TIMEOUT);
@@ -253,7 +259,7 @@ async fn a_follow_up_that_times_out_claims_no_cause() {
     let busy = bifrost::Refusal::Unavailable {
         detail: bifrost::RefusalDetail::bounded("busy"),
     };
-    let (found, _) = diagnosed(vec![Script::Refuse(busy)]).await;
+    let (found, _, _) = diagnosed("busy", vec![Script::Refuse(busy)]).await;
     assert_eq!(found, Some(Diagnosis::Unknown));
 }
 
@@ -270,8 +276,13 @@ async fn only_your_devices_are_asked_why() {
         .expect("one machine");
     assert_eq!(key.kind(), crate::peer::Kind::Key);
     let peer = ScriptedPeer::new(nas(), [Script::Lists(vec![])]);
-    let node = Node::new(peer.clone(), bifrost::NoDiscovery);
-    assert_eq!(diagnose_over(&node, &key, &ssh, None, None).await, None);
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let peers = crate::peers::Peers::new(&node);
+    let home = crate::home::Home::resolve(Some(std::env::temp_dir().join("swoosh-reach-unasked")))
+        .expect("a home");
+    let credential = crate::credential::Credential::Family { present: None };
+    let own = crate::streams::OwnBind::new(&peers, &home, node.node_id(), &credential);
+    assert_eq!(diagnose_through(&own, &key, &ssh, None).await, None);
     assert!(peer.requests().is_empty(), "nothing was asked");
     assert_eq!(peer.dials(), 0, "nothing was dialed");
 }

@@ -181,11 +181,15 @@ async fn through_socket(
     let dial = Dial {
         machine,
         service: &cmd.service,
-        slip,
-        reach: &cmd.reach,
         contacts,
     };
-    let ask = dial.ask(SEND_LANE).ok().unwrap();
+    let ask = swoosh::streams::Ask {
+        peer: machine.key(),
+        hints: swoosh::peers::Hints::NONE,
+        service: cmd.service.clone(),
+        lane: SEND_LANE,
+        slip,
+    };
     let resident = Resident::new(Rc::clone(&socket));
     let route = Route::Serve {
         dial: &dial,
@@ -1057,11 +1061,15 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
         let dial = Dial {
             machine: &peer,
             service: &cmd.service,
-            slip: Some(nas_slip()),
-            reach: &cmd.reach,
             contacts: &contacts,
         };
-        let ask = dial.ask(SEND_LANE).ok().unwrap();
+        let ask = swoosh::streams::Ask {
+            peer: peer.key(),
+            hints: swoosh::peers::Hints::NONE,
+            service: cmd.service.clone(),
+            lane: SEND_LANE,
+            slip: Some(nas_slip()),
+        };
         let resident_source = Resident::new(Rc::clone(&socket));
         let route = Route::Serve {
             dial: &dial,
@@ -1409,8 +1417,6 @@ async fn a_stalled_serve_ends_a_send_once() {
     let dial = Dial {
         machine: &peer,
         service: &cmd.service,
-        slip: None,
-        reach: &cmd.reach,
         contacts: &contacts,
     };
     let route = Route::Serve {

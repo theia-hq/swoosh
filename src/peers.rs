@@ -177,19 +177,6 @@ pub enum Presents {
 }
 
 impl Presents {
-    /// The slots a reaching verb resolved, as presented on `peer`: slot 1 is a slip exactly when the peer
-    /// was typed as a link. The resolver fills slot 2 only beside a slip, so a standing never carries one.
-    pub fn resolved(
-        peer: &crate::peer::Peer,
-        present: Option<Link>,
-        membership: Option<Link>,
-    ) -> Self {
-        match (peer.self_present(), present) {
-            (Some(_), Some(slip)) => Self::Slip { slip, membership },
-            (_, present) => Self::Standing(present),
-        }
-    }
-
     fn carry(&self, lane: Lane) -> Carry {
         match self {
             Self::Standing(badge) => Carry::Home {
