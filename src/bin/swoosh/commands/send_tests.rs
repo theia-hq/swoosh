@@ -252,6 +252,8 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
                 contacts: &contacts,
             },
             crate::commands::learning::Asking::NoTerminal,
+            // Never opened: `send` has no bridge.
+            crate::commands::connect::stdio,
             &mut out,
             &mut err,
         ),

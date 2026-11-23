@@ -961,6 +961,7 @@ async fn run() -> eyre::Result<()> {
                     | Outward::Speed(_)
                     | Outward::Status(_)
                     | Outward::Send(_)
+                    | Outward::Forward(_)
             ) {
                 hints = hints_or_usage(
                     &[verb_word.as_deref().unwrap_or_default()],
@@ -997,14 +998,11 @@ async fn run() -> eyre::Result<()> {
         })
         .transpose()?;
 
-    // `forward <machine> <service> -` or `<port>` while `serve` runs here: Opens on its socket, before any
-    // key is read, so nothing is bound and no passphrase asked. An `anyone` link never rides it: it dials
-    // under a throwaway key of its own.
+    // `forward <machine> <service> <port>` while `serve` runs here: Opens on its socket, before any key is
+    // read, so nothing is bound and no passphrase asked. An `anyone` link never rides it: it dials under a
+    // throwaway key of its own. `forward … -` takes the dialing route below.
     if let Outward::Forward(cmd) = &reach
-        && matches!(
-            cmd.to,
-            commands::connect::To::Stdout | commands::connect::To::Port(_)
-        )
+        && let commands::connect::To::Port(port) = cmd.to
         && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
         && let Some(machine) = machine.as_ref()
@@ -1016,13 +1014,9 @@ async fn run() -> eyre::Result<()> {
             reach: &cmd.reach,
             contacts: store.contacts(),
         };
-        let routed = match cmd.to {
-            commands::connect::To::Port(port) => {
-                commands::through_serve::forward_port(&home, dial, port).await?
-            }
-            _ => commands::through_serve::forward(&home, dial).await?,
-        };
-        if let commands::through_serve::Routed::Ran(ended) = routed {
+        if let commands::through_serve::Routed::Ran(ended) =
+            commands::through_serve::forward_port(&home, dial, port).await?
+        {
             return ended.map_err(|report| {
                 match report.downcast_ref::<commands::through_serve::ThisMachine>() {
                     Some(this) => usage_error(&["forward"], &this.to_string()),
@@ -1032,8 +1026,8 @@ async fn run() -> eyre::Result<()> {
         }
     }
 
-    // `speed`, `ping`, `status <machine>` and `send` while `serve` runs here: each stream, the stale-list
-    // exchange beside it and the root question are each one Open there.
+    // `speed`, `ping`, `status <machine>`, `send` and `forward … -` while `serve` runs here: each stream,
+    // the stale-list exchange beside it and the root question are each one Open there.
     if let Some(dialing) = Dialing::of(&reach)
         && let BindRole::Dialing(credential) = reach.bind_role()
         && let Some(slip) = credential.through_resident()
@@ -1054,6 +1048,7 @@ async fn run() -> eyre::Result<()> {
             Beside::of(&reach, &home, Some(machine)),
             through,
             learning::Asking::here(),
+            commands::connect::stdio,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         )
@@ -1236,6 +1231,8 @@ enum Dialing<'a> {
     Speed(&'a commands::speed::SpeedCmd),
     Status(&'a status::StatusCmd),
     Send(&'a commands::send::SendCmd),
+    /// `forward … -` alone: a port still takes its own route through `serve`.
+    Forward(&'a commands::forward::ForwardCmd),
 }
 
 impl<'a> Dialing<'a> {
@@ -1246,6 +1243,9 @@ impl<'a> Dialing<'a> {
             Outward::Speed(cmd) => Some(Self::Speed(cmd)),
             Outward::Status(cmd) => Some(Self::Status(cmd)),
             Outward::Send(cmd) => Some(Self::Send(cmd)),
+            Outward::Forward(cmd) if cmd.to == commands::connect::To::Stdout => {
+                Some(Self::Forward(cmd))
+            }
             Outward::Serve(_)
             | Outward::Proxy(_)
             | Outward::Forward(_)
@@ -1265,6 +1265,18 @@ impl<'a> Dialing<'a> {
             Self::Speed(cmd) => &cmd.reach,
             Self::Status(cmd) => &cmd.reach,
             Self::Send(cmd) => &cmd.reach,
+            Self::Forward(cmd) => &cmd.reach,
+        }
+    }
+
+    /// Whether a record of `serve` gone, met beside a run the verb ended clean, ends it with that line:
+    /// for a verb that reports, the run's result says nothing of what came after. Never for the bridge,
+    /// whose exit 0 says the far side holds every byte: a `serve` that went after a clean session is not
+    /// that session's failure.
+    fn reports_gone(&self) -> bool {
+        match self {
+            Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Send(_) => true,
+            Self::Forward(_) => false,
         }
     }
 
@@ -1275,6 +1287,7 @@ impl<'a> Dialing<'a> {
             Self::Speed(_) => swoosh::reach::SPEED_SERVICE.parse()?,
             Self::Status(_) => status::StatusCmd::service(machine)?,
             Self::Send(cmd) => nauthy::Service::clone(&cmd.service),
+            Self::Forward(cmd) => nauthy::Service::clone(&cmd.service),
         })
     }
 }
@@ -1298,13 +1311,15 @@ struct ThroughServe<'a> {
 /// bind prints before its bind prints here before the first Open, keyed to the key `serve` runs as. What
 /// runs beside the verb ends with it and prints nothing of its own; a beside Open dropped unanswered is
 /// never asked about, so a slow machine never reads as `serve` stalled. One that met `serve` gone or of
-/// another version ends a run the verb ended clean with that line, once. A root the machine showed is
-/// told after the run, asking as `asking` says. Its lines go to `out` and `err`.
-async fn dial_through_serve(
+/// another version ends a run the verb ended clean with that line, once, unless the verb is the bridge
+/// ([`Dialing::reports_gone`]). A root the machine showed is told after the run, asking as `asking` says.
+/// Its lines go to `out` and `err`; the bridge's stream goes to the stdin and stdout `stdio` opens.
+async fn dial_through_serve<O: commands::connect::Output>(
     dialing: Dialing<'_>,
     beside: Beside<'_>,
     through: ThroughServe<'_>,
     asking: learning::Asking,
+    stdio: impl FnOnce() -> eyre::Result<(commands::connect::Stdin, O)>,
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
@@ -1354,6 +1369,7 @@ async fn dial_through_serve(
     let route = &route;
     // Set once a `send` file prints `sent`, for the record's line below; no other verb sets it.
     let sent = &core::cell::Cell::new(false);
+    let reports_gone = dialing.reports_gone();
     let verb = async |admitted| match dialing {
         Dialing::Ping(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
         Dialing::Speed(cmd) => {
@@ -1365,6 +1381,8 @@ async fn dial_through_serve(
             cmd.through(source, route, machine, admitted, sent, out, err)
                 .await
         }
+        // Never asks a root, so the signal goes unheard.
+        Dialing::Forward(cmd) => cmd.bridge(source, route, machine, stdio).await,
     };
     let (ended, shown) = run_verb(beside, &swoosh::sync::SourceDial::new(source, home), verb).await;
     // Told once the run is done, as by own bind: a question at the terminal can wait on the person.
@@ -1377,7 +1395,7 @@ async fn dial_through_serve(
     // what ended it. No `settle`: a beside Open dropped unanswered still never reads as `serve` stalled.
     // A `send` that ended clean sent every file, so after a `sent` line nothing is left to send again.
     match (ended, source.went()) {
-        (Ok(()), Some(gone)) => Err(match gone.why {
+        (Ok(()), Some(gone)) if reports_gone => Err(match gone.why {
             GoneWhy::Skew => Skew.into(),
             GoneWhy::Stopped if sent.get() => dial.stopped_line().after_all_sent().into(),
             GoneWhy::Stopped => dial.serve_stopped(),
@@ -1703,6 +1721,9 @@ struct Renew {
 #[cfg(test)]
 #[path = "bearer_dial_tests.rs"]
 mod bearer_dial_tests;
+#[cfg(test)]
+#[path = "bridge_route_tests.rs"]
+mod bridge_route_tests;
 #[cfg(test)]
 #[path = "dial_route_tests.rs"]
 mod dial_route_tests;

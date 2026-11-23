@@ -8,11 +8,12 @@ use swoosh::node_client::UidSocket;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::OpenError;
 use swoosh::reach;
-use swoosh::serve::control_codec::OpenRefusal;
-use swoosh::streams::Unopened;
+use swoosh::serve::control_codec::{OpenRefusal, PeerRefusal};
+use swoosh::streams::{Ask, StreamSource, Unopened};
 use swoosh::transport::Bound;
 
 use crate::commands::connect::ConnectionLost;
+use crate::commands::machine;
 use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachine};
 
 /// The path a run's streams take, for the lines an outcome prints: each path prints its own for the
@@ -69,6 +70,31 @@ impl Route<'_> {
             Unopened::Skew => Skew.into(),
             Unopened::Malformed(malformed) => malformed.into(),
             Unopened::ServeGone | Unopened::Control(_) => ConnectionLost.into(),
+        }
+    }
+
+    /// The line a run ends with for `unopened`, which every later stream of `ask` would repeat. A
+    /// machine's `NotAdmitted` is the dial refusal, after one of your devices is asked why through
+    /// `source`, the path the refused stream took; anything else is [`line`](Self::line).
+    pub async fn ending(
+        &self,
+        unopened: Unopened,
+        source: &impl StreamSource,
+        ask: &Ask,
+        machine: &Machine,
+    ) -> eyre::Report {
+        match unopened {
+            Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted)) => {
+                let diagnosis = reach::diagnose_through(
+                    source,
+                    machine,
+                    &ask.service,
+                    Option::clone(&ask.slip),
+                )
+                .await;
+                machine::refused(machine, &ask.service, diagnosis)
+            }
+            other => self.line(other, machine).await,
         }
     }
 
