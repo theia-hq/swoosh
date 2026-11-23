@@ -1457,7 +1457,8 @@ async fn forwarded(
     (ended, heard)
 }
 
-/// [`forwarded`], with what the run wrote to stderr as it ran.
+/// [`forwarded`], with what the run wrote to stderr as it ran. The run's admission is answered first,
+/// attached, as `forward <port>` makes it, and is not among the Opens returned.
 async fn warned(
     tag: &str,
     answers: Vec<Answer>,
@@ -1466,6 +1467,7 @@ async fn warned(
 ) -> (eyre::Report, Vec<Heard>, String) {
     let mut served = Served::new(tag).await;
     let rig = Rig::default();
+    let answers = core::iter::once(Answer::Attach).chain(answers).collect();
     let resident = scripted(&mut served, answers, &rig);
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
@@ -1474,34 +1476,56 @@ async fn warned(
     let dial = Dial {
         machine: &peer,
         service: &service,
-        slip,
+        slip: slip.clone(),
         reach: &reach,
         contacts: &contacts,
     };
-    let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+    let socket = Rc::new(swoosh::node_client::UidSocket::resolve(&served.home).unwrap());
+    let source = swoosh::streams::Tracked::new(
+        swoosh::streams::Resident::new(Rc::clone(&socket)),
+        std::collections::HashMap::new(),
+    );
+    let route = crate::commands::route::Route::Serve {
+        dial: &dial,
+        socket: &socket,
+    };
+    let ask = swoosh::streams::Ask {
+        slip,
+        ..crate::commands::connect::tests::listening(&peer)
+    };
+    let listener = crate::commands::connect::Listener {
+        source: &source,
+        ask: &ask,
+        route: &route,
+        machine: &peer,
+    };
+    listener.admit().await.unwrap();
+    let local = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
-    let local = listener.local_addr().unwrap();
+    let at = local.local_addr().unwrap();
     let connecting = async {
-        clients(local, &rig).await;
+        clients(at, &rig).await;
         core::future::pending::<()>().await;
     };
     let mut err = Vec::new();
-    let failures = crate::commands::connect::PipeFailures::new(&peer, &mut err);
-    let ended = tokio::time::timeout(ROW_BOUND, async {
-        tokio::select! {
-            ended = dial.carry_each(&socket, listener, &failures) => ended,
-            () = connecting => unreachable!(),
-        }
-    })
-    .await
-    .expect("the run ended");
+    let ended = {
+        let failures = crate::commands::connect::PipeFailures::new(&peer, &mut err);
+        tokio::time::timeout(ROW_BOUND, async {
+            tokio::select! {
+                ended = listener.forward(local, &failures) => ended,
+                () = connecting => unreachable!(),
+            }
+        })
+        .await
+        .expect("the run ended")
+    };
     rig.stop.cancel();
-    let heard = tokio::time::timeout(ROW_BOUND, resident)
+    let mut heard = tokio::time::timeout(ROW_BOUND, resident)
         .await
         .expect("the resident ended")
         .unwrap();
+    heard.remove(0);
     (ended, heard, String::from_utf8(err).unwrap())
 }
 
@@ -1755,51 +1779,6 @@ async fn another_version_answering_a_pipe_ends_the_port_as_serve_stopped() {
     assert_eq!(heard.len(), 1);
 }
 
-/// `forward <port>` through `serve` proves admission on one Open, ended with End, before it binds the
-/// port or prints its start lines.
-#[tokio::test]
-async fn a_port_through_serve_admits_on_an_open_it_ends_with_end() {
-    let mut served = Served::new("port-admit").await;
-    let rig = Rig::default();
-    let resident = scripted(&mut served, vec![Answer::Attach], &rig);
-    let contacts = book();
-    let peer = machine(&contacts, "me/nas");
-    let service = "ssh".parse().unwrap();
-    let reach = reach(&["forward"]);
-    let dial = Dial {
-        machine: &peer,
-        service: &service,
-        slip: None,
-        reach: &reach,
-        contacts: &contacts,
-    };
-    let (socket, connected) = super::serve(&served.home).await.unwrap().unwrap();
-    // A free port; the run listens on once admitted, and the resident resolves once the admission
-    // stream has closed.
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let heard = tokio::time::timeout(ROW_BOUND, async {
-        tokio::select! {
-            ended = dial.forward_port(&socket, connected, port) => {
-                panic!("the run ended before a connection: {ended:?}")
-            }
-            heard = resident => heard.unwrap(),
-        }
-    })
-    .await
-    .expect("the admission Open was made and closed");
-    let [admission] = heard.as_slice() else {
-        panic!("{} Opens, not the one admission", heard.len());
-    };
-    assert_eq!(
-        admission.upload, END,
-        "the admission stream ends with End alone"
-    );
-}
-
 /// A dialing verb's Open that gets no reply prints `Unresponsive` only when `serve` then fails a status
 /// too: a resident that takes the Open and answers nothing more has stalled, exit 1 with stdout empty. One
 /// that answers status but not the Open is a slow machine behind a working `serve`, so the line is the
@@ -1871,27 +1850,32 @@ async fn a_stalled_serve_is_unresponsive_at_a_port_admission() {
     let resident = scripted(&mut served, vec![Answer::Wedge], &rig);
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
-    let service = "ssh".parse().unwrap();
-    let reach = reach(&["forward"]);
+    let cmd = crate::commands::connect::tests::port_forward("me/nas");
     let dial = Dial {
         machine: &peer,
-        service: &service,
+        service: &cmd.service,
         slip: None,
-        reach: &reach,
+        reach: &cmd.reach,
         contacts: &contacts,
     };
-    let routed = tokio::time::timeout(
+    let socket = Rc::new(swoosh::node_client::UidSocket::resolve(&served.home).unwrap());
+    let source = swoosh::streams::Tracked::new(
+        swoosh::streams::Resident::new(Rc::clone(&socket)),
+        std::collections::HashMap::new(),
+    );
+    let route = crate::commands::route::Route::Serve {
+        dial: &dial,
+        socket: &socket,
+    };
+    let report = tokio::time::timeout(
         core::time::Duration::from_secs(600),
-        super::forward_port(&served.home, dial, 0),
+        cmd.listen(&source, &route, &peer, &contacts, 0),
     )
     .await
     .expect("the admission never hung")
-    .unwrap();
+    .expect_err("a stalled admission is an error");
     rig.stop.cancel();
     let heard = resident.await.unwrap();
-    let super::Routed::Ran(Err(report)) = routed else {
-        panic!("not a run through serve that ended at its admission");
-    };
     assert!(report.is::<super::Unresponsive>(), "{report:#}");
     assert_eq!(
         printed(&report),

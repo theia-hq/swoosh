@@ -5,9 +5,9 @@
 //! loopback, and the compiled binary reaches it, once as `swoosh ssh`'s `ProxyCommand` does (stdin held open)
 //! and once forwarding a local port.
 //!
-//! The holder sends one line, reads it back, then sends nothing. The link it presents expires, the host
-//! cuts the session within a sweep, and `forward` must exit then: not on the holder's next keystroke, and not
-//! left listening on a port whose session is gone.
+//! The holder sends one line, reads it back, then sends nothing. The link it presents expires and the host
+//! cuts the session within a sweep. The bridge must exit then, not on the holder's next keystroke; the port
+//! stays up, and its next local connection, refused, ends it.
 
 use core::time::Duration;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -353,8 +353,10 @@ fn forward_exits_when_the_host_cuts_the_session_while_the_holder_writes_nothing(
     drop(stdin);
 }
 
+/// A port stays up across the cut, and its next local connection ends the run: the lapsed link is
+/// refused, exit 1, with the dial refusal as the run's last line, never `connection lost`.
 #[test]
-fn a_forward_ends_when_the_host_cuts_the_session() {
+fn a_forward_ends_at_its_next_connection_once_its_link_lapses() {
     let scratch = Scratch::new("forward");
     let lapsing = lapsing(&scratch);
     // A port free a moment ago: the forward binds it once admitted.
@@ -391,12 +393,44 @@ fn a_forward_ends_when_the_host_cuts_the_session() {
         "the link is admitted and the echo answers before it lapses"
     );
 
-    let mut stdout: ChildStdout = forward.0.stdout.take().expect("piped stdout");
-    ends_at_the_cut(forward, stderr, lapsing.lapses);
+    // Past the lapse and the host's cut: the port still listens.
+    assert!(
+        Instant::now() < lapsing.lapses,
+        "the echo came back before the link lapsed, so the refusal below is the expiry's"
+    );
+    std::thread::sleep(lapsing.lapses.saturating_duration_since(Instant::now()) + SWEEP);
+    assert!(
+        forward.0.try_wait().expect("poll forward").is_none(),
+        "the forward ended at the cut"
+    );
     drop(connection);
-    let mut printed = String::new();
+
+    let mut stdout: ChildStdout = forward.0.stdout.take().expect("piped stdout");
+    let next = TcpStream::connect(("127.0.0.1", port)).expect("connect after the lapse");
+    let status = exited_by(&mut forward.0, Instant::now() + EXIT);
+    drop(next);
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a refused connection exits 1: {status}"
+    );
+    // The child has exited, so its stderr closes and the reader's channel with it.
+    let printed = stderr
+        .iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .expect("read all stderr")
+        .concat();
+    let printed = String::from_utf8(printed).expect("utf-8 stderr");
+    assert!(
+        printed.ends_with(
+            "error: the link's machine refused echo\n  It does not serve echo, or it does not accept \
+             this link.\n"
+        ),
+        "the run ends with the dial refusal: {printed:?}"
+    );
+    let mut out = String::new();
     stdout
-        .read_to_string(&mut printed)
+        .read_to_string(&mut out)
         .expect("read the exited forward's stdout");
-    assert_eq!(printed, "", "a port forward's stdout carries nothing");
+    assert_eq!(out, "", "a port forward's stdout carries nothing");
 }

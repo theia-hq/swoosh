@@ -267,6 +267,18 @@ async fn crowded_hints_refuse_a_dialing_verb_first() {
             }
             assert_eq!(status, Some(2), "{} {serving}: {stderr}", verb[0]);
             assert!(stderr.contains(&line), "{} {serving}: {stderr}", verb[0]);
+            // The verb's own usage line, never the root's: the arm finds the verb word as typed.
+            let usage = match verb[0] {
+                "ping" => "Usage: swoosh ping [OPTIONS] <machine>",
+                "speed" => "Usage: swoosh speed [OPTIONS] <machine>",
+                "status" => "Usage: swoosh status [OPTIONS] [machine]",
+                "send" => "Usage: swoosh send [OPTIONS] <path>... <machine>",
+                "forward" => {
+                    "Usage: swoosh forward [OPTIONS] <machine> <service> <port | unix:<path> | ->"
+                }
+                other => panic!("{other}: not a dialing verb"),
+            };
+            assert!(stderr.contains(usage), "{} {serving}: {stderr}", verb[0]);
             assert_eq!(
                 seen.connects.load(Ordering::SeqCst),
                 0,

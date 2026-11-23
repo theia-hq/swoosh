@@ -27,12 +27,14 @@ stdout instead.
 
 When one connection to the port fails to open, `forward` keeps listening and prints one line on stderr:
 `warning: a connection to me/nas failed: <why>`. It prints no more until a connection works again. A
-connection that opened never warns. If the machine refuses you after you started, or cuts the session,
-`forward` ends instead (`error: connection lost` for a cut). See [troubleshooting](../../troubleshooting.md#warning-a-connection-to-menas-failed).
+connection that opened never warns. A listener stays up across a dropped connection. It ends when a new
+connection is refused: a revoke, a lapsed badge or link, or `swoosh serve` stopping. See [troubleshooting](../../troubleshooting.md#warning-a-connection-to-menas-failed).
 
 **Things to know.** The local end is required: nothing defaults to the terminal or to the served port.
 `unix:<path>` is not built yet. A [link you were given](../../keys.md#using-a-grant-you-were-given) goes where
 the machine goes: `swoosh forward swoosh:ed01… tv 8096`.
+
+The port is open to every account on this computer, not only yours. On a shared machine, another account can connect and reach the service as you, and can fill the streams `forward` allows to that machine, so your own clients wait or fail until they close.
 
 With `-`, `forward` exits 0 only when the other side ends cleanly and, if you sent anything, the other machine
 holds it. Any other end prints `error: connection lost` and exits 1; stdout keeps what arrived. If the other side

@@ -12,9 +12,9 @@ use swoosh::serve::control_codec::{OpenRefusal, PeerRefusal};
 use swoosh::streams::{Ask, StreamSource, Unopened};
 use swoosh::transport::Bound;
 
-use crate::commands::connect::ConnectionLost;
+use crate::commands::connect::{ConnectionLost, Failure};
 use crate::commands::machine;
-use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachine};
+use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachine, Unresponsive};
 
 /// The path a run's streams take, for the lines an outcome prints: each path prints its own for the
 /// same outcome.
@@ -33,7 +33,36 @@ pub enum Route<'a> {
     },
 }
 
+/// What a listener does with a pipe whose open gave no stream.
+pub enum Pipe {
+    /// Every later pipe would meet it: the run ends. Its line is built once the loop has stopped
+    /// ([`Route::ending`]), so a question it asks never races a pipe still in flight.
+    Ends(Unopened),
+    /// `serve` is there and confirmed stalled: the run ends with this line.
+    Stalled(eyre::Report),
+    /// That pipe alone: the warning's clause, if it has one, and the line for the log.
+    Failed(Option<Failure>, eyre::Report),
+}
+
 impl Route<'_> {
+    /// What `unopened`, a listener pipe's open, does to the run, the same table on both paths: an
+    /// outcome every later open would repeat ends it ([`Unopened::ends_run`]), and so does a reply that
+    /// never came from a `serve` a status then confirms stalled, since every later open would wait it
+    /// out too. Anything else is that pipe's alone.
+    pub async fn pipe(&self, unopened: Unopened, machine: &Machine) -> Pipe {
+        if unopened.ends_run() {
+            return Pipe::Ends(unopened);
+        }
+        let failure = Failure::of(&unopened);
+        let line = self.line(unopened, machine).await;
+        // By own bind no line is `Unresponsive`: only the resident's path asks whether it stalled.
+        if line.is::<Unresponsive>() {
+            Pipe::Stalled(line)
+        } else {
+            Pipe::Failed(failure, line)
+        }
+    }
+
     /// The line `unopened` prints for `machine`: by own bind, the cause chain as a transport's failure
     /// prints it; through `serve`, the routed verbs' line for it.
     pub async fn line(&self, unopened: Unopened, machine: &Machine) -> eyre::Report {

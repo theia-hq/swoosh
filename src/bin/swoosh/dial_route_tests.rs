@@ -290,7 +290,8 @@ fn dialing_verbs_through_serve_make_the_stale_exchange() {
 
 /// With `serve` answering and a stale list, `forward … -` makes the beside-exchange with its device as
 /// one Open on Main beside the bridge's own, each carrying the `--peer` addresses typed for it, and its
-/// stdout carries only the stream's bytes; with a fresh list it makes none, and the run is the same.
+/// stdout carries only the stream's bytes; with a fresh list it makes none, and the run is the same. So
+/// does `forward <port>`, its Opens on Bulk.
 #[test]
 fn forward_and_proxy_through_serve_make_the_stale_exchange() {
     on_a_big_stack(async || {
@@ -333,6 +334,88 @@ fn forward_and_proxy_through_serve_make_the_stale_exchange() {
         let bridged = &printed[0];
         assert!(bridged.ok, "{bridged:?}");
         assert_eq!((bridged.down.as_str(), bridged.out.as_str()), ("down", ""));
+        assert_eq!(printed[0], printed[1], "the exchange printed nothing");
+
+        // `forward <port>`: its admission and pipes ride Bulk beside the exchange on Main, and a later
+        // pipe refused ends the run, once the exchange was heard.
+        let mut printed = Vec::new();
+        for stale in [true, false] {
+            let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let port_text = port.to_string();
+            let argv = ["forward", "me/nas", "ssh", &port_text, "--peer", &hint];
+            let mut served = a_device(&format!("exch-port-{stale}"), stale).await;
+            let rig = Rig::default();
+            let synced = std::sync::Arc::new(tokio::sync::Notify::new());
+            let heard_sync = std::sync::Arc::clone(&synced);
+            let mut admitted = false;
+            let resident = routed(
+                &mut served,
+                move |service| match service {
+                    "control.sync" => {
+                        heard_sync.notify_one();
+                        Reply::Refuse(OpenRefusal::Busy)
+                    }
+                    "ssh" if !admitted => {
+                        admitted = true;
+                        Reply::Exchange(Vec::new())
+                    }
+                    _ => Reply::Refuse(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
+                },
+                &rig,
+            );
+            let pipe = async {
+                if stale {
+                    synced.notified().await;
+                }
+                // The port is bound once the admission is made.
+                loop {
+                    if let Ok(mut pipe) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await
+                    {
+                        use tokio::io::AsyncReadExt as _;
+                        let _ = pipe.read_to_end(&mut Vec::new()).await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            let (ran, ()) = tokio::join!(dialed(&served.home, &argv), pipe);
+            printed.push(ran);
+            rig.stop.cancel();
+            let events = resident.await.unwrap();
+            let heard = opens(&events);
+            assert_eq!(
+                heard
+                    .iter()
+                    .filter(|open| open.service == "control.sync")
+                    .count(),
+                usize::from(stale),
+                "{stale}: the exchange"
+            );
+            for open in heard {
+                let lane = match open.service.as_str() {
+                    "ssh" => OpenLane::Bulk,
+                    _ => OpenLane::Main,
+                };
+                assert_eq!(open.lane, lane, "{stale}: {}", open.service);
+                assert_eq!(
+                    open.hints,
+                    vec![NAS_HINT.parse().unwrap()],
+                    "{stale}: {}",
+                    open.service
+                );
+            }
+        }
+        let ported = &printed[0];
+        assert_eq!(
+            ported.error.as_deref(),
+            Some("me/nas refused ssh\n  nas does not count this machine as one of your devices."),
+            "{ported:?}"
+        );
+        assert_eq!(ported.out, "");
         assert_eq!(printed[0], printed[1], "the exchange printed nothing");
     });
 }
