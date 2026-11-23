@@ -980,6 +980,12 @@ pub(crate) enum Answer {
     AfterEnd(Vec<u8>),
     /// Attach, then drop the connection with no End: a cut, the resident still up.
     Cut,
+    /// Attach, end the download with End, then drop the connection with no Landed, the resident still
+    /// up.
+    EndThenCut,
+    /// Attach, end the download with End, then stop with no Landed: the socket and the lock go before the
+    /// connection does.
+    EndThenStop,
     /// Attach, then stop: the socket and the lock go before the connection does, as when `serve` exits
     /// under a pipe.
     Stop,
@@ -1121,6 +1127,16 @@ pub(crate) fn scripted(
                             held.push((at, tokio::spawn(answer_after_end(conn, download))));
                         }
                         Answer::Stop => {
+                            listener = None;
+                            lock = None;
+                            drop(conn);
+                        }
+                        Answer::EndThenCut => {
+                            let _ = conn.write_all(&END).await;
+                            drop(conn);
+                        }
+                        Answer::EndThenStop => {
+                            let _ = conn.write_all(&END).await;
                             listener = None;
                             lock = None;
                             drop(conn);

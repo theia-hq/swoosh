@@ -31,14 +31,19 @@ const SAVED_ROOT: u8 = 0x73;
 /// The `--peer` address typed for `me/nas` in every run here.
 const NAS_HINT: &str = "127.0.0.1:4000";
 
-/// What a run printed and how it ended: its error as the composition root prints it.
+/// What a run printed and how it ended: its error as the composition root prints it, and what a
+/// bridge's stream wrote to its stdout.
 #[derive(Debug, PartialEq, Eq)]
 struct Printed {
     ok: bool,
     error: Option<String>,
     out: String,
     err: String,
+    down: String,
 }
+
+/// What a bridge in these rows reads from stdin: these bytes, then its end.
+const UP: &[u8] = b"up";
 
 /// Run `argv` from `home` through its `serve` as the dialing route runs it.
 async fn dialed(home: &Home, argv: &[&str]) -> Printed {
@@ -73,7 +78,17 @@ async fn dialed_to(
         crate::commands::through_serve::hints(swoosh::reaching::Reaching::reach_args(&outward))
             .unwrap();
     let socket = UidSocket::resolve(home).unwrap();
-    let mut out = Vec::new();
+    let (mut out, mut down) = (Vec::new(), Vec::new());
+    let (stdin, input) = tokio::sync::mpsc::channel(1);
+    stdin.try_send(Ok(UP.to_vec())).unwrap();
+    drop(stdin);
+    let stdio = || {
+        let input = crate::commands::connect::Stdin {
+            chunks: input,
+            kind: crate::commands::connect::StdinKind::Piped,
+        };
+        Ok((input, &mut down))
+    };
     let ended = tokio::time::timeout(
         bound,
         crate::dial_through_serve(
@@ -87,6 +102,7 @@ async fn dialed_to(
                 contacts: &contacts,
             },
             crate::commands::learning::Asking::NoTerminal,
+            stdio,
             &mut out,
             err,
         ),
@@ -98,6 +114,7 @@ async fn dialed_to(
         error: ended.err().map(|report| format!("{report:#}")),
         out: String::from_utf8(out).unwrap(),
         err: String::new(),
+        down: String::from_utf8(down).unwrap(),
     }
 }
 
@@ -268,6 +285,86 @@ fn dialing_verbs_through_serve_make_the_stale_exchange() {
                 "{argv:?}: the exchange printed nothing"
             );
         }
+    });
+}
+
+/// With `serve` answering and a stale list, `forward … -` makes the beside-exchange with its device as
+/// one Open on Main beside the bridge's own, each carrying the `--peer` addresses typed for it, and its
+/// stdout carries only the stream's bytes; with a fresh list it makes none, and the run is the same.
+#[test]
+fn forward_and_proxy_through_serve_make_the_stale_exchange() {
+    on_a_big_stack(async || {
+        let hint = format!("{}={NAS_HINT}", node(NAS));
+        let argv = ["forward", "me/nas", "ssh", "-", "--peer", &hint];
+        let mut printed = Vec::new();
+        for stale in [true, false] {
+            let mut served = a_device(&format!("exch-forward-{stale}"), stale).await;
+            let rig = Rig::default();
+            let resident = routed(
+                &mut served,
+                |service| match service {
+                    "control.sync" => Reply::Refuse(OpenRefusal::Busy),
+                    _ => Reply::Exchange(b"down".to_vec()),
+                },
+                &rig,
+            );
+            printed.push(dialed(&served.home, &argv).await);
+            rig.stop.cancel();
+            let events = resident.await.unwrap();
+            let heard = opens(&events);
+            assert_eq!(
+                heard
+                    .iter()
+                    .filter(|open| open.service == "control.sync")
+                    .count(),
+                usize::from(stale),
+                "{stale}: the exchange"
+            );
+            for open in heard {
+                assert_eq!(open.lane, OpenLane::Main, "{stale}: {}", open.service);
+                assert_eq!(
+                    open.hints,
+                    vec![NAS_HINT.parse().unwrap()],
+                    "{stale}: {}",
+                    open.service
+                );
+            }
+        }
+        let bridged = &printed[0];
+        assert!(bridged.ok, "{bridged:?}");
+        assert_eq!((bridged.down.as_str(), bridged.out.as_str()), ("down", ""));
+        assert_eq!(printed[0], printed[1], "the exchange printed nothing");
+    });
+}
+
+/// Through `serve`, a bridge whose stream ended clean, its upload landed, exits 0 with nothing on stderr
+/// though the exchange beside it met `serve` gone: exit 0 says the far side holds every byte, and a
+/// `serve` that went after a clean session is not that session's failure.
+#[test]
+fn a_clean_bridge_exits_0_when_serve_went_beside() {
+    on_a_big_stack(async || {
+        let mut served = a_device("beside-bridge", true).await;
+        let rig = Rig::default();
+        let resident = routed(
+            &mut served,
+            |service| match service {
+                "control.sync" => Reply::VersionAfterHeld,
+                _ => Reply::AfterVersion(Box::new(Reply::Exchange(b"down".to_vec()))),
+            },
+            &rig,
+        );
+        let printed = dialed(&served.home, &["forward", "me/nas", "ssh", "-"]).await;
+        rig.stop.cancel();
+        let events = resident.await.unwrap();
+        let ssh = opens(&events)
+            .into_iter()
+            .find(|open| open.service == "ssh");
+        assert!(ssh.is_some_and(|open| {
+            open.upload
+                .ends_with(&crate::commands::through_serve::tests::END)
+        }));
+        assert!(printed.ok, "{printed:?}");
+        assert_eq!((printed.err.as_str(), printed.down.as_str()), ("", "down"));
     });
 }
 

@@ -11,19 +11,26 @@
 //! defaults to the served port, so every form states where the bytes go. A missing local end is a usage
 //! error that names the three ([`NO_LOCAL_END`]), found at parse, before anything is opened or bound.
 //!
-//! Drives tightbeam's tunnel wire under swoosh's OWN identity, through the one
-//! [`connect`](crate::commands::connect::connect) runner, selected here by the single [`To`]. It is also
-//! what `swoosh ssh` re-invokes as its `ProxyCommand` (`forward <peer> <service> -`), so the bridge is a
-//! verb an operator can run by hand to debug a launch that fails.
+//! Drives tightbeam's tunnel wire under swoosh's OWN identity, selected here by the single [`To`]: a port
+//! through the [`connect`](crate::commands::connect::connect) runner, stdout through
+//! [`bridge`](ForwardCmd::bridge), one body on both paths. It is also what `swoosh ssh` re-invokes as its
+//! `ProxyCommand` (`forward <peer> <service> -`), so the bridge is a verb an operator can run by hand to
+//! debug a launch that fails.
 
 use bifrost::{Discovery, Node, Transport};
 use clap::Args;
 use nauthy::Service;
-use swoosh::peer::Peer;
+use swoosh::peer::{Machine, Peer};
+use swoosh::peers::Hints;
+use swoosh::serve::control_codec::OpenLane;
+use swoosh::streams::{Ask, OwnBind, StreamSource};
 use swoosh::transport::ReachArgs;
 
-use crate::commands::connect::{To, connect};
+use crate::commands::connect::{
+    self, ConnectionLost, Download, Output, Stdin, Stream, To, connect, pump_stdio,
+};
 use crate::commands::machine;
+use crate::commands::route::Route;
 
 /// A machine's served service, forwarded to the local end it names.
 #[derive(Debug, Args)]
@@ -84,8 +91,9 @@ impl swoosh::reaching::Reaching for ForwardCmd {
     }
 
     /// Drive the local end: bind a local port and forward each connection, stream to stdout, or the
-    /// reserved unix listener, all over the overlay. It reads the resolved `present` badge and `membership`
-    /// badge from `ctx`, and the machine resolved before the bind, the same way `ping`/`send` do.
+    /// reserved unix listener, all over the overlay, to the machine resolved before the bind. A port reads
+    /// the resolved `present` and `membership` badges from `ctx`; the bridge's one stream presents what
+    /// its open reads from the home, as `send`'s streams do.
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
         node: &'n Node<T, D>,
@@ -96,13 +104,31 @@ impl swoosh::reaching::Reaching for ForwardCmd {
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
+        let Some(machine) = ctx.machine else {
+            eyre::bail!("internal: `forward` ran without its machine resolved (root-dispatch bug)");
+        };
+        let port = match self.to {
+            To::Port(port) => port,
+            To::Stdout => {
+                let route = Route::Own {
+                    peer: &self.peer,
+                    bound: ctx.bound,
+                    this: node.node_id(),
+                };
+                let credential =
+                    swoosh::credential::Credential::dialing(&self.peer, self.service.as_str());
+                let source = OwnBind::new(peers, ctx.home, node.node_id(), &credential);
+                return self.bridge(source, &route, machine, connect::stdio).await;
+            }
+            // The path is not echoed: a typed path would read as a missing socket, not a missing feature.
+            To::UnixListener(_) => {
+                eyre::bail!("a unix:<path> local end is not built yet: use a port, or - for stdout")
+            }
+        };
         // Both slots come from the composition root's ONE resolver, like every other reaching verb: a
         // hand-rolled slot 1 here could only re-derive what `resolve` already computed, and the hand-rolled
         // one silently dropped slot 2 (the resolver is the only code that computes it), which is what
         // capped this dial at bearer slips.
-        let Some(machine) = ctx.machine else {
-            eyre::bail!("internal: `forward` ran without its machine resolved (root-dispatch bug)");
-        };
         // A port's streams key their held session by what they present, read off the peer as typed.
         let presents = swoosh::peers::Presents::resolved(
             &self.peer,
@@ -118,8 +144,49 @@ impl swoosh::reaching::Reaching for ForwardCmd {
             ctx.present,
             ctx.membership,
             presents,
-            self.to,
+            port,
         )
         .await
+    }
+}
+
+/// The lane the bridge's stream rides: an ordinary pipe. Bulk is a fan-out's lane, Isolated a
+/// measurement's.
+const BRIDGE_LANE: OpenLane = OpenLane::Main;
+
+impl ForwardCmd {
+    /// `forward <machine> <service> -`, on either path: one stream from `source` to `machine`, piped
+    /// against the stdin and stdout `stdio` opens once the stream is admitted, each outcome worded by
+    /// `route`. A stream that gave none ends the run with [`Route::ending`]'s line, so a `NotAdmitted`
+    /// from one of your devices asks it why through the same `source`. A connection that ended under the
+    /// pump is `serve`'s own line when `serve` went under it, else `connection lost`.
+    pub(crate) async fn bridge<S, O>(
+        &self,
+        source: S,
+        route: &Route<'_>,
+        machine: &Machine,
+        stdio: impl FnOnce() -> eyre::Result<(Stdin, O)>,
+    ) -> eyre::Result<()>
+    where
+        S: StreamSource,
+        S::Read: Download,
+        O: Output,
+    {
+        let ask = Ask {
+            peer: machine.key(),
+            hints: Hints::NONE,
+            service: Service::clone(&self.service),
+            lane: BRIDGE_LANE,
+            slip: self.peer.self_present(),
+        };
+        let opened = match source.open(&ask).await {
+            Ok(opened) => opened,
+            Err(unopened) => return Err(route.ending(unopened, &source, &ask, machine).await),
+        };
+        let (input, output) = stdio()?;
+        match pump_stdio(Stream(opened.write), opened.read, input, output).await {
+            Err(report) if report.is::<ConnectionLost>() => Err(route.cut_or(report).await),
+            ended => ended,
+        }
     }
 }

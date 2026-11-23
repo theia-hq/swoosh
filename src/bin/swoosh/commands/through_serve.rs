@@ -41,10 +41,10 @@ use tokio::io::{self, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::commands::connect::{
-    self, ConnectionLost, Failure, MAX_PIPES, Machine, PipeFailures, Stdin, Stdout, accept_each,
-    pump_stdio,
+    self, ConnectionLost, Failure, MAX_PIPES, Machine, PipeFailures, accept_each,
 };
 use crate::commands::machine;
+use crate::commands::route::peer_error;
 
 /// Whether a run took the resident's path.
 pub enum Routed {
@@ -136,19 +136,6 @@ pub fn hints(reach: &ReachArgs) -> eyre::Result<HashMap<NodeId, Hints>> {
 #[error("--peer or SWOOSH_PEER gives an address no machine can be reached at")]
 pub struct UnusableHint;
 
-/// Run `dial` as a `forward <machine> <service> -` through the `serve` at `home`'s control socket when
-/// one answers.
-///
-/// # Errors
-///
-/// The control socket cannot be trusted; never an own bind then.
-pub async fn forward(home: &swoosh::home::Home, dial: Dial<'_>) -> eyre::Result<Routed> {
-    let Some((socket, connected)) = serve(home).await? else {
-        return Ok(Routed::OwnBind);
-    };
-    Ok(Routed::Ran(dial.forward(&socket, connected).await))
-}
-
 /// Run `dial` as a `forward <machine> <service> <port>` through the `serve` at `home`'s control socket
 /// when one answers.
 ///
@@ -173,17 +160,6 @@ pub async fn forward_port(
 pub type Stream = Opened<OpenWrite, OpenRead>;
 
 impl Dial<'_> {
-    async fn forward(self, socket: &UidSocket, connected: Connected) -> eyre::Result<()> {
-        // Main: an ordinary pipe. Bulk is a fan-out's lane, Isolated a measurement's.
-        let stream = self
-            .open(socket, connected, OpenLane::Main, Observation::Unobserved)
-            .await?;
-        match pump_stdio(stream.write, stream.read, Stdin::open()?, Stdout::default()).await {
-            Err(report) if report.is::<ConnectionLost>() => Err(self.cut(socket).await),
-            ended => ended,
-        }
-    }
-
     /// Open the verb's one stream through `serve` on `connected`, on `lane`, asking for a reference to
     /// its connection when `observation` says so. Every outcome that is not a stream is the line the
     /// verb prints for it.
@@ -275,9 +251,10 @@ impl Dial<'_> {
                 tracing::debug!(%error, "an open through serve failed before its reply");
                 Unattached::Failed(self.cut(socket).await)
             }
-            // The own bind's outcomes, which an Open through `serve` never gives.
-            Unopened::Own(error) => Unattached::Failed(error.into()),
-            Unopened::Home(report) => Unattached::Failed(report),
+            // The own bind's outcomes, which an Open through `serve` never gives. Escaped all the same:
+            // their chains can carry the peer's text, and the types do not tie a route to its source.
+            Unopened::Own(error) => Unattached::Failed(escaped_report(error.into())),
+            Unopened::Home(report) => Unattached::Failed(peer_error(report.as_ref())),
         }
     }
 

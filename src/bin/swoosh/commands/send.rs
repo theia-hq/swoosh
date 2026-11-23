@@ -26,8 +26,7 @@ use swoosh::escape::{Escaped, EscapedPath};
 use swoosh::learn::Admitted;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::Hints;
-use swoosh::reach;
-use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
+use swoosh::serve::control_codec::OpenLane;
 use swoosh::streams::{Ask, OwnBind, Resident, StreamSource, Tracked, Unopened};
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
@@ -248,7 +247,7 @@ impl SendCmd {
                 // in flight are dropped.
                 Err((_, Unsent::Unopened(unopened))) if first.ends(&unopened) => {
                     drop(sending);
-                    let line = self.ended(unopened, source, route, machine, ask).await;
+                    let line = route.ending(unopened, &source, &ask, machine).await;
                     // The file that met it is unsent, so files remain: after a `sent` line, a bare rerun
                     // would send that file again.
                     return Err(match line.downcast::<ServeStopped>() {
@@ -281,26 +280,6 @@ impl SendCmd {
             eyre::bail!("{failures} item(s) could not be sent");
         }
         Ok(())
-    }
-
-    /// The line a run ends with for `unopened`, which every later stream would repeat. A machine's
-    /// `NotAdmitted` asks it why first, through the same `source`.
-    async fn ended(
-        &self,
-        unopened: Unopened,
-        source: impl StreamSource,
-        route: &Route<'_>,
-        machine: &Machine,
-        ask: Ask,
-    ) -> eyre::Report {
-        match unopened {
-            Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted)) => {
-                let diagnosis =
-                    reach::diagnose_through(&source, machine, &self.service, ask.slip).await;
-                machine::refused(machine, &self.service, diagnosis)
-            }
-            other => route.line(other, machine).await,
-        }
     }
 }
 

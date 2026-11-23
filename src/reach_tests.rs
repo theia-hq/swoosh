@@ -188,7 +188,8 @@ async fn diagnosed_with(
 ) -> (Option<Diagnosis>, ScriptedPeer) {
     let peer = ScriptedPeer::new(nas(), script);
     let ssh = "ssh".parse::<Service>().expect("a service");
-    let found = diagnose(&peer, &yours(), &ssh, slots.0, slots.1).await;
+    let node = Node::new(peer.clone(), bifrost::NoDiscovery);
+    let found = diagnose_over(&node, &yours(), &ssh, slots.0, slots.1).await;
     (found, peer)
 }
 
@@ -269,7 +270,6 @@ async fn only_your_devices_are_asked_why() {
         .expect("one machine");
     assert_eq!(key.kind(), crate::peer::Kind::Key);
     let peer = ScriptedPeer::new(nas(), [Script::Lists(vec![])]);
-    assert_eq!(diagnose(&peer, &key, &ssh, None, None).await, None);
     let node = Node::new(peer.clone(), bifrost::NoDiscovery);
     assert_eq!(diagnose_over(&node, &key, &ssh, None, None).await, None);
     assert!(peer.requests().is_empty(), "nothing was asked");

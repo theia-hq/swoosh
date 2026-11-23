@@ -969,6 +969,22 @@ async fn isolated_opens_a_connection_it_never_stores() {
     assert_eq!(*probe.state.closed.borrow(), vec![1, 2]);
 }
 
+/// A half lent from an isolated connection watches that connection, which no map holds: it stays
+/// pending while the connection is up, and resolves on both halves once the transport closes it.
+#[tokio::test]
+async fn a_half_on_an_isolated_connection_sees_it_close() {
+    let probe = Probe::new([]);
+    let node = Node::new(probe.clone(), NoDiscovery);
+    let peers = Peers::new(&node);
+    let connection = Rc::new(peers.isolated(peer(), Hints::NONE).await.unwrap());
+    let (write, read) = tokio::io::duplex(1);
+    let (write, read) = connection.lend(TestWrite::from(write), read);
+    assert!(poll!(Box::pin(write.closed())).is_pending());
+    probe.state.dead.borrow_mut().push(1);
+    assert!(poll!(Box::pin(write.closed())).is_ready());
+    assert!(poll!(Box::pin(read.closed())).is_ready());
+}
+
 #[tokio::test]
 async fn isolated_opens_cap_at_four_per_peer() {
     let probe = Probe::new([]);

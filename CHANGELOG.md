@@ -35,6 +35,10 @@ All notable changes to swoosh, newest first.
   exit 1; `send` stops there instead of skipping each file, and a `forward <port>` or `proxy` connection that fails later
   keeps its warning. Through `serve`, `ping`, `speed`, `status` and `send` also warn when this machine's standing
   is about to expire, as they do without it.
+- **`forward <machine> <service> -` runs through `swoosh serve` like `forward <port>`.** It warns when this machine's
+  standing is about to expire, as the other commands do, and a refusal prints the same line with or without `serve`.
+  A machine that hangs up on it prints `stream: early eof`, where it printed `early eof`. Without `serve`, it can end
+  with `the machine did not answer the request to open a stream in time`.
 - **`send` ends on a socket to `swoosh serve` that cannot be trusted.** It prints one line,
   `error: refusing to trust the control path <path>: not this user's 0700 runtime dir/socket`, and exits 1, where it
   printed a `skip` line per remaining file.

@@ -39,6 +39,8 @@ holds it. Any other end prints `error: connection lost` and exits 1; stdout keep
 finishes first, a terminal stdin ends the upload. A file or pipe on stdin is sent in full, and `forward` exits 0
 once the other machine holds it. There is no time limit; if the other machine stops answering, the connection
 ends after about 30 seconds.
+A `forward -` the machine refuses ends with one line, the same with or without `swoosh serve`: `error: stream refused: <why>`,
+or `error: me/nas refused <service>` and the reason when it does not serve you that service.
 A revoke or an expiry ends the run at once with `error: connection lost`, even while stdin is idle. With
 `2>&1`, stdout and stderr share one pipe, so the reader sees the end only when `forward` exits.
 

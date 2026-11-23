@@ -4,15 +4,16 @@
 //! the body it drives. The two halves are split because the act ("dial a peer's served service,
 //! optionally presenting a cap, then drive it") is one thing while WHERE the bytes go is a choice the
 //! caller makes: `Port` binds a local port and forwards each connection, `Stdout` streams the single
-//! stream over this process's stdin/stdout, `UnixListener` is reserved. The present/badge
-//! choice lives in exactly one place (the caller picks `present` before handing off).
+//! stream over this process's stdin/stdout ([`pump_stdio`], which `forward`'s bridge drives over a stream
+//! from either path's source), `UnixListener` is reserved. The present/badge choice lives in exactly one
+//! place (the caller picks `present` before handing off).
 //!
 //! `swoosh ssh` reaches the same runner the same way, through the PUBLIC verb: its `ProxyCommand`
 //! re-invokes THIS binary as `<self> forward <peer> <service> -` via `current_exe()` (not a separate
 //! `tightbeam` binary on PATH), so the bridge an operator debugs by hand is the one ssh runs.
 //!
-//! The own bind ends when the host cuts the session (on a revoke or an expiry), whatever the local
-//! side is doing. Through `serve` the stdout sink ends the same way: [`pump_stdio`] says how, including
+//! The stdout sink ends when the connection its stream rides ends (on a revoke or an expiry), whatever
+//! the local side is doing, on both paths: [`pump_stdio`] says how, including
 //! that a stdin that is not a terminal still finishes its upload after a clean end. A port through
 //! `serve` holds no session to watch, so it ends when a pipe finds the run over (`through_serve` names
 //! the outcomes that do); by own bind a pipe's `NotAdmitted` ends it too, the one refusal every later
@@ -40,7 +41,6 @@ use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, escaped_report};
 use swoosh::peer::Machine as PeerMachine;
 use swoosh::peers::{Hints, Lane, OpenError, Peers, Presents, SessionEnd};
-use tightbeam::protocol::{Request, Response};
 use tightbeam::tunnel::DialRefused;
 use tokio::io::{self, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -91,14 +91,15 @@ impl FromStr for To {
     }
 }
 
-/// The ONE connect path, driven by `forward` directly and by `swoosh ssh` through it. Dial the resolved
-/// `machine` presenting slot 1 (the grant) and slot 2 (a membership badge for a signet-bound slip's AND),
-/// then drive the sink [`To`] names: forward a local port (proving admission, then printing swoosh's own
-/// start lines on stderr), stream stdin/stdout (no banner: ssh owns the tty), or the reserved unix
-/// listener. A refused forward surfaces the refusal here and exits non-zero, never a fake banner.
+/// `forward <port>` by own bind. Dial the resolved `machine` presenting slot 1 (the grant) and slot 2 (a
+/// membership badge for a signet-bound slip's AND), prove admission, then print swoosh's own start lines
+/// on stderr and forward each local connection. A refused forward surfaces the refusal here and exits
+/// non-zero, never a fake banner. The stdout sink is [`ForwardCmd::bridge`], on the stream source.
 ///
 /// A port's streams ride the machine's held Bulk session in the run's `peers`, presenting `presents`,
 /// the same two slots as the owner keys them.
+///
+/// [`ForwardCmd::bridge`]: crate::commands::forward::ForwardCmd::bridge
 #[expect(
     clippy::too_many_arguments,
     reason = "the uniform reach context, unpacked"
@@ -112,7 +113,7 @@ pub async fn connect<'n, T: Transport, D: Discovery>(
     slot1: Option<Link>,
     slot2: Option<Link>,
     presents: Presents,
-    to: To,
+    port: u16,
 ) -> eyre::Result<()> {
     let refused = Refused {
         machine,
@@ -120,50 +121,16 @@ pub async fn connect<'n, T: Transport, D: Discovery>(
         slot1: &slot1,
         slot2: &slot2,
     };
-    match to {
-        To::Port(port) => {
-            let pipes = OwnPipes {
-                node,
-                peers,
-                refused: &refused,
-                presents,
-            };
-            pipes
-                .forward_port(&Machine::of(contacts, machine.key()), port)
-                .await
-                .map_err(escaped)
-        }
-        To::Stdout => {
-            // The opening frame the stream sends.
-            let request = Request {
-                service: service.to_string(),
-                capability: slot1.as_ref().map(ToString::to_string),
-                membership: slot2.as_ref().map(ToString::to_string),
-            };
-            pipe_stdio(node, &refused, &request).await.map_err(escaped)
-        }
-        // The path is not echoed: a typed path would read as a missing socket, not a missing feature.
-        To::UnixListener(_) => {
-            eyre::bail!("a unix:<path> local end is not built yet: use a port, or - for stdout")
-        }
-    }
-}
-
-/// Open one stream on `session` and ask the host for the service: the admitted halves, or the host's
-/// refusal.
-///
-/// Every failure comes back as its own error, unwrapped, so a printed line names what failed (`early eof`)
-/// and reads the same on both sinks.
-async fn admitted<S: Session>(
-    session: &S,
-    request: &Request,
-) -> eyre::Result<Result<(S::Write, S::Read), Refusal>> {
-    let (mut writer, mut reader) = session.open_bi().await?;
-    request.write(&mut writer).await?;
-    Ok(match Response::read(&mut reader).await? {
-        Response::Ok => Ok((writer, reader)),
-        Response::Refused(refusal) => Err(refusal),
-    })
+    let pipes = OwnPipes {
+        node,
+        peers,
+        refused: &refused,
+        presents,
+    };
+    pipes
+        .forward_port(&Machine::of(contacts, machine.key()), port)
+        .await
+        .map_err(escaped)
 }
 
 /// `error` with any peer text in its chain escaped, except the dial refusal, which carries none and whose
@@ -186,29 +153,6 @@ struct Refused<'a> {
 }
 
 impl Refused<'_> {
-    /// The error a refusal on `session` ends the run with: a `NotAdmitted` is the dial refusal, after one
-    /// of your devices is asked why on the same session; any other refusal keeps the host's own reason.
-    async fn on<S: Session>(&self, session: &S, refusal: Refusal) -> eyre::Report {
-        match refusal {
-            Refusal::NotAdmitted => {
-                let diagnosis = swoosh::reach::diagnose(
-                    session,
-                    self.machine,
-                    self.service,
-                    Option::clone(self.slot1),
-                    Option::clone(self.slot2),
-                )
-                .await;
-                machine::refused(self.machine, self.service, diagnosis)
-            }
-            refusal => DialRefused {
-                dial: self.machine.key(),
-                refusal,
-            }
-            .into(),
-        }
-    }
-
     /// The error a `NotAdmitted` from a held session ends the run with: the dial refusal, after one of
     /// your devices is asked why over a connection of its own on `node`, once per run, after its loop.
     async fn over<T: Transport, D: Discovery>(&self, node: &Node<T, D>) -> eyre::Report {
@@ -592,37 +536,6 @@ impl core::fmt::Display for Failure {
     }
 }
 
-/// Reach the service over one stream and pipe it against this process's stdin and stdout: the bridge
-/// `swoosh ssh` runs as its `ProxyCommand`.
-///
-/// When the stream from the host fails or the session closes (the host cut it on a revoke or an
-/// expiry), the run is over, whatever stdin is doing; how a clean end ends the run is
-/// [`pump_stdio`]'s. stdin is read on its own thread (see [`stdin_chunks`]), so nothing waits on a
-/// read that, at a terminal or under ssh, only returns when the person types again.
-async fn pipe_stdio<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
-    refused: &Refused<'_>,
-    request: &Request,
-) -> eyre::Result<()> {
-    // Held for the whole pump: the stream rides this session, which closes when it drops.
-    let session = node.connect(refused.machine.key()).await?;
-    let (writer, reader) = match admitted(&session, request).await? {
-        Ok(halves) => halves,
-        Err(Refusal::NotAdmitted) => return Err(refused.on(&session, Refusal::NotAdmitted).await),
-        Err(refusal) => return Err(bifrost::Error::Refused(refusal).into()),
-    };
-    pump_stdio(
-        Stream(writer),
-        OwnRead {
-            half: reader,
-            session: &session,
-        },
-        Stdin::open()?,
-        Stdout::default(),
-    )
-    .await
-}
-
 /// Endpoint provenance, not session closure, identifies a failed remote stream: its error can arrive
 /// before the session's close signal. Local stdin/stdout failures stay local even after a host cut.
 ///
@@ -821,6 +734,12 @@ impl Stdin {
     }
 }
 
+/// This process's stdin and stdout, for a bridge to open once its stream is admitted: a refused one
+/// never starts the thread that reads stdin.
+pub(crate) fn stdio() -> eyre::Result<(Stdin, Stdout)> {
+    Ok((Stdin::open()?, Stdout::default()))
+}
+
 /// Whether a person types stdin, which decides the upload when the download ends first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StdinKind {
@@ -935,32 +854,15 @@ impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for Stream<W> {
     }
 }
 
-/// The own bind's download half, with the session it rides: the session closing is the connection
-/// ending, which a read half that has already reached its end can no longer report.
-pub(crate) struct OwnRead<'s, S: Session> {
-    pub(crate) half: S::Read,
-    pub(crate) session: &'s S,
-}
-
-impl<S: Session> Download for OwnRead<'_, S> {
-    /// The word that the upload landed comes on the upload half, so this only fails, once the session
-    /// closes: the host cut it (on a revoke or an expiry), or the path to it failed.
+// The word that the upload landed comes on the upload half, so this only fails, once the connection
+// the half rides closes: the host cut it (on a revoke or an expiry), or the path to it failed.
+impl<R: io::AsyncRead + Unpin, S: Session> Download for swoosh::peers::Half<R, S> {
     async fn landed(&mut self) -> io::Result<()> {
-        self.session.wait_closed().await;
+        self.closed().await;
         Err(io::Error::new(
             io::ErrorKind::ConnectionAborted,
             "session closed",
         ))
-    }
-}
-
-impl<S: Session> io::AsyncRead for OwnRead<'_, S> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.half).poll_read(cx, buf)
     }
 }
 
@@ -1628,13 +1530,18 @@ mod tests {
         }
     }
 
-    /// Reach a peer whose gate refuses with [`HOSTILE`], sinking the bytes into `to`.
-    async fn refused(to: To) -> eyre::Report {
-        failed(HostilePeer::RefusesAtTheGate(HOSTILE), to).await
+    /// Reach a peer whose gate refuses with [`HOSTILE`], forwarding a port, or bridging stdout when
+    /// `port` is `None`.
+    async fn refused(port: Option<u16>) -> eyre::Report {
+        failed(HostilePeer::RefusesAtTheGate(HOSTILE), port).await
     }
 
-    /// Reach `host`, sinking the bytes into `to`, and return the error the reach fails with.
-    async fn failed(host: HostilePeer, to: To) -> eyre::Report {
+    /// Reach `host`, forwarding a port, or bridging stdout when `port` is `None`, and return the error
+    /// the reach fails with.
+    async fn failed(host: HostilePeer, port: Option<u16>) -> eyre::Report {
+        let Some(port) = port else {
+            return bridged(host).await;
+        };
         let node = bifrost::Node::new(host, bifrost::NoDiscovery);
         let machine = HostilePeer::node_id()
             .to_string()
@@ -1652,7 +1559,50 @@ mod tests {
             None,
             None,
             swoosh::peers::Presents::Standing(None),
-            to,
+            port,
+        )
+        .await
+        .expect_err("a refused reach is an error")
+    }
+
+    /// `forward <host> db -` by own bind, from a home holding nothing: the error its bridge fails with,
+    /// before stdin is opened.
+    async fn bridged(host: HostilePeer) -> eyre::Report {
+        use clap::Parser as _;
+
+        let node = bifrost::Node::new(host, bifrost::NoDiscovery);
+        let peers = swoosh::peers::Peers::new(&node);
+        let key = HostilePeer::node_id().to_string();
+        let Some(crate::Command::Forward(cmd)) =
+            crate::Cli::try_parse_from(["swoosh", "forward", key.as_str(), "db", "-"])
+                .expect("a bridge parses")
+                .command
+        else {
+            panic!("a bridge is a `forward`");
+        };
+        let machine = cmd
+            .peer
+            .machine(&Contacts::default())
+            .expect("a key is one machine");
+        let home = crate::commands::through_serve::tests::empty_home("hostile-bridge");
+        let bound = swoosh::transport::Bound {
+            local: false,
+            reach: swoosh::transport::Reach::default(),
+        };
+        let route = crate::commands::route::Route::Own {
+            peer: &cmd.peer,
+            bound: &bound,
+            this: node.node_id(),
+        };
+        let credential = swoosh::credential::Credential::dialing(&cmd.peer, "db");
+        let source = swoosh::streams::OwnBind::new(&peers, &home, node.node_id(), &credential);
+        cmd.bridge(
+            source,
+            &route,
+            &machine,
+            || -> eyre::Result<(super::Stdin, io::Sink)> {
+                panic!("stdin is opened only once the stream is admitted")
+            },
         )
         .await
         .expect_err("a refused reach is an error")
@@ -1662,7 +1612,7 @@ mod tests {
     // line, so it cannot erase the error and draw a `forwarding` line in its place.
     #[tokio::test]
     async fn a_hostile_forward_refusal_prints_escaped() {
-        let error = refused(To::Port(1)).await;
+        let error = refused(Some(1)).await;
         assert_eq!(
             format!("{error:#}"),
             format!(
@@ -1676,20 +1626,20 @@ mod tests {
     // same way.
     #[tokio::test]
     async fn a_hostile_stdio_refusal_prints_escaped() {
-        let error = refused(To::Stdout).await;
+        let error = refused(None).await;
         assert_eq!(
             format!("{error:#}"),
             format!("stream refused: unavailable: {ESCAPED}")
         );
     }
 
-    // A host that ends the stream before it answers (it died mid-dial) prints the exchange's own cause,
-    // with no word in front of it, and the same line on both sinks.
+    // A host that ends the stream before it answers (it died mid-dial) prints the exchange's own cause:
+    // bare on a port, and on the bridge as a stream broken while it opened, as through `serve`.
     #[tokio::test]
-    async fn a_host_that_hangs_up_before_answering_prints_the_bare_cause() {
-        for to in [To::Port(1), To::Stdout] {
-            let error = failed(HostilePeer::HangsUp, To::clone(&to)).await;
-            assert_eq!(format!("{error:#}"), "early eof", "reaching to {to:?}");
+    async fn a_host_that_hangs_up_before_answering_prints_the_cause_per_sink() {
+        for (port, line) in [(Some(1), "early eof"), (None, "stream: early eof")] {
+            let error = failed(HostilePeer::HangsUp, port).await;
+            assert_eq!(format!("{error:#}"), line, "reaching to {port:?}");
         }
     }
 
@@ -1749,7 +1699,7 @@ mod tests {
             None,
             None,
             swoosh::peers::Presents::Standing(None),
-            To::Port(1),
+            1,
         )
         .await
         .expect_err("a refused forward is an error");
@@ -2511,14 +2461,38 @@ mod tests {
         assert_eq!(&got, b"up");
     }
 
-    /// The own bind's download half over `reader`, watching `session`.
-    fn own_read(
-        reader: bifrost_mem::MemRead,
-        session: &bifrost_mem::MemSession,
-    ) -> super::OwnRead<'_, bifrost_mem::MemSession> {
-        super::OwnRead {
+    /// The own bind's download half over `reader`, watching `session`, as a `Half` the run's `Peers`
+    /// hands out watches the connection it rides.
+    fn own_read(reader: bifrost_mem::MemRead, session: &bifrost_mem::MemSession) -> OwnRead<'_> {
+        OwnRead {
             half: reader,
             session,
+        }
+    }
+
+    /// A mem session's download half, with the session it rides.
+    struct OwnRead<'s> {
+        half: bifrost_mem::MemRead,
+        session: &'s bifrost_mem::MemSession,
+    }
+
+    impl super::Download for OwnRead<'_> {
+        async fn landed(&mut self) -> io::Result<()> {
+            self.session.wait_closed().await;
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "session closed",
+            ))
+        }
+    }
+
+    impl io::AsyncRead for OwnRead<'_> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.half).poll_read(cx, buf)
         }
     }
 

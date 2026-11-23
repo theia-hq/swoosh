@@ -427,7 +427,7 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                     let info = entry.session.conn_info();
                     // The reservation transfers to the pair, not to either half alone.
                     let lease = Rc::new(Lease::Lane {
-                        _active: active,
+                        active,
                         _budget: budget,
                     });
                     return Ok((
@@ -435,11 +435,11 @@ impl<'n, T: Transport, D: Discovery> Peers<'n, T, D> {
                         SessionEnd(Rc::clone(&entry)),
                         Half {
                             inner: writer,
-                            _lease: Rc::clone(&lease),
+                            lease: Rc::clone(&lease),
                         },
                         Half {
                             inner: reader,
-                            _lease: lease,
+                            lease,
                         },
                     ));
                 }
@@ -779,8 +779,8 @@ impl Drop for Budget {
 /// What a stream's two halves hold between them, given back once both have dropped: its place on a held
 /// lane and its session's activity, or the isolated connection it rides, which closes then.
 enum Lease<S: Session> {
-    Lane { _active: Active<S>, _budget: Budget },
-    Isolated { _connection: Rc<Isolated<S>> },
+    Lane { active: Active<S>, _budget: Budget },
+    Isolated { connection: Rc<Isolated<S>> },
 }
 
 struct Active<S: Session> {
@@ -908,19 +908,27 @@ impl<S: Session> Clone for SessionEnd<S> {
 /// its isolated connection, is held until both have dropped.
 pub struct Half<H, S: Session> {
     inner: H,
-    _lease: Rc<Lease<S>>,
+    lease: Rc<Lease<S>>,
 }
 
 impl<H, S: Session> Half<H, S> {
     /// The transport's half, and what it held: the place stays taken, and the connection open, until
     /// the [`Held`] and every other half sharing it have dropped.
     pub(crate) fn split(self) -> (H, Held<S>) {
-        (
-            self.inner,
-            Held {
-                _lease: self._lease,
-            },
-        )
+        (self.inner, Held { _lease: self.lease })
+    }
+
+    /// Resolve once the connection this half rides has closed: the held session's, or the isolated
+    /// connection's. The host ended it, or the path to it failed.
+    ///
+    /// The half answers this itself because its lease holds what it rides: a half that has read to its
+    /// end can no longer say the connection went, and a caller holding the session beside it would only
+    /// be repeating what the lease already knows.
+    pub async fn closed(&self) {
+        match &*self.lease {
+            Lease::Lane { active, .. } => active.entry.session.wait_closed().await,
+            Lease::Isolated { connection } => connection.session.wait_closed().await,
+        }
     }
 }
 
@@ -988,16 +996,13 @@ impl<S: Session> Isolated<S> {
         write: S::Write,
         read: S::Read,
     ) -> (Half<S::Write, S>, Half<S::Read, S>) {
-        let lease = Rc::new(Lease::Isolated { _connection: self });
+        let lease = Rc::new(Lease::Isolated { connection: self });
         (
             Half {
                 inner: write,
-                _lease: Rc::clone(&lease),
+                lease: Rc::clone(&lease),
             },
-            Half {
-                inner: read,
-                _lease: lease,
-            },
+            Half { inner: read, lease },
         )
     }
 }

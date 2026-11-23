@@ -29,9 +29,9 @@ use crate::commands::through_serve::tests::{
 /// A source whose every open meets what `meets` gives, or never answers when it gives nothing, noting
 /// each open's service.
 #[derive(Clone, Copy)]
-struct Meets<'a> {
-    meets: fn() -> Option<Unopened>,
-    opened: &'a RefCell<Vec<String>>,
+pub(crate) struct Meets<'a> {
+    pub(crate) meets: fn() -> Option<Unopened>,
+    pub(crate) opened: &'a RefCell<Vec<String>>,
 }
 
 impl StreamSource for Meets<'_> {
@@ -63,7 +63,7 @@ impl Observing for Meets<'_> {
 
 /// The run's bind as the own bind's lines read it: the default reach, so an unreachable machine's line
 /// carries no hint.
-fn bound() -> swoosh::transport::Bound {
+pub(crate) fn bound() -> swoosh::transport::Bound {
     swoosh::transport::Bound {
         local: false,
         reach: swoosh::transport::Reach::default(),
@@ -394,7 +394,7 @@ async fn by_own_bind(argv: &[&str], peer: &ScriptedPeer, tag: &str) -> Ran {
 }
 
 /// The services `peer`'s gate was asked, in order.
-fn asked(peer: &ScriptedPeer) -> Vec<String> {
+pub(crate) fn asked(peer: &ScriptedPeer) -> Vec<String> {
     peer.requests()
         .into_iter()
         .map(|request| request.service)
@@ -461,7 +461,7 @@ async fn ping_and_status_own_bind_ride_main() {
 }
 
 /// A home whose standing is a device badge for the machine `this`: the home, and the badge.
-fn device_home(tag: &str, this: bifrost::NodeId) -> (swoosh::home::Home, nauthy::Link) {
+pub(crate) fn device_home(tag: &str, this: bifrost::NodeId) -> (swoosh::home::Home, nauthy::Link) {
     let dir =
         std::env::temp_dir().join(format!("swoosh-probe-device-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

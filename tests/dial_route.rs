@@ -105,6 +105,8 @@ struct Seen {
     connects: AtomicUsize,
     /// The services of the Opens it heard, in order.
     opens: Mutex<Vec<String>>,
+    /// The addresses each Open carried, in order.
+    hints: Mutex<Vec<Vec<core::net::SocketAddr>>>,
 }
 
 /// A resident on `home`'s control socket, `serve.lock` held and the socket bound before it returns: it
@@ -150,6 +152,10 @@ async fn resident(
                 }
                 Ok(Request::Open(open)) => {
                     seen.opens.lock().unwrap().push(open.service().to_string());
+                    seen.hints
+                        .lock()
+                        .unwrap()
+                        .push(open.hints().as_slice().to_vec());
                     let _ = Response::OpenRefusal(OpenRefusal::Busy)
                         .write(&mut conn)
                         .await;
@@ -219,13 +225,14 @@ async fn swoosh(home: &Home, argv: &[&str]) -> (Option<i32>, String) {
     (status, reader.join().unwrap())
 }
 
-/// The dialing verbs, each to `me/nas`.
-fn the_four(file: &str) -> [Vec<&str>; 4] {
+/// The dialing verbs, each to `me/nas`: the bridge among them.
+fn dialing(file: &str) -> [Vec<&str>; 5] {
     [
         vec!["ping", "me/nas", "-c", "1"],
         vec!["speed", "me/nas", "-n", "1024"],
         vec!["status", "me/nas"],
         vec!["send", file, "me/nas"],
+        vec!["forward", "me/nas", "ssh", "-"],
     ]
 }
 
@@ -241,7 +248,8 @@ async fn crowded_hints_refuse_a_dialing_verb_first() {
     for serving in [true, false] {
         let home = device(&format!("crowded-{serving}"), 60).await;
         let file = a_file(&home);
-        for verb in the_four(&file) {
+        let port = ["forward", "me/nas", "ssh", "5432"].to_vec();
+        for verb in dialing(&file).into_iter().chain([port]) {
             let mut argv = verb.clone();
             for hint in &crowded {
                 argv.extend(["--peer", hint.as_str()]);
@@ -270,6 +278,24 @@ async fn crowded_hints_refuse_a_dialing_verb_first() {
     }
 }
 
+/// Through `serve`, the bridge's Open carries the `--peer` addresses typed for its machine, which the
+/// `ProxyCommand` line `swoosh ssh` writes passes on.
+#[tokio::test]
+async fn the_bridge_carries_its_peer_hints_through_serve() {
+    let hint = format!("{}=127.0.0.1:4000", TestNode::seeded(NAS).node_id());
+    let home = device("bridge-hints", 60).await;
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    let (status, stderr) = swoosh(&home, &["forward", "me/nas", "ssh", "-", "--peer", &hint]).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(1), "{stderr}");
+    let addr: core::net::SocketAddr = "127.0.0.1:4000".parse().unwrap();
+    assert_eq!(*seen.hints.lock().unwrap(), [vec![addr]], "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
 /// Through `serve`, a badge inside the warning window warns once on stderr, naming the key `serve` runs as
 /// in its remedy, with no machine key read: the key file is gone, so a read would fail the run. Outside the
 /// window there is no line. (Its order against the first Open is pinned in-process, where one log holds
@@ -285,7 +311,7 @@ async fn an_expiring_badge_warns_once_through_serve() {
         let home = device(&format!("warn-{days}"), days).await;
         std::fs::remove_file(home.key()).unwrap();
         let file = a_file(&home);
-        for argv in the_four(&file) {
+        for argv in dialing(&file) {
             let seen = Arc::new(Seen::default());
             let stop = tightbeam::tunnel::CancellationToken::new();
             let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
@@ -333,7 +359,7 @@ async fn a_reach_flag_refuses_a_dialing_verb_before_anything() {
     let warning = "swoosh: this device's membership badge expires in";
     let home = device("moot", 3).await;
     let file = a_file(&home);
-    for mut argv in the_four(&file) {
+    for mut argv in dialing(&file) {
         argv.push("--local");
         let seen = Arc::new(Seen::default());
         let stop = tightbeam::tunnel::CancellationToken::new();
