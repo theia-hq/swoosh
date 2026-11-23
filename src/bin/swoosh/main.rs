@@ -595,20 +595,8 @@ where
                 })),
             ..
         }) => Err(usage(&["stop"], stop::A_LINK_STOPS_NOTHING)),
-        Ok(cli) => crowded_hints(cli),
-        Err(error) => Err(error),
+        other => other,
     }
-}
-
-/// `cli`, or a `forward` whose `--peer` hints give one key more addresses than one dial takes, refused
-/// here whether or not `serve` runs, so nothing is read or bound first.
-fn crowded_hints(cli: Cli) -> Result<Cli, clap::Error> {
-    if let Some(Command::Forward(forward)) = &cli.command
-        && let Err(crowded) = forward.reach.reject_crowded_hints()
-    {
-        return Err(usage(&["forward"], &crowded.to_string()));
-    }
-    Ok(cli)
 }
 
 /// Whether `error`, an unexpected argument, is a link or a path typed on a `stop` line: the argument clap
@@ -998,35 +986,7 @@ async fn run() -> eyre::Result<()> {
         })
         .transpose()?;
 
-    // `forward <machine> <service> <port>` while `serve` runs here: Opens on its socket, before any key is
-    // read, so nothing is bound and no passphrase asked. An `anyone` link never rides it: it dials under a
-    // throwaway key of its own. `forward … -` takes the dialing route below.
-    if let Outward::Forward(cmd) = &reach
-        && let commands::connect::To::Port(port) = cmd.to
-        && let BindRole::Dialing(credential) = reach.bind_role()
-        && let Some(slip) = credential.through_resident()
-        && let Some(machine) = machine.as_ref()
-    {
-        let dial = commands::through_serve::Dial {
-            machine,
-            service: &cmd.service,
-            slip,
-            reach: &cmd.reach,
-            contacts: store.contacts(),
-        };
-        if let commands::through_serve::Routed::Ran(ended) =
-            commands::through_serve::forward_port(&home, dial, port).await?
-        {
-            return ended.map_err(|report| {
-                match report.downcast_ref::<commands::through_serve::ThisMachine>() {
-                    Some(this) => usage_error(&["forward"], &this.to_string()),
-                    None => report,
-                }
-            });
-        }
-    }
-
-    // `speed`, `ping`, `status <machine>`, `send` and `forward … -` while `serve` runs here: each stream,
+    // `speed`, `ping`, `status <machine>`, `send` and `forward` while `serve` runs here: each stream,
     // the stale-list exchange beside it and the root question are each one Open there.
     if let Some(dialing) = Dialing::of(&reach)
         && let BindRole::Dialing(credential) = reach.bind_role()
@@ -1231,7 +1191,7 @@ enum Dialing<'a> {
     Speed(&'a commands::speed::SpeedCmd),
     Status(&'a status::StatusCmd),
     Send(&'a commands::send::SendCmd),
-    /// `forward … -` alone: a port still takes its own route through `serve`.
+    /// `forward` to a port or stdout: a `unix:` end is refused by its own bind's run.
     Forward(&'a commands::forward::ForwardCmd),
 }
 
@@ -1243,7 +1203,12 @@ impl<'a> Dialing<'a> {
             Outward::Speed(cmd) => Some(Self::Speed(cmd)),
             Outward::Status(cmd) => Some(Self::Status(cmd)),
             Outward::Send(cmd) => Some(Self::Send(cmd)),
-            Outward::Forward(cmd) if cmd.to == commands::connect::To::Stdout => {
+            Outward::Forward(cmd)
+                if matches!(
+                    cmd.to,
+                    commands::connect::To::Stdout | commands::connect::To::Port(_)
+                ) =>
+            {
                 Some(Self::Forward(cmd))
             }
             Outward::Serve(_)
@@ -1270,9 +1235,9 @@ impl<'a> Dialing<'a> {
     }
 
     /// Whether a record of `serve` gone, met beside a run the verb ended clean, ends it with that line:
-    /// for a verb that reports, the run's result says nothing of what came after. Never for the bridge,
-    /// whose exit 0 says the far side holds every byte: a `serve` that went after a clean session is not
-    /// that session's failure.
+    /// for a verb that reports, the run's result says nothing of what came after. Never for `forward`:
+    /// the bridge's exit 0 says the far side holds every byte, so a `serve` that went after a clean
+    /// session is not that session's failure, and a listener never ends clean.
     fn reports_gone(&self) -> bool {
         match self {
             Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Send(_) => true,
@@ -1382,7 +1347,7 @@ async fn dial_through_serve<O: commands::connect::Output>(
                 .await
         }
         // Never asks a root, so the signal goes unheard.
-        Dialing::Forward(cmd) => cmd.bridge(source, route, machine, stdio).await,
+        Dialing::Forward(cmd) => cmd.forward(source, route, machine, contacts, stdio).await,
     };
     let (ended, shown) = run_verb(beside, &swoosh::sync::SourceDial::new(source, home), verb).await;
     // Told once the run is done, as by own bind: a question at the terminal can wait on the person.
@@ -1737,6 +1702,9 @@ mod iroh_group_tests;
 #[path = "learn_root_tests.rs"]
 mod learn_root_tests;
 #[cfg(test)]
+#[path = "listen_route_tests.rs"]
+mod listen_route_tests;
+#[cfg(test)]
 #[path = "machine_args_tests.rs"]
 mod machine_args_tests;
 #[cfg(test)]
@@ -1952,10 +1920,11 @@ mod tests {
         );
     }
 
-    /// More `--peer` addresses for one key than one dial takes is a usage error at parse, exit 2, naming
-    /// the key whole. Addresses count, not hints, and each key counts on its own.
+    /// More `--peer` addresses for one key than one dial takes is refused by the hints every dialing verb
+    /// reads before anything else, naming the key whole: the line the arm prints as usage, exit 2.
+    /// Addresses count, not hints, and each key counts on its own.
     #[test]
-    fn a_forward_giving_one_key_more_than_sixteen_addresses_is_a_usage_error() {
+    fn a_forward_giving_one_key_more_than_sixteen_addresses_refuses_its_hints() {
         let (crowded, other) = (
             NodeId::from_ed25519_secret(&[1u8; 32]),
             NodeId::from_ed25519_secret(&[2u8; 32]),
@@ -1976,23 +1945,22 @@ mod tests {
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
             argv.extend(extra);
-            parse_from(argv)
+            let Some(Command::Forward(cmd)) = parse_from(argv).expect("a forward parses").command
+            else {
+                panic!("a `forward`");
+            };
+            commands::through_serve::hints(&cmd.reach).map(|_| ())
         };
         assert!(forward(hints(crowded, 16)).is_ok(), "sixteen is the bound");
         let mut apart = hints(crowded, 16);
         apart.extend(hints(other, 16));
         assert!(forward(apart).is_ok(), "each key counts on its own");
-        let error = forward(hints(crowded, 17))
-            .expect_err("a seventeenth address for one key refuses at parse");
-        assert_eq!(error.exit_code(), 2, "a usage error exits 2");
-        let printed = error.to_string();
-        assert!(
-            printed.starts_with(&format!(
-                "error: --peer or SWOOSH_PEER gives more than 16 addresses for {crowded}\n"
-            )),
-            "{printed}"
+        let error =
+            forward(hints(crowded, 17)).expect_err("a seventeenth address for one key refuses");
+        assert_eq!(
+            error.to_string(),
+            format!("--peer or SWOOSH_PEER gives more than 16 addresses for {crowded}")
         );
-        assert!(printed.contains("Usage: swoosh forward"), "{printed}");
     }
 
     /// The `swoosh ssh` ProxyCommand ABI, which is the PUBLIC `forward` verb: ssh re-invokes

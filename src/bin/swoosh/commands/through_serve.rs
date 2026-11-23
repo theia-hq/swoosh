@@ -1,27 +1,22 @@
-//! Verbs that dial through a running `swoosh serve` rather than binding this home's key:
-//! `forward <machine> <service> -`, `forward <machine> <service> <port>` and `proxy`, and `speed`, `ping`
-//! and `status <machine>`, which also follow their connection's path there.
+//! Verbs that dial through a running `swoosh serve` rather than binding this home's key: `forward` and
+//! `proxy`, and `speed`, `ping` and `status <machine>`, which also follow their connection's path there.
 //!
 //! When `serve` answers on this home's control socket, the verb's stream is one Open there: this
 //! process binds nothing, reads no key and asks no passphrase, and the resident presents this home's
 //! standing (or the link typed as the machine). When no `serve` runs, the verb binds its own as before.
 //! Once `serve` has answered, a failure is reported, never retried by an own bind.
 //!
-//! A listener (`forward <port>`, `proxy`) makes one Open per local connection, each on a control
-//! connection of its own, all on Bulk and none observed: it prints no path, so nothing would read a
-//! reference, and holding one per pipe for hours would keep a reach slot and the control pool busy for
-//! no reader. A pipe's outcome that every later Open would repeat ends the run with its line: `serve`
-//! gone, under the pipe or at its Open (its lock free, or a `serve` of another version answering), the
-//! machine's `NotAdmitted`, an ended standing, or the machine being this one. Any other (`Busy`, the
-//! machine unavailable or unreachable, a stream broken as it opened) ends that pipe alone: it goes to the
-//! log, and the first of a run of them to a [`PipeFailures`] warning, as by own bind. A pipe that attached
-//! is carried, whatever ends it: the log alone.
-//!
-//! The lines a resident's outcome prints are the own bind's, so one line has one shape on both paths;
-//! only a busy `serve`, a `serve` that stopped under the pipe, a different `serve` version and a reach
-//! flag `serve` makes moot have lines of their own.
+//! `proxy` makes one Open per local connection, each on a control connection of its own, all on Bulk
+//! and none observed: it prints no path, so nothing would read a reference, and holding one per pipe for
+//! hours would keep a reach slot and the control pool busy for no reader. A pipe's outcome that every
+//! later Open would repeat ends the run with its line: `serve` gone, under the pipe or at its Open (its
+//! lock free, or a `serve` of another version answering), the machine's `NotAdmitted`, an ended
+//! standing, or the machine being this one. Any other (`Busy`, the machine unavailable or unreachable, a
+//! stream broken as it opened) ends that pipe alone: it goes to the log, and the first of a run of them
+//! to a [`PipeFailures`](crate::commands::connect::PipeFailures) warning, as by own bind. A pipe that
+//! attached is carried, whatever ends it: the log alone. `forward`'s port takes the dialing route, on
+//! the run's stream source.
 
-use core::ops::ControlFlow;
 use std::collections::HashMap;
 
 use bifrost::{ConnInfo, NodeId, Refusal};
@@ -37,12 +32,9 @@ use swoosh::serve::control_codec::{
 };
 use swoosh::streams::{Ask, Opened, Resident, Unopened};
 use swoosh::transport::ReachArgs;
-use tokio::io::{self, AsyncWriteExt as _};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt as _;
 
-use crate::commands::connect::{
-    self, ConnectionLost, Failure, MAX_PIPES, Machine, PipeFailures, accept_each,
-};
+use crate::commands::connect::{ConnectionLost, Failure, Machine};
 use crate::commands::machine;
 use crate::commands::route::peer_error;
 
@@ -135,25 +127,6 @@ pub fn hints(reach: &ReachArgs) -> eyre::Result<HashMap<NodeId, Hints>> {
 #[derive(Debug, thiserror::Error)]
 #[error("--peer or SWOOSH_PEER gives an address no machine can be reached at")]
 pub struct UnusableHint;
-
-/// Run `dial` as a `forward <machine> <service> <port>` through the `serve` at `home`'s control socket
-/// when one answers.
-///
-/// # Errors
-///
-/// The control socket cannot be trusted; never an own bind then.
-pub async fn forward_port(
-    home: &swoosh::home::Home,
-    dial: Dial<'_>,
-    port: u16,
-) -> eyre::Result<Routed> {
-    let Some((socket, connected)) = serve(home).await? else {
-        return Ok(Routed::OwnBind);
-    };
-    Ok(Routed::Ran(
-        dial.forward_port(&socket, connected, port).await,
-    ))
-}
 
 /// A stream the resident attached: the path it rode as it attached, and its two halves as the socket
 /// gives them.
@@ -324,69 +297,6 @@ impl Dial<'_> {
         }
     }
 
-    /// `forward <port>` through `serve`: admit, bind the local port, say so as the own bind does, then
-    /// carry each local connection.
-    async fn forward_port(
-        &self,
-        socket: &UidSocket,
-        connected: Connected,
-        port: u16,
-    ) -> eyre::Result<()> {
-        self.admit(socket, connected).await?;
-        raise_open_files();
-        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-        connect::forwarding(
-            self.service,
-            &Machine::of(self.contacts, self.machine.key()),
-            port,
-        );
-        let failures = PipeFailures::new(self.machine, std::io::stderr());
-        Err(self.carry_each(socket, listener, &failures).await)
-    }
-
-    /// Carry each connection `listener` accepts over its own Open, at most [`MAX_PIPES`] at once, until
-    /// a pipe ends the run ([`Unpiped::Ends`], or `serve` gone under it): the line the run ends with.
-    pub async fn carry_each(
-        &self,
-        socket: &UidSocket,
-        listener: TcpListener,
-        failures: &PipeFailures<impl std::io::Write>,
-    ) -> eyre::Report {
-        accept_each(listener, MAX_PIPES, |tcp| self.carry(socket, tcp, failures)).await
-    }
-
-    /// Carry one local connection over its own Open, both ways. A failure that is the pipe's own goes
-    /// to `failures`, as the own bind's does, and the listener stays up.
-    async fn carry(
-        &self,
-        socket: &UidSocket,
-        tcp: TcpStream,
-        failures: &PipeFailures<impl std::io::Write>,
-    ) -> ControlFlow<eyre::Report> {
-        let stream = match self.pipe(socket).await {
-            Ok(stream) => stream,
-            Err(Unpiped::Ends(unattached)) => {
-                return ControlFlow::Break(self.unattached(unattached, socket).await);
-            }
-            Err(Unpiped::Pipe(unattached)) => {
-                let failure = unattached.failure();
-                failures.failed(failure, &self.unattached(unattached, socket).await);
-                return ControlFlow::Continue(());
-            }
-        };
-        failures.carried();
-        if let Err(error) = splice(tcp, stream).await {
-            // A pipe cut under it may be `serve` stopping: asked now, so the run ends here rather than
-            // at the next connection's Open.
-            if let Some(stopped) = self.stopped(socket).await {
-                return ControlFlow::Break(stopped);
-            }
-            // A pipe that opened is carried, whatever ends it: the log alone.
-            tracing::warn!("connection failed: {:#}", escaped_report(error));
-        }
-        ControlFlow::Continue(())
-    }
-
     /// The line the run ends with when `serve` is gone.
     pub(crate) fn serve_stopped(&self) -> eyre::Report {
         self.stopped_line().into()
@@ -460,9 +370,11 @@ impl Dial<'_> {
     }
 }
 
-/// Raise this process's open-file limit for a listener through `serve`: each pipe holds two
-/// descriptors, its local connection and its control connection, so [`MAX_PIPES`] of them pass the
-/// limit macOS starts a process with. A run that cannot raise it still listens, with fewer pipes.
+/// Raise this process's open-file limit for a listener, on both paths: through `serve` each pipe holds
+/// two descriptors, its local connection and its control connection, so a full listener of
+/// [`MAX_PIPES`](crate::commands::connect::MAX_PIPES) takes 192 of the 256 macOS starts a process with,
+/// leaving little for the run's own. It costs nothing by own bind. A run that cannot raise it still
+/// listens, with fewer pipes.
 pub fn raise_open_files() {
     if let Err(error) = swoosh::serve::raise_open_files() {
         tracing::warn!(%error, "could not raise the open-file limit");
@@ -543,23 +455,6 @@ impl Unpiped {
             Self::Pipe(unattached)
         }
     }
-}
-
-/// Carry `tcp` over `stream` both ways until both ends close. An upload that carried a byte is whole
-/// only on Landed, so the pipe waits for it, with no clock of its own: a peer that stops answering ends
-/// the stream when the transport gives up on it.
-async fn splice(mut tcp: TcpStream, stream: Stream) -> eyre::Result<()> {
-    let Stream {
-        mut read,
-        mut write,
-        ..
-    } = stream;
-    let (up, _down) =
-        io::copy_bidirectional(&mut tcp, &mut io::join(&mut read, &mut write)).await?;
-    if up > 0 {
-        read.landed().await?;
-    }
-    Ok(())
 }
 
 /// A run through `serve` that failed after its Open attached, its error already printed by [`failed`]:

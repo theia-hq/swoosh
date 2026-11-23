@@ -51,8 +51,9 @@ pub(crate) const MAIN_OPEN_TIMEOUT: Duration = Duration::from_secs(4);
 const IDLE_EVICTION: Duration = Duration::from_secs(5 * 60);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const MAIN_STREAMS: u16 = 64;
-// The most pipes one fan-out holds, so a full forward or proxy never queues inside the owner.
-const BULK_STREAMS: u16 = 128;
+/// The most Bulk streams one peer takes at once: room for a full fan-out of local connections, so one
+/// never queues inside the owner, with places left beside it.
+pub const BULK_STREAMS: u16 = 128;
 // Counts only connections whose streams are still active: one kept open after its streams ended, to
 // read its path, has given its place back (`Isolated::release_place`). Live isolated connections to one
 // peer are therefore not capped here: the resident, the one caller that releases early, bounds them by

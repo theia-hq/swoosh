@@ -12,25 +12,28 @@
 //! error that names the three ([`NO_LOCAL_END`]), found at parse, before anything is opened or bound.
 //!
 //! Drives tightbeam's tunnel wire under swoosh's OWN identity, selected here by the single [`To`]: a port
-//! through the [`connect`](crate::commands::connect::connect) runner, stdout through
-//! [`bridge`](ForwardCmd::bridge), one body on both paths. It is also what `swoosh ssh` re-invokes as its
+//! through [`listen`](ForwardCmd::listen), stdout through [`bridge`](ForwardCmd::bridge), each one body
+//! on both paths. It is also what `swoosh ssh` re-invokes as its
 //! `ProxyCommand` (`forward <peer> <service> -`), so the bridge is a verb an operator can run by hand to
 //! debug a launch that fails.
 
 use bifrost::{Discovery, Node, Transport};
 use clap::Args;
 use nauthy::Service;
+use swoosh::contacts::Contacts;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::OpenLane;
 use swoosh::streams::{Ask, OwnBind, StreamSource};
 use swoosh::transport::ReachArgs;
+use tokio::net::TcpListener;
 
 use crate::commands::connect::{
-    self, ConnectionLost, Download, Output, Stdin, Stream, To, connect, pump_stdio,
+    self, ConnectionLost, Download, Listener, Output, PipeFailures, Stdin, Stream, To, pump_stdio,
 };
 use crate::commands::machine;
 use crate::commands::route::Route;
+use crate::commands::through_serve::raise_open_files;
 
 /// A machine's served service, forwarded to the local end it names.
 #[derive(Debug, Args)]
@@ -90,10 +93,8 @@ impl swoosh::reaching::Reaching for ForwardCmd {
         ))
     }
 
-    /// Drive the local end: bind a local port and forward each connection, stream to stdout, or the
-    /// reserved unix listener, all over the overlay, to the machine resolved before the bind. A port reads
-    /// the resolved `present` and `membership` badges from `ctx`; the bridge's one stream presents what
-    /// its open reads from the home, as `send`'s streams do.
+    /// Drive the local end over the run's own bind: its streams ride the run's `peers`, each presenting
+    /// what its open reads from the home, as `send`'s streams do.
     async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
         node: &'n Node<T, D>,
@@ -107,46 +108,15 @@ impl swoosh::reaching::Reaching for ForwardCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `forward` ran without its machine resolved (root-dispatch bug)");
         };
-        let port = match self.to {
-            To::Port(port) => port,
-            To::Stdout => {
-                let route = Route::Own {
-                    peer: &self.peer,
-                    bound: ctx.bound,
-                    this: node.node_id(),
-                };
-                let credential =
-                    swoosh::credential::Credential::dialing(&self.peer, self.service.as_str());
-                let source = OwnBind::new(peers, ctx.home, node.node_id(), &credential);
-                return self.bridge(source, &route, machine, connect::stdio).await;
-            }
-            // The path is not echoed: a typed path would read as a missing socket, not a missing feature.
-            To::UnixListener(_) => {
-                eyre::bail!("a unix:<path> local end is not built yet: use a port, or - for stdout")
-            }
+        let route = Route::Own {
+            peer: &self.peer,
+            bound: ctx.bound,
+            this: node.node_id(),
         };
-        // Both slots come from the composition root's ONE resolver, like every other reaching verb: a
-        // hand-rolled slot 1 here could only re-derive what `resolve` already computed, and the hand-rolled
-        // one silently dropped slot 2 (the resolver is the only code that computes it), which is what
-        // capped this dial at bearer slips.
-        // A port's streams key their held session by what they present, read off the peer as typed.
-        let presents = swoosh::peers::Presents::resolved(
-            &self.peer,
-            Option::clone(&ctx.present),
-            Option::clone(&ctx.membership),
-        );
-        connect(
-            node,
-            peers,
-            ctx.contacts,
-            machine,
-            self.service,
-            ctx.present,
-            ctx.membership,
-            presents,
-            port,
-        )
-        .await
+        let credential = swoosh::credential::Credential::dialing(&self.peer, self.service.as_str());
+        let source = OwnBind::new(peers, ctx.home, node.node_id(), &credential);
+        self.forward(source, &route, machine, ctx.contacts, connect::stdio)
+            .await
     }
 }
 
@@ -154,7 +124,85 @@ impl swoosh::reaching::Reaching for ForwardCmd {
 /// measurement's.
 const BRIDGE_LANE: OpenLane = OpenLane::Main;
 
+/// The lane a port's streams ride: its pipes are a fan-out, so they never take the places the person's
+/// other traffic to the machine needs on Main.
+const LISTENER_LANE: OpenLane = OpenLane::Bulk;
+
 impl ForwardCmd {
+    /// Drive the local end on either path: a port through [`listen`](Self::listen), stdout through
+    /// [`bridge`](Self::bridge), with streams from `source` to `machine`, each outcome worded by `route`.
+    pub(crate) async fn forward<S, O>(
+        &self,
+        source: S,
+        route: &Route<'_>,
+        machine: &Machine,
+        contacts: &Contacts,
+        stdio: impl FnOnce() -> eyre::Result<(Stdin, O)>,
+    ) -> eyre::Result<()>
+    where
+        S: StreamSource,
+        S::Read: Download,
+        O: Output,
+    {
+        match self.to {
+            To::Port(port) => self.listen(source, route, machine, contacts, port).await,
+            To::Stdout => self.bridge(source, route, machine, stdio).await,
+            // The path is not echoed: a typed path would read as a missing socket, not a missing feature.
+            To::UnixListener(_) => {
+                eyre::bail!("a unix:<path> local end is not built yet: use a port, or - for stdout")
+            }
+        }
+    }
+
+    /// The one stream this forward asks of `machine`, on `lane`.
+    fn ask(&self, machine: &Machine, lane: OpenLane) -> Ask {
+        Ask {
+            peer: machine.key(),
+            hints: Hints::NONE,
+            service: Service::clone(&self.service),
+            lane,
+            slip: self.peer.self_present(),
+        }
+    }
+
+    /// `forward <machine> <service> <port>`, on either path: prove the gate admits the ask, bind
+    /// `127.0.0.1:<port>`, print the start lines naming `machine` as `contacts` names it, then carry
+    /// each local connection over its own stream from `source` until a pipe's open ends the run. A
+    /// refused forward exits non-zero with its line, never a start line first. stdout stays empty: the
+    /// port was typed, so the line carries nothing a script needs, and `forward`'s stdout is only ever
+    /// the stream.
+    pub(crate) async fn listen<S>(
+        &self,
+        source: S,
+        route: &Route<'_>,
+        machine: &Machine,
+        contacts: &Contacts,
+        port: u16,
+    ) -> eyre::Result<()>
+    where
+        S: StreamSource,
+        S::Read: Download,
+    {
+        let ask = self.ask(machine, LISTENER_LANE);
+        let listener = Listener {
+            source: &source,
+            ask: &ask,
+            route,
+            machine,
+        };
+        listener.admit().await?;
+        raise_open_files();
+        let local = TcpListener::bind(("127.0.0.1", port)).await?;
+        connect::forwarding(
+            &self.service,
+            &connect::Machine::of(contacts, machine.key()),
+            port,
+        );
+        Err(listener
+            .forward(local, &PipeFailures::new(machine, std::io::stderr()))
+            .await)
+    }
+
     /// `forward <machine> <service> -`, on either path: one stream from `source` to `machine`, piped
     /// against the stdin and stdout `stdio` opens once the stream is admitted, each outcome worded by
     /// `route`. A stream that gave none ends the run with [`Route::ending`]'s line, so a `NotAdmitted`
@@ -172,13 +220,7 @@ impl ForwardCmd {
         S::Read: Download,
         O: Output,
     {
-        let ask = Ask {
-            peer: machine.key(),
-            hints: Hints::NONE,
-            service: Service::clone(&self.service),
-            lane: BRIDGE_LANE,
-            slip: self.peer.self_present(),
-        };
+        let ask = self.ask(machine, BRIDGE_LANE);
         let opened = match source.open(&ask).await {
             Ok(opened) => opened,
             Err(unopened) => return Err(route.ending(unopened, &source, &ask, machine).await),
