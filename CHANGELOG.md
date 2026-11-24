@@ -22,6 +22,10 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`stop me/<name>` runs through `swoosh serve` too.** It warns when this machine's standing is about to
+  expire, and ends on the same lines as the other commands that dial: `swoosh serve` stopping, a `swoosh serve`
+  that does not answer, a dial that times out. A dial that times out now reads `could not reach me/nas: it is
+  offline or not running swoosh serve` and `Nothing was stopped.`
 - **`ping` and `status <machine>` run through `swoosh serve` too, and their lines drop `via iroh`.**
   `status` reads `me/nas, path: direct, rtt 12.031 ms`; `ping` prints the device, then a `path:` row from a
   reading taken after the run. If that fails, the path is left out, stderr says

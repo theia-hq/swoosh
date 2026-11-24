@@ -121,7 +121,8 @@ impl Unopened {
     }
 
     /// Whether the machine was not reached, on either path: the dial failed or a deadline ran out. The
-    /// own bind's `Timeout` is here because the resident folds that same event into its `Timeout`.
+    /// own bind's `Timeout` is the open's deadline on a connected session, the event the resident reports
+    /// as its `Timeout`; a dial's deadline is `Unreachable` on both paths.
     pub fn unreached(&self) -> bool {
         matches!(
             self,

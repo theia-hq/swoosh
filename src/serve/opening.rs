@@ -799,7 +799,14 @@ fn failed(error: &OpenError) -> OpenRefusal {
     tracing::debug!(%error, "an open was not attached");
     match error {
         OpenError::Busy => OpenRefusal::Busy,
-        OpenError::Timeout | OpenError::Unreachable(DialFailure::TimedOut) => OpenRefusal::Timeout,
+        // Connected, and the open's deadline passed: the request may have reached the machine.
+        OpenError::Timeout => OpenRefusal::Timeout,
+        // The dial never connected, so nothing reached the machine; its own deadline is no exception, and
+        // a client that must know whether a request left (a stop) reads it so. Its detail prints the same
+        // words `Timeout` does.
+        OpenError::Unreachable(DialFailure::TimedOut) => {
+            OpenRefusal::Unreachable(RefusalDetail::bounded(TIMED_OUT))
+        }
         OpenError::Unreachable(DialFailure::Failed(_)) => {
             OpenRefusal::Unreachable(RefusalDetail::bounded(UNREACHABLE))
         }
@@ -810,6 +817,10 @@ fn failed(error: &OpenError) -> OpenRefusal {
 
 /// The detail an Unreachable refusal carries.
 const UNREACHABLE: &str = "the machine could not be reached";
+
+/// The detail an Unreachable refusal carries for a dial that ran out its deadline: the words a `Timeout`
+/// prints, so the line a person reads is the same for both.
+const TIMED_OUT: &str = "timed out";
 
 /// The detail a Broken refusal carries.
 const BROKEN: &str = "the connection to the machine failed while opening the stream";
