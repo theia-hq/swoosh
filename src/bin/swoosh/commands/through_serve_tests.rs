@@ -4,6 +4,7 @@
 
 use core::cell::RefCell;
 use std::collections::VecDeque;
+use std::io;
 use std::rc::Rc;
 
 use bifrost::{ConnInfo, NodeId, RefusalDetail};
@@ -586,6 +587,14 @@ impl Served {
     }
 }
 
+/// The socket of the `serve` the probe found answering at `home`.
+pub(crate) async fn answering(home: &swoosh::home::Home) -> swoosh::node_client::UidSocket {
+    match super::serve(home).await.unwrap() {
+        super::Found::Answering(socket) => socket,
+        super::Found::Absent => panic!("serve answers"),
+    }
+}
+
 impl Drop for Served {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -609,7 +618,12 @@ async fn attached(
         lane: OpenLane::Main,
         ..crate::commands::connect::tests::listening(&peer)
     };
-    let (_socket, connected) = super::serve(&served.home).await.unwrap().unwrap();
+    // One connection, the Open's own: a probe first would be the connection the resident takes.
+    let connected = swoosh::node_client::UidSocket::resolve(&served.home)
+        .unwrap()
+        .connected()
+        .await
+        .unwrap();
     let resident = async {
         let (mut conn, _) = listener.accept().await.unwrap();
         Request::read(&mut conn).await.unwrap();
@@ -947,7 +961,7 @@ async fn asking_a_stalled_serve_whether_it_went_is_bounded_and_says_no() {
         service: &service,
         contacts: &contacts,
     };
-    let (socket, _connected) = super::serve(&served.home).await.unwrap().unwrap();
+    let socket = answering(&served.home).await;
     // Every connection is taken and held, and nothing is ever answered.
     tokio::spawn(async move {
         let mut held = Vec::new();
@@ -1915,4 +1929,119 @@ async fn a_stalled_serve_is_unresponsive_at_a_port_admission() {
         "error: swoosh serve on this machine did not answer\n  Restart it.\n"
     );
     assert_eq!(heard.len(), 1, "one admission Open");
+}
+
+/// The line for a `serve` that holds the lock but answers nowhere this command looked, at `at`: section 6's
+/// second form, its last line left out on macOS, where no variable sets the root.
+pub(crate) fn unreached_at(at: &std::path::Path) -> String {
+    let last = match cfg!(target_os = "macos") {
+        true => "",
+        false => "\n  Otherwise set XDG_RUNTIME_DIR to the value swoosh serve has.",
+    };
+    format!(
+        "error: swoosh serve is running for this home, but this command cannot reach it\n  Nothing \
+         answers at {}.\n  If swoosh serve has just started, run this command again.{last}\n",
+        at.display()
+    )
+}
+
+/// The line for a key replacement under way: section 6's third form.
+pub(crate) const REPLACING: &str = "error: this machine's key is being replaced\n  Run this command again when that has finished.\n";
+
+/// Every pair of what the probe showed and what `serve.lock` said gives one arm: an answer rides whatever
+/// the lock; only a free lock is no `serve`; a held one is the line for what the probe saw, and an empty
+/// record the key replacement's, whatever it saw; an unanswered probe with no lock read is never free.
+#[tokio::test]
+async fn the_probe_rule_is_one_table() {
+    use swoosh::home::{ResidentPresence as Lock, RuntimeRoot};
+
+    use super::{Found, Probed, rule};
+
+    let no_root = |why: &str| {
+        format!(
+            "error: swoosh serve is running for this home, but this command cannot reach it\n  Commands \
+             find it through XDG_RUNTIME_DIR, which {why}.\n  Set XDG_RUNTIME_DIR to the value swoosh \
+             serve has, usually /run/user/$(id -u).\n"
+        )
+    };
+    let at = std::path::PathBuf::from("/run/user/1000/swoosh/0123/control.sock");
+    let confstr = "could not resolve the per-user temp dir (confstr failed)";
+    let unanswered = || {
+        [
+            (
+                Probed::NoRoot(RuntimeRoot::Unset),
+                no_root("is not set here"),
+            ),
+            (
+                Probed::NoRoot(RuntimeRoot::Relative),
+                no_root("is not a full path here"),
+            ),
+            (
+                Probed::NoRoot(RuntimeRoot::Unresolved(confstr)),
+                format!("error: {confstr}\n"),
+            ),
+            (Probed::Nothing { at: at.clone() }, unreached_at(&at)),
+        ]
+    };
+    for (probed, _) in unanswered() {
+        assert!(matches!(rule(probed, Some(Lock::Free)), Ok(Found::Absent)));
+    }
+    for (probed, line) in unanswered() {
+        let refused = rule(probed, Some(Lock::Serving)).err().unwrap();
+        assert_eq!(printed(&refused.into()), line);
+    }
+    for (probed, line) in unanswered() {
+        let refused = rule(probed, None).err().unwrap();
+        assert_eq!(printed(&refused.into()), line, "no lock read is never free");
+    }
+    for (probed, _) in unanswered() {
+        let refused = rule(probed, Some(Lock::Replacing)).err().unwrap();
+        assert_eq!(printed(&refused.into()), REPLACING);
+    }
+    let served = Served::new("rule-answering").await;
+    for lock in [
+        None,
+        Some(Lock::Free),
+        Some(Lock::Serving),
+        Some(Lock::Replacing),
+    ] {
+        let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
+        assert!(matches!(
+            rule(Probed::Answering(socket), lock),
+            Ok(Found::Answering(_))
+        ));
+    }
+}
+
+/// A `serve.lock` that cannot be read (here a directory at its name) behind no answer is the error, never
+/// no `serve`.
+#[tokio::test]
+async fn a_lock_that_cannot_be_read_is_never_absent() {
+    let home = empty_home("lock-unreadable");
+    std::fs::create_dir_all(home.serve_lock()).unwrap();
+    let probed = super::serve(&home).await;
+    assert!(probed.is_err(), "a lock read error must not read as free");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `home.lock` held by another holder for good, beside a `serve.lock` a `serve` once left: the probe's
+/// lock read ends within its bound, an error, never no `serve`, so one stuck holder cannot wedge every
+/// command here.
+#[tokio::test]
+async fn a_home_lock_held_for_good_bounds_the_probe() {
+    let home = empty_home("lock-wedged");
+    let held = swoosh::home::HomeWrite::take(&home).await.unwrap();
+    // Free and empty, as a stopped `serve` leaves it: an absent one is free without the lock read.
+    std::fs::write(home.serve_lock(), b"").unwrap();
+    let probed = tokio::time::timeout(swoosh::node_client::STOPPED_ASK * 5, super::serve(&home))
+        .await
+        .expect("the lock read is bounded");
+    let error = probed.err().expect("a wedged lock read is an error");
+    let lock = error
+        .downcast_ref::<swoosh::home::LockError>()
+        .expect("the lock read's own error");
+    assert_eq!(lock.path, home.home_lock());
+    assert_eq!(lock.source.kind(), io::ErrorKind::TimedOut);
+    drop(held);
+    let _ = std::fs::remove_dir_all(home.dir());
 }

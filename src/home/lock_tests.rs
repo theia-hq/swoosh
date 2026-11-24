@@ -102,7 +102,7 @@ async fn within_bound<T>(mut probe: impl FnMut() -> T, busy: impl Fn(&T) -> bool
 async fn free_within_bound(guard: &HomeWrite, home: &Home) -> super::ResidentPresence {
     within_bound(
         || ServeLock::presence(guard, home).unwrap(),
-        |presence| *presence == super::ResidentPresence::Held,
+        |presence| *presence != super::ResidentPresence::Free,
     )
     .await
 }
@@ -141,11 +141,15 @@ async fn presence_uses_the_flock_without_mutating_or_retaining_it() {
         assert_eq!(std::fs::read_to_string(home.serve_lock()).unwrap(), text);
         let held = take_within_bound(&guard, &home).await.unwrap();
         // Empty/startup, PID-only and damaged records all remain held. No admitted root
-        // or valid PID is required to exclude another holder.
+        // or valid PID is required to exclude another holder; only an empty one reads as a key
+        // replacement, and a damaged one is still a `serve`, never free.
         std::fs::write(home.serve_lock(), &text).unwrap();
         assert_eq!(
             ServeLock::presence(&guard, &home).unwrap(),
-            super::ResidentPresence::Held
+            match text.is_empty() {
+                true => super::ResidentPresence::Replacing,
+                false => super::ResidentPresence::Serving,
+            }
         );
         assert_eq!(std::fs::read_to_string(home.serve_lock()).unwrap(), text);
         drop(held);
@@ -155,7 +159,7 @@ async fn presence_uses_the_flock_without_mutating_or_retaining_it() {
         .unwrap();
     assert_eq!(
         ServeLock::presence(&guard, &home).unwrap(),
-        super::ResidentPresence::Held
+        super::ResidentPresence::Serving
     );
     drop(held);
     drop(guard);
@@ -296,4 +300,60 @@ async fn a_lock_that_cannot_be_taken_names_its_reason_once() {
         )
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `serve.lock` another user owns is an error, never a `serve`: in a home others can write, a planted,
+/// held file would otherwise hold every command here off. A lone newline is a record, so a `serve`.
+#[tokio::test]
+async fn presence_refuses_a_lock_file_another_user_owns() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let (home, dir) = scratch("owner");
+    let guard = HomeWrite::take(&home).await.unwrap();
+    std::fs::write(home.serve_lock(), b"").unwrap();
+    let held = take_within_bound(&guard, &home).await.unwrap();
+    let owner = std::fs::metadata(home.serve_lock()).unwrap().uid();
+    let foreign = ServeLock::presence_as(&guard, &home, owner.wrapping_add(1)).unwrap_err();
+    assert_eq!(
+        format!("{:#}", eyre::Report::new(foreign)),
+        format!(
+            "could not lock {}: it is owned by another user",
+            crate::escape::EscapedPath(&home.serve_lock())
+        )
+    );
+    assert_eq!(
+        ServeLock::presence_as(&guard, &home, owner).unwrap(),
+        super::ResidentPresence::Replacing
+    );
+    std::fs::write(home.serve_lock(), b"\n").unwrap();
+    assert_eq!(
+        ServeLock::presence(&guard, &home).unwrap(),
+        super::ResidentPresence::Serving
+    );
+    drop(held);
+    drop(guard);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A `home.lock` another user owns is an error, never a wait: in a home others can write, its owner
+/// could hold it for good and keep every change, and every probe, here waiting. The file this user owns
+/// opens.
+#[tokio::test]
+async fn a_home_lock_another_user_owns_is_refused() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let (home, dir) = scratch("home-owner");
+    drop(HomeWrite::take(&home).await.unwrap());
+    let path = home.home_lock();
+    let owner = std::fs::metadata(&path).unwrap().uid();
+    let foreign = super::open_as(&home, &path, owner.wrapping_add(1)).unwrap_err();
+    assert_eq!(
+        format!("{:#}", eyre::Report::new(foreign)),
+        format!(
+            "could not lock {}: it is owned by another user",
+            crate::escape::EscapedPath(&path)
+        )
+    );
+    assert!(super::open_as(&home, &path, owner).is_ok());
+    std::fs::remove_dir_all(dir).unwrap();
 }

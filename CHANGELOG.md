@@ -192,6 +192,17 @@ All notable changes to swoosh, newest first.
 
 ### Fixed
 - **`share` refuses a link to a service whose saved definition is invalid.**
+- **A busy `swoosh serve` is no longer read as absent.** When `serve` holds this home but a command cannot
+  reach its socket (another `XDG_RUNTIME_DIR`, `serve` still starting, a full accept queue on macOS), the
+  command stops with `swoosh serve is running for this home, but this command cannot reach it` and the fix,
+  and no longer starts a second node beside it. A lock file that cannot be read, is another user's, or does
+  not answer in time stops it with `could not lock <home.lock>`.
+- **`revoke`, `root restore` and `join` with a reach flag refuse before the act** when `serve` holds the home
+  but cannot be reached, and print `Nothing was changed.`
+- **A root act that lands and then cannot reach `serve` says so.** `root restore` and `join` print
+  `The change is made and saved here. Your devices have not been told yet.` before the error. `revoke me/<name>`
+  prints `me/<name> is blocked on this machine, not yet on your other devices` and
+  `to finish, run it again: swoosh revoke me/<name>`.
 - **Updated SSH and filesystem dependencies** following RUSTSEC-2026-0495 and RUSTSEC-2026-0486.
 - **Updated the QUIC transport dependencies** following RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538.
 - **Local badge expiry refusal uses the effective expiry bound.** Renewal expiry checks include the endpoint. Displayed dates and renewal warnings are unchanged.

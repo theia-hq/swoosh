@@ -13,12 +13,15 @@
 //! observed ends ([`failed`], [`ended`]).
 
 use std::collections::HashMap;
+use std::io;
+use std::path::PathBuf;
 
 use bifrost::{ConnInfo, NodeId, Refusal};
 use nauthy::Service;
 use swoosh::contacts::Contacts;
-use swoosh::escape::escaped_report;
-use swoosh::node_client::{Connected, NodeClient, UidSocket};
+use swoosh::escape::{EscapedPath, escaped_report};
+use swoosh::home::{Home, LockError, ResidentPresence, RuntimeRoot};
+use swoosh::node_client::{NodeClient, STOPPED_ASK, UidSocket};
 use swoosh::observation::{Follow, Observed};
 use swoosh::peer::{Kind, Machine as PeerMachine};
 use swoosh::peers::{Hints, HintsError};
@@ -40,39 +43,111 @@ pub struct Dial<'a> {
     pub contacts: &'a Contacts,
 }
 
-/// The `serve` at `home`'s control socket, with a connection to it checked and nothing sent, or `None`
-/// when no `serve` answers here.
+/// What the control socket showed: one answering, or why none did.
+pub(crate) enum Probed {
+    /// A `serve` answered, its listener checked; the connection that showed it carried nothing and is
+    /// closed, so each Open takes one of its own.
+    Answering(UidSocket),
+    /// There is no runtime root to find a socket under.
+    NoRoot(RuntimeRoot),
+    /// Nothing answered at `at`: no leaf, no socket, or a connect refused.
+    Nothing {
+        /// The socket path the command tried.
+        at: PathBuf,
+    },
+}
+
+/// What a run may take from the probe: a `serve` to ride, or none here.
+pub(crate) enum Found {
+    /// A `serve` answers on this socket.
+    Answering(UidSocket),
+    /// No `serve` runs for this home: the run binds its own.
+    Absent,
+}
+
+/// The `serve` at `home`'s control socket, probed once, or [`Found::Absent`] only when none runs for this
+/// home: no answer is not no `serve`, since one may run under another runtime root, be still starting,
+/// or (on macOS) refuse connects while its accept queue is full. So on no answer `serve.lock` is asked,
+/// and [`rule`] reads the two.
 ///
 /// # Errors
 ///
-/// The control socket cannot be trusted; never an own bind then.
-pub async fn serve(home: &swoosh::home::Home) -> eyre::Result<Option<(UidSocket, Connected)>> {
+/// The control socket cannot be trusted, `serve.lock` could not be read within [`STOPPED_ASK`], or
+/// [`Unreached`]: never an own bind then.
+pub(crate) async fn serve(home: &Home) -> eyre::Result<Found> {
+    let probed = probe(home).await?;
+    let lock = match probed {
+        Probed::Answering(_) => None,
+        Probed::NoRoot(_) | Probed::Nothing { .. } => Some(lock(home).await?),
+    };
+    Ok(rule(probed, lock)?)
+}
+
+/// Probe `home`'s control socket once: connect, check its listener, send nothing. The runtime root is
+/// read here, so why there is none is kept rather than read as no `serve`.
+async fn probe(home: &Home) -> Result<Probed, ControlError> {
+    let at = match home.control_socket() {
+        Ok(at) => at,
+        Err(root) => return Ok(Probed::NoRoot(root)),
+    };
     let socket = match UidSocket::resolve(home) {
         Ok(socket) => socket,
-        Err(ControlError::NoResident) => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(ControlError::NoResident) => return Ok(Probed::Nothing { at }),
+        Err(error) => return Err(error),
     };
     match socket.connected().await {
-        Ok(connected) => Ok(Some((socket, connected))),
-        Err(ControlError::NoResident) => Ok(None),
-        Err(error) => Err(error.into()),
+        Ok(_probe) => Ok(Probed::Answering(socket)),
+        Err(ControlError::NoResident) => Ok(Probed::Nothing { at }),
+        Err(error) => Err(error),
+    }
+}
+
+/// What `serve.lock` says, bounded by [`STOPPED_ASK`]: the ask waits on `home.lock`, and one holder that
+/// never lets it go must not wedge every command here. Past the bound it is an error, never free.
+async fn lock(home: &Home) -> Result<ResidentPresence, LockError> {
+    match tokio::time::timeout(STOPPED_ASK, home.resident_presence()).await {
+        Ok(presence) => presence,
+        Err(_elapsed) => Err(LockError {
+            path: home.home_lock(),
+            source: io::ErrorKind::TimedOut.into(),
+        }),
+    }
+}
+
+/// The path a run takes from what the probe showed and, on no answer only, what `serve.lock` said. Only
+/// a free lock is no `serve`: a held one with no answer is [`Unreached`], and an unanswered probe with no
+/// lock read is never taken as free.
+pub(crate) fn rule(probed: Probed, lock: Option<ResidentPresence>) -> Result<Found, Unreached> {
+    match (probed, lock) {
+        (Probed::Answering(socket), _) => Ok(Found::Answering(socket)),
+        (_, Some(ResidentPresence::Free)) => Ok(Found::Absent),
+        (_, Some(ResidentPresence::Replacing)) => Err(Unreached::Replacing),
+        (Probed::NoRoot(root), _) => Err(Unreached::NoRoot(root)),
+        (Probed::Nothing { at }, _) => Err(Unreached::Nothing { at }),
     }
 }
 
 /// Refuse a reach flag `serve` makes moot before a verb's local act, when `serve` answers here: the
-/// act would land and its exchange would refuse after it. With no reach flag set the socket is not
-/// probed.
+/// act would land and its exchange would refuse after it. A `serve` that runs but cannot be reached
+/// refuses too, before the act, rather than the act landing and its exchange binding beside it. With no
+/// reach flag set the socket is not probed.
 ///
 /// # Errors
 ///
-/// The flag's line, or the control socket cannot be trusted.
-pub async fn refuse_moot(home: &swoosh::home::Home, reach: &ReachArgs) -> eyre::Result<()> {
+/// The flag's line, [`Unchanged`], or the control socket cannot be trusted.
+pub async fn refuse_moot(home: &Home, reach: &ReachArgs) -> eyre::Result<()> {
     let Some(moot) = Moot::first(reach) else {
         return Ok(());
     };
-    match serve(home).await? {
-        Some(_) => Err(moot.into()),
-        None => Ok(()),
+    match serve(home).await {
+        Ok(Found::Answering(_)) => Err(moot.into()),
+        Ok(Found::Absent) => Ok(()),
+        // A `serve` out of reach, or a lock that could not be read, stops the act before it ran; an
+        // untrusted socket keeps its own line.
+        Err(report) if report.is::<Unreached>() || report.is::<LockError>() => {
+            Err(Unchanged(report).into())
+        }
+        Err(report) => Err(report),
     }
 }
 
@@ -350,6 +425,105 @@ impl Moot {
         }
     }
 }
+
+/// `serve.lock` is held but this command cannot reach the `serve` holding it: never an own bind beside it.
+#[derive(Debug)]
+pub(crate) enum Unreached {
+    /// No runtime root here to find its socket under.
+    NoRoot(RuntimeRoot),
+    /// Nothing answers at `at`: another runtime root, no socket, a refused connect, or `serve` still
+    /// starting.
+    Nothing {
+        /// The socket path this command tried.
+        at: PathBuf,
+    },
+    /// The lock is held with nothing recorded: this machine's key is being replaced.
+    Replacing,
+}
+
+/// The head of the two lines for a `serve` that runs but cannot be reached.
+const UNREACHED: &str = "swoosh serve is running for this home, but this command cannot reach it";
+
+impl core::fmt::Display for Unreached {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoRoot(root @ (RuntimeRoot::Unset | RuntimeRoot::Relative)) => {
+                let why = match root {
+                    RuntimeRoot::Relative => "is not a full path here",
+                    _ => "is not set here",
+                };
+                write!(
+                    f,
+                    "{UNREACHED}\n  Commands find it through XDG_RUNTIME_DIR, which {why}.\n  Set \
+                     XDG_RUNTIME_DIR to the value swoosh serve has, usually /run/user/$(id -u)."
+                )
+            }
+            // macOS: the root comes from `confstr`, which no variable sets; its own line says what failed.
+            Self::NoRoot(root @ RuntimeRoot::Unresolved(_)) => root.fmt(f),
+            Self::Nothing { at } => {
+                write!(
+                    f,
+                    "{UNREACHED}\n  Nothing answers at {}.\n  If swoosh serve has just started, run this \
+                     command again.",
+                    EscapedPath(at)
+                )?;
+                // On macOS the root comes from `confstr`, not a variable a person could set.
+                match cfg!(target_os = "macos") {
+                    true => Ok(()),
+                    false => f.write_str(
+                        "\n  Otherwise set XDG_RUNTIME_DIR to the value swoosh serve has.",
+                    ),
+                }
+            }
+            Self::Replacing => f.write_str(
+                "this machine's key is being replaced\n  Run this command again when that has finished.",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for Unreached {}
+
+/// [`Unreached`], or a [`LockError`] reading `serve.lock`, met before a root act, which then never ran:
+/// the line says so after its own. The whole chain renders inside this message, so the line ends it.
+#[derive(Debug, thiserror::Error)]
+#[error("{0:#}\n  Nothing was changed.")]
+pub(crate) struct Unchanged(eyre::Report);
+
+/// A root act (`revoke`, `root restore`, `join`) that landed here, then met a `serve` it could not trust
+/// or reach before sending it anything: the composition root prints what [`Landed`] on its own lines, then
+/// the error, so the exit 1 is not read as the act failing.
+#[derive(Debug, thiserror::Error)]
+#[error("{report:#}")]
+pub(crate) struct ActLanded {
+    /// What of the act landed.
+    pub(crate) landed: Landed,
+    /// What stopped it after.
+    pub(crate) report: eyre::Report,
+}
+
+/// What a root act had landed when a `serve` stopped it, said before the error.
+#[derive(Debug)]
+pub(crate) enum Landed {
+    /// `root restore` or `join`: the whole change, saved here; [`ACT_LANDED`].
+    Saved,
+    /// `revoke me/<device>` with your root: only this machine's block, its root step not yet run. The
+    /// lines say so and name the rerun that finishes it, since "the change is made" would be false.
+    Blocked(String),
+}
+
+impl core::fmt::Display for Landed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Saved => f.write_str(ACT_LANDED),
+            Self::Blocked(lines) => f.write_str(lines),
+        }
+    }
+}
+
+/// The line a landed root act prints before the error that stopped its exchange.
+pub(crate) const ACT_LANDED: &str =
+    "The change is made and saved here. Your devices have not been told yet.";
 
 /// `serve`'s cap on the connections through it is full.
 #[derive(Debug, thiserror::Error)]

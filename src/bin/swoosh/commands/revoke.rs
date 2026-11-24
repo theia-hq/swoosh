@@ -791,6 +791,12 @@ fn ids(held: &[swoosh::roster::Id]) -> Vec<RevocationId> {
 }
 
 impl Publish {
+    /// What a run stopped after the block and before the root step says landed, on two lines: the block
+    /// alone, then the rerun that finishes the cut. A `serve` this run cannot reach stops it there.
+    pub(crate) fn landed(&self) -> String {
+        format!("{}\n{}", blocked(&self.name), rerun(&self.name))
+    }
+
     /// Present the root, revoke the device, cut, and offer the cut; then say which of your devices took it,
     /// and that the device can never come back under its key. A root step that cannot finish says the
     /// device is blocked on this machine only ([`partway`]).
@@ -837,7 +843,7 @@ impl Publish {
 /// sentence, then the cause's own line, which names its own fix. A Ctrl-C at the prompt ends by its signal,
 /// and says nothing.
 fn partway(name: &DeviceLabel, error: RootError) -> eyre::Report {
-    let blocked = format!("me/{name} is blocked on this machine, not yet on your other devices");
+    let blocked = blocked(name);
     match error {
         RootError::NoTerminalToUnlock => eyre::eyre!(
             "{blocked}; your root's passphrase needs a terminal: over swoosh ssh, add -t after --"
@@ -845,11 +851,21 @@ fn partway(name: &DeviceLabel, error: RootError) -> eyre::Report {
         // A third wrong passphrase, or a prompt that ended without one; or the home changed under the act,
         // which a rerun reads afresh.
         RootError::Prompt(_) | RootError::NotOnThisMachine | RootError::NoRootHere => {
-            eyre::eyre!("{blocked}; to finish, run it again: swoosh revoke me/{name}")
+            eyre::eyre!("{blocked}; {}", rerun(name))
         }
         // One message, two lines: a cause chained after a colon would run its sentences into this one.
         other => eyre::eyre!("{blocked}.\n{other}"),
     }
+}
+
+/// What landed when `revoke me/<name>` stops after its block and before its root step: the block alone.
+fn blocked(name: &DeviceLabel) -> String {
+    format!("me/{name} is blocked on this machine, not yet on your other devices")
+}
+
+/// The rerun that finishes `revoke me/<name>` once only its block landed.
+fn rerun(name: &DeviceLabel) -> String {
+    format!("to finish, run it again: swoosh revoke me/{name}")
 }
 
 /// `<person>`: every link given to any device of that contact, and every link bound to their root.

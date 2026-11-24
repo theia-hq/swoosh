@@ -166,7 +166,7 @@ async fn through(
     slip: Option<nauthy::Link>,
     contacts: &Contacts,
 ) -> Ran {
-    let (socket, _) = through_serve::serve(home).await.unwrap().unwrap();
+    let socket = through_serve::tests::answering(home).await;
     through_socket(cmd, Rc::new(socket), machine, slip, contacts).await
 }
 
@@ -475,7 +475,7 @@ async fn send_ends_on_a_refusal_every_file_would_repeat() {
 
     // `serve` gone before the first Open: its lock free and its socket unlinked.
     let mut served = Served::new("send-ends-gone").await;
-    let (socket, _) = through_serve::serve(&served.home).await.unwrap().unwrap();
+    let socket = through_serve::tests::answering(&served.home).await;
     drop(served.listener());
     drop(served.lock());
     let ran = through_socket(&cmd, Rc::new(socket), &peer, None, &contacts).await;
@@ -1140,7 +1140,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
         let mut served = Served::new(&format!("send-lookup-{lookups}")).await;
         let rig = Rig::default();
         let resident = scripted(&mut served, answers, &rig);
-        let (socket, _) = through_serve::serve(&served.home).await.unwrap().unwrap();
+        let socket = through_serve::tests::answering(&served.home).await;
         let socket = Rc::new(socket);
         let dial = Dial {
             machine: &peer,

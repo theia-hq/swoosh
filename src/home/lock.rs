@@ -117,12 +117,21 @@ pub struct Recorded {
     pub admit: Option<NodeId>,
 }
 
-/// Whether `serve.lock` was held when probed under `HomeWrite`. This value retains no lock and reserves
-/// no future absence.
+/// Whether `serve.lock` was held when probed under `HomeWrite`, and by what. This value retains no lock and
+/// reserves no future absence.
+///
+/// Only [`Free`](Self::Free) says no `serve` runs here, and only as far as the lock can tell: a process of
+/// this user that unlinks `serve.lock` under a running `serve` leaves that `serve` holding a file no probe
+/// opens, so this reads `Free` beside it. That is the same-user floor the control socket has too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidentPresence {
-    /// The flock is held, regardless of whether the record contains a PID or admitted root.
-    Held,
+    /// The flock is held and the record is not empty: a `serve`, since a `serve` takes the lock and
+    /// records itself under one `home.lock`. A record that does not parse is still this, never `Free`.
+    Serving,
+    /// The flock is held and the record is empty: a command replacing this machine's key, which takes
+    /// the lock and records nothing. A `serve` stopping empties its record just before it lets the lock
+    /// go, so that moment reads this too; both refuse.
+    Replacing,
     /// The lock file is absent or its flock was free at the probe. A stale recorded PID does not make
     /// it held.
     Free,
@@ -198,18 +207,48 @@ impl ServeLock {
     ///
     /// # Errors
     ///
-    /// Returns an error if opening, inspecting or probing the lock file fails. A symlink or nonregular
-    /// file is an error, not a free lock.
-    pub fn presence(_home_lock: &HomeWrite, home: &Home) -> Result<ResidentPresence, LockError> {
+    /// Returns an error if opening, inspecting, probing or reading the lock file fails. A symlink, a
+    /// nonregular file or one another user owns is an error, not a free lock.
+    pub fn presence(home_lock: &HomeWrite, home: &Home) -> Result<ResidentPresence, LockError> {
+        Self::presence_as(home_lock, home, crate::node_client::euid())
+    }
+
+    /// [`presence`](Self::presence) with the owner the lock file must have injected, so a test can pin the
+    /// owner check without a second user. A lock file another user owns is an error, never a `serve`:
+    /// in a home others can write, it would otherwise hold every command here off for good.
+    pub(crate) fn presence_as(
+        _home_lock: &HomeWrite,
+        home: &Home,
+        owner: u32,
+    ) -> Result<ResidentPresence, LockError> {
         let path = home.serve_lock();
         let Some(file) = open_existing(&path)? else {
             return Ok(ResidentPresence::Free);
         };
+        owned_by(&file, &path, owner)?;
         if try_lock(&file, libc::LOCK_SH).map_err(|source| failed(&path, source))? {
-            Ok(ResidentPresence::Free)
-        } else {
-            Ok(ResidentPresence::Held)
+            return Ok(ResidentPresence::Free);
         }
+        // Held. Read on the same fd, bounded, under `home.lock`, so a `serve` is seen with its whole
+        // record and a key replacement with none. Only a clean read of no bytes is a replacement; a read
+        // that fails is the error, and anything else read is a `serve`.
+        let mut record = Vec::new();
+        (&file)
+            .take(RECORD_CAP + 1)
+            .read_to_end(&mut record)
+            .map_err(|source| failed(&path, source))?;
+        Ok(match record.is_empty() {
+            true => ResidentPresence::Replacing,
+            false => ResidentPresence::Serving,
+        })
+    }
+
+    /// Whether `serve.lock` is absent, by a stat that takes no lock and makes nothing. The stat does not
+    /// follow a link, so a dangling one at that name is not absent and is left to the open, which refuses
+    /// it; any other failed stat is not absent either.
+    pub(crate) fn absent(home: &Home) -> bool {
+        std::fs::symlink_metadata(home.serve_lock())
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
     }
 
     /// Read the PID recorded in the selected home's `serve.lock` for connected-listener attribution.
@@ -375,8 +414,15 @@ fn open_existing(path: &Path) -> Result<Option<File>, LockError> {
 }
 
 /// Open (creating) the lock file at `path` in `home`, owner-only, never following a link at its name, and
-/// check it is a regular file.
+/// check it is a regular file this user owns.
 fn open(home: &Home, path: &Path) -> Result<File, LockError> {
+    open_as(home, path, crate::node_client::euid())
+}
+
+/// [`open`] with the owner the lock file must have injected, so a test can pin the owner check without a
+/// second user. A lock file another user owns is an error: in a home others can write, its owner could
+/// hold it for good and keep every change, and every probe, here waiting.
+fn open_as(home: &Home, path: &Path, owner: u32) -> Result<File, LockError> {
     crate::config::create_store_dir(home.dir()).map_err(|source| failed(home.dir(), source))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -391,7 +437,22 @@ fn open(home: &Home, path: &Path) -> Result<File, LockError> {
     if !meta.is_file() {
         return Err(failed(path, io::Error::other("not a regular file")));
     }
+    owned_by(&file, path, owner)?;
     Ok(file)
+}
+
+/// Refuse the open lock file at `path` unless `owner` owns it, read on its fd so no rename can swap it.
+fn owned_by(file: &File, path: &Path, owner: u32) -> Result<(), LockError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let meta = file.metadata().map_err(|source| failed(path, source))?;
+    match meta.uid() == owner {
+        true => Ok(()),
+        false => Err(failed(
+            path,
+            io::Error::other("it is owned by another user"),
+        )),
+    }
 }
 
 /// Take `operation` on `file` without waiting: `true` when taken, `false` when another holder has it.

@@ -5,7 +5,7 @@
 use swoosh::home::Home;
 use swoosh::node_client::UidSocket;
 
-use crate::commands::through_serve::{self, Moot};
+use crate::commands::through_serve::{self, ActLanded, Found, Landed, Moot};
 use crate::{Dialing, Exchanging, Run};
 
 /// What a verb's streams ride when a `serve` answers here, read from the verb before anything opens.
@@ -66,24 +66,50 @@ impl Run {
             },
         }
     }
+
+    /// What of this run's act has landed before its path is decided: `revoke`, `root restore` and `join`
+    /// make their change locally first, so nothing a bind does can delay or stop it. A `revoke` has
+    /// landed only this machine's block; its root step runs after.
+    fn landed(&self) -> Option<Landed> {
+        match self {
+            Self::Exchanges(Exchanging::Revoke(revoke)) => {
+                Some(Landed::Blocked(revoke.publish.landed()))
+            }
+            Self::Exchanges(Exchanging::RootRestore(_) | Exchanging::Join(_)) => {
+                Some(Landed::Saved)
+            }
+            Self::Serve(_)
+            | Self::Dials(_)
+            | Self::Exchanges(Exchanging::Sync(_) | Exchanging::Invite(_)) => None,
+        }
+    }
 }
 
 /// Decide `run`'s path from `home`, once. A verb that never rides binds its own with no probe. Otherwise
-/// `serve` is probed once: answering gives the riding arm, and no answer (no socket, or one no listener
-/// holds) gives [`Decision::Own`], read in one place for every riding verb.
+/// `serve` is probed once ([`through_serve::serve`]): answering gives the riding arm, and only a free
+/// `serve.lock` behind no answer gives [`Decision::Own`], read in one place for every riding verb.
 ///
 /// # Errors
 ///
-/// A control socket that cannot be trusted: never an own bind, since a bind beside a `serve` this run
-/// cannot rule out is the thing this decision exists to prevent.
+/// A control socket that cannot be trusted, a `serve` that holds the lock but cannot be reached, or a
+/// lock that could not be read: never an own bind, since a bind beside a `serve` this run cannot rule out
+/// is the thing this decision exists to prevent. For `revoke`, `root restore` and `join`, whose act has
+/// landed by now, the error is [`ActLanded`], saying what of it landed.
 pub(crate) async fn decide(run: Run, home: &Home) -> eyre::Result<Decision> {
     let slip = match run.rides() {
         Rides::Never => return Ok(Decision::Own(run)),
         Rides::Dials { slip } => slip,
         Rides::Exchanges => None,
     };
-    let Some(socket) = answering(home).await? else {
-        return Ok(Decision::Own(run));
+    let socket = match through_serve::serve(home).await {
+        Ok(Found::Answering(socket)) => socket,
+        Ok(Found::Absent) => return Ok(Decision::Own(run)),
+        Err(report) => {
+            return Err(match run.landed() {
+                Some(landed) => ActLanded { landed, report }.into(),
+                None => report,
+            });
+        }
     };
     Ok(match run {
         Run::Dials(dialing) => Decision::Dials {
@@ -95,14 +121,6 @@ pub(crate) async fn decide(run: Run, home: &Home) -> eyre::Result<Decision> {
         // Returned above, unprobed; named here so a new arm of `Run` still has to say.
         run @ Run::Serve(_) => Decision::Own(run),
     })
-}
-
-/// The socket of the `serve` answering `home`, if one does. The connection that showed it answers
-/// carries nothing and would sit idle for the run, so it closes here: each Open takes one of its own.
-async fn answering(home: &Home) -> eyre::Result<Option<UidSocket>> {
-    Ok(through_serve::serve(home)
-        .await?
-        .map(|(socket, _probe)| socket))
 }
 
 #[cfg(test)]
