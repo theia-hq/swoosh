@@ -724,6 +724,97 @@ async fn a_serve_stopped_after_a_sent_file_ends_without_resending() {
         .unwrap();
 }
 
+/// Through `serve`, `serve` stopping while a file's stream is attached ends the run on its own line, as
+/// a stop before an open does: after a `sent` line, the line says to leave the sent files out of the
+/// rerun, and no `N item(s)` line follows. Before any `sent` line, the line is `serve` stopping's own.
+#[tokio::test]
+async fn a_serve_stopped_mid_transfer_ends_without_resending() {
+    let contacts = book();
+    let peer = typed(&contacts, "me/nas");
+
+    // One window's worth answered, then `serve` attaches the last file and stops under it: that file
+    // opens only once one of the window printed `sent`.
+    let (dir, paths) = files("cut-after-sent", MAX_INFLIGHT + 1);
+    let mut argv: Vec<&str> = paths.iter().map(String::as_str).collect();
+    argv.push("me/nas");
+    let cmd = send(&argv);
+    let mut served = Served::new("send-cut-after-sent").await;
+    let rig = Rig::default();
+    let resident = scripted(
+        &mut served,
+        (0..MAX_INFLIGHT)
+            .map(|_| ack())
+            .chain([Answer::Stop])
+            .collect(),
+        &rig,
+    );
+    let ran = through(&cmd, &served.home, &peer, None, &contacts).await;
+    let _ = std::fs::remove_dir_all(dir);
+    let report = ran.ended.expect_err("the run ended non-zero");
+    assert_eq!(format!("{report:#}"), STOPPED_AFTER_SENT);
+    assert!(!report.is::<ThisMachine>(), "exit 1, not a usage error");
+    assert!(!sent_names(&ran.out).is_empty(), "{}", ran.out);
+    assert_eq!(ran.err, "", "no skip line");
+    let heard = tokio::time::timeout(ROW_BOUND, resident)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(file_opens(&heard).len(), MAX_INFLIGHT + 1);
+
+    // `serve` attaches the only file and stops under it, before any `sent`: the line is unchanged.
+    let (dir, paths) = files("cut-before-sent", 1);
+    let cmd = send(&[paths[0].as_str(), "me/nas"]);
+    let mut served = Served::new("send-cut-before-sent").await;
+    let rig = Rig::default();
+    let resident = scripted(&mut served, vec![Answer::Stop], &rig);
+    let ran = through(&cmd, &served.home, &peer, None, &contacts).await;
+    let _ = std::fs::remove_dir_all(dir);
+    let report = ran.ended.expect_err("the run ended non-zero");
+    assert_eq!(format!("{report:#}"), SERVE_STOPPED);
+    assert!(sent_names(&ran.out).is_empty(), "{}", ran.out);
+    assert_eq!(ran.err, "", "no skip line");
+    let heard = tokio::time::timeout(ROW_BOUND, resident)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(file_opens(&heard).len(), 1);
+}
+
+/// Through `serve`, a stream cut mid-transfer while `serve` still answers is that file's alone: its
+/// `skip` line names it, the other file is sent, and the run ends on the count, never a `serve` line.
+#[tokio::test]
+async fn a_cut_transfer_with_serve_answering_skips_its_file() {
+    let contacts = book();
+    let peer = typed(&contacts, "me/nas");
+    let (dir, paths) = files("cut-answering", 2);
+    let cmd = send(&[paths[0].as_str(), paths[1].as_str(), "me/nas"]);
+    let mut served = Served::new("send-cut-answering").await;
+    let rig = Rig::default();
+    // One answer is left unspent, so the resident holds its socket and lock and answers the status ask.
+    let resident = scripted(&mut served, vec![Answer::Cut, ack(), ack()], &rig);
+    let ran = through(&cmd, &served.home, &peer, None, &contacts).await;
+    rig.stop.cancel();
+    let _ = std::fs::remove_dir_all(dir);
+    assert_eq!(
+        format!(
+            "{:#}",
+            ran.ended.expect_err("a skipped file ends the run non-zero")
+        ),
+        "1 item(s) could not be sent"
+    );
+    let sent = sent_names(&ran.out);
+    assert_eq!(sent.len(), 1, "{}", ran.out);
+    let skipped = skips(&ran.err);
+    assert_eq!(skipped.len(), 1, "{}", ran.err);
+    let (name, _) = skipped[0];
+    assert!(!sent.contains(&name), "{name} was sent and skipped");
+    let heard = tokio::time::timeout(ROW_BOUND, resident)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(file_opens(&heard).len(), 2);
+}
+
 /// A machine reached once and then not is a path that dropped: the file whose open met it is skipped,
 /// by name, and the files after it still go.
 #[tokio::test]
