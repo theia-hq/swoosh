@@ -187,8 +187,9 @@ impl SendCmd {
     /// once. A file that cannot be read, or whose stream alone fails, is skipped and reported; the run
     /// ends non-zero if any was. An outcome every later stream would repeat ends the run with its one
     /// line, never a `skip` per file: for `NotAdmitted`, after asking the machine why, and for a `serve`
-    /// confirmed stalled, whose stall every file would meet. The first
-    /// admitted stream gives `admitted` its question, asked through `source`. `sent` is set at each
+    /// confirmed stalled, whose stall every file would meet. A transfer cut after its stream attached
+    /// ends the run on `serve`'s line when `serve` went under it, and is that file's skip otherwise.
+    /// The first admitted stream gives `admitted` its question, asked through `source`. `sent` is set at each
     /// `sent` line; a run that ends on `serve` stopping after one says not to send those files again.
     #[expect(
         clippy::too_many_arguments,
@@ -248,13 +249,7 @@ impl SendCmd {
                 Err((_, Unsent::Unopened(unopened))) if first.ends(&unopened) => {
                     drop(sending);
                     let line = route.ending(unopened, &source, &ask, machine).await;
-                    // The file that met it is unsent, so files remain: after a `sent` line, a bare rerun
-                    // would send that file again.
-                    return Err(match line.downcast::<ServeStopped>() {
-                        Ok(stopped) if sent.get() => stopped.after_sent().into(),
-                        Ok(stopped) => stopped.into(),
-                        Err(line) => line,
-                    });
+                    return Err(left_unsent(line, sent));
                 }
                 Err((name, Unsent::Unopened(unopened))) => {
                     let line = route.line(unopened, machine).await;
@@ -264,6 +259,17 @@ impl SendCmd {
                         return Err(line);
                     }
                     writeln!(err, "skip {}: {line:#}", Escaped(&name))?;
+                    failures += 1;
+                }
+                // `serve` going cuts every stream it carries, so the run ends with its line once; a cut
+                // it answers through is the file's own, and the run goes on. Asked before the files in
+                // flight are dropped: a live `serve` answers at once, and by own bind nothing is asked.
+                Err((name, Unsent::Cut(error))) => {
+                    if let Some(line) = route.stopped().await {
+                        drop(sending);
+                        return Err(left_unsent(line, sent));
+                    }
+                    writeln!(err, "skip {}: {error:#}", Escaped(&name))?;
                     failures += 1;
                 }
                 Err((name, Unsent::Failed(error))) => {
@@ -280,6 +286,16 @@ impl SendCmd {
             eyre::bail!("{failures} item(s) could not be sent");
         }
         Ok(())
+    }
+}
+
+/// `line`, a run's ending met by a file left unsent: `serve` stopping says, after a `sent` line, to leave
+/// the sent files out of the rerun, since a bare rerun would send them again. Any other line is unchanged.
+fn left_unsent(line: eyre::Report, sent: &Cell<bool>) -> eyre::Report {
+    match line.downcast::<ServeStopped>() {
+        Ok(stopped) if sent.get() => stopped.after_sent().into(),
+        Ok(stopped) => stopped.into(),
+        Err(line) => line,
     }
 }
 
@@ -322,10 +338,13 @@ impl<'s, S: StreamSource + Copy + 's> First<'_, 's, S> {
     }
 }
 
-/// Why one file was not sent: its stream was not opened, kept typed for the run to sort, or it failed
-/// some other way, its line.
+/// Why one file was not sent: its stream was not opened, kept typed for the run to sort; its transfer
+/// broke after the stream attached, which `serve` stopping under it does; or it failed some other way.
+/// Each failure carries its line.
 enum Unsent {
     Unopened(Unopened),
+    /// The transfer broke after the open: the run asks whether `serve` went before it skips the file.
+    Cut(eyre::Report),
     Failed(eyre::Report),
 }
 
@@ -371,7 +390,7 @@ async fn send_named<'s, S: StreamSource + Copy + 's>(
     Transfer::new(opened.write, opened.read)
         .send(name.as_bytes(), &blob, &mut source)
         .await
-        .map_err(|error| Unsent::Failed(peer_error(&error)))?;
+        .map_err(|error| Unsent::Cut(peer_error(&error)))?;
     Ok(blob.len())
 }
 
