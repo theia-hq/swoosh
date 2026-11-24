@@ -4,17 +4,15 @@
 //! bound ([`RestoreCmd::run_local`]), so a refusal binds nothing; then [`RestoreSync`] binds one to exchange
 //! with your devices, which brings the restored root up to date, and prints what happened.
 
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
-use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use keystore::KeyFile;
 use swoosh::home::Home;
 use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::Restored;
-use swoosh::streams::OwnBind;
-use swoosh::sync::{Dial, SourceDial};
+use swoosh::sync::Dial;
 use swoosh::touch::Lines;
 use swoosh::transport::ReachArgs;
 
@@ -123,30 +121,6 @@ impl swoosh::reaching::Reaching for RestoreSync {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
             present: None,
         })
-    }
-
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        let own = OwnBind::new(
-            peers,
-            ctx.home,
-            node.node_id(),
-            &swoosh::credential::Credential::Family { present: None },
-        );
-        self.finish(
-            ctx.home,
-            &SourceDial::new(&own, ctx.home),
-            &mut io::stderr(),
-        )
-        .await
     }
 }
 

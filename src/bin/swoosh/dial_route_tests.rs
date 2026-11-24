@@ -106,11 +106,12 @@ async fn dialed_out(
         };
         Ok((input, &mut down))
     };
+    let beside = crate::Beside::of(&outward, home, Some(&machine));
     let ended = tokio::time::timeout(
         bound,
         crate::dial_through_serve(
-            crate::decision::tests::dialing(&outward),
-            crate::Beside::of(&outward, home, Some(&machine)),
+            crate::decision::tests::dialing(outward),
+            beside,
             crate::ThroughServe {
                 machine: &machine,
                 slip: None,

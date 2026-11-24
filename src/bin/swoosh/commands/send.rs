@@ -16,7 +16,7 @@
 use core::cell::Cell;
 use std::path::{Path, PathBuf};
 
-use bifrost::{Discovery, Node, NodeId, Session, Transport};
+use bifrost::NodeId;
 use clap::Args;
 use eyre::WrapErr as _;
 use futures::StreamExt as _;
@@ -27,7 +27,7 @@ use swoosh::learn::Admitted;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::OpenLane;
-use swoosh::streams::{Ask, OwnBind, Resident, StreamSource, Tracked, Unopened};
+use swoosh::streams::{Ask, StreamSource, Unopened};
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
 use transfer::wire::{Blob, Transfer};
@@ -89,41 +89,6 @@ impl swoosh::reaching::Reaching for SendCmd {
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(self.credential())
     }
-
-    /// Uniform dispatch: each file is a stream on the run's own Bulk session to the machine resolved
-    /// before the bind, presenting what each open reads from the home, or an `anyone` link alone.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'p>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        T::Session: 'static,
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        let Some(machine) = ctx.machine else {
-            eyre::bail!("internal: `send` ran without its machine resolved (root-dispatch bug)");
-        };
-        let route = Route::Own {
-            peer: &self.peer,
-            bound: ctx.bound,
-            this: node.node_id(),
-        };
-        self.run_send(
-            OwnBind::new(peers, ctx.home, node.node_id(), &self.credential()),
-            &route,
-            machine,
-            self.ask(machine),
-            ctx.admitted,
-            // By own bind no `serve` can stop under the run, so nothing reads it.
-            &Cell::new(false),
-            &mut std::io::stdout(),
-            &mut std::io::stderr(),
-        )
-        .await
-    }
 }
 
 /// The lane `send`'s file streams ride: a fan-out of long transfers, so a slow one never holds the Main
@@ -132,7 +97,7 @@ const SEND_LANE: OpenLane = OpenLane::Bulk;
 
 impl SendCmd {
     /// What this run dials as: the one value that picks its bind and what each of its streams presents.
-    fn credential(&self) -> swoosh::credential::Credential {
+    pub(crate) fn credential(&self) -> swoosh::credential::Credential {
         swoosh::credential::Credential::dialing(&self.peer, self.service.as_str())
     }
 
@@ -148,7 +113,7 @@ impl SendCmd {
         }
     }
 
-    /// Run through `serve` as `route` words it, each file one Open from `source`, printing on `out` and
+    /// Send on either path as `route` words it, each file one stream from `source`, printing on `out` and
     /// `err`. The first admitted file gives `admitted` its question, asked through `source`. `sent` is set
     /// once a file prints `sent`, so a line for `serve` stopping after the run can say what is left.
     ///
@@ -159,9 +124,9 @@ impl SendCmd {
         clippy::too_many_arguments,
         reason = "the run's two writers and what it sent ride beside its source"
     )]
-    pub async fn through<'s>(
+    pub async fn send<'s, S: StreamSource + Copy + 's>(
         &self,
-        source: &'s Tracked<Resident>,
+        source: S,
         route: &Route<'_>,
         machine: &Machine,
         admitted: Admitted<'s>,

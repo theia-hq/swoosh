@@ -11,15 +11,13 @@
 use core::time::Duration;
 use std::io::Write;
 
-use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use swoosh::contacts::DeviceLabel;
-use swoosh::credential::Credential;
 use swoosh::home::Home;
-use swoosh::renewal::{Fetch, PickUp, Renewed, SourceFetch};
+use swoosh::renewal::{Fetch, PickUp, Renewed};
 use swoosh::standing::{Standing, StandingError};
-use swoosh::streams::{OwnBind, StreamSource};
-use swoosh::sync::{Answer, Device, Dial, Reply, SourceDial, Until};
+use swoosh::streams::StreamSource;
+use swoosh::sync::{Answer, Device, Dial, Reply, Until};
 use swoosh::transport::ReachArgs;
 
 use crate::commands::learning;
@@ -58,36 +56,6 @@ impl swoosh::reaching::Reaching for SyncCmd {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
             present: None,
         })
-    }
-
-    /// By own bind: every exchange, pick-up and root question rides the run's own sessions, presenting
-    /// this home's standing as it reads at each open.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        // Every exchange presents this home's standing, never a slip.
-        let own = OwnBind::new(
-            peers,
-            ctx.home,
-            node.node_id(),
-            &Credential::Family { present: None },
-        );
-        self.exchange(
-            ctx.home,
-            &SourceDial::new(&own, ctx.home),
-            &SourceFetch::new(&own),
-            &own,
-            &mut std::io::stdout(),
-        )
-        .await
-        .map(drop)
     }
 }
 

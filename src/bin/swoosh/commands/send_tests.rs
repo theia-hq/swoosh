@@ -242,12 +242,13 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
     // As the dialing route runs it: the warning, the exchange and the lookup beside it read the home too.
     let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
     let outward = crate::Outward::Send(cmd);
+    let beside = crate::Beside::of(&outward, &served.home, Some(&peer));
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let ended = tokio::time::timeout(
         ROW_BOUND,
         crate::dial_through_serve(
-            crate::decision::tests::dialing(&outward),
-            crate::Beside::of(&outward, &served.home, Some(&peer)),
+            crate::decision::tests::dialing(outward),
+            beside,
             crate::ThroughServe {
                 machine: &peer,
                 slip: None,
@@ -312,20 +313,16 @@ async fn send_opens_one_bulk_stream_per_file_on_both_paths() {
         .await
         .expect("the Main stream opened");
     // The verb's own entry, as the composition root dispatches it.
-    let bound = swoosh::transport::Bound {
-        local: false,
-        reach: swoosh::transport::Reach::default(),
-    };
-    let ctx = swoosh::reaching::ReachCtx {
-        contacts: &contacts,
-        machine: Some(&peer),
-        bound: &bound,
-        present: None,
-        membership: None,
-        home: &home,
-        admitted: Admitted::unheard(),
-    };
-    let ended = swoosh::reaching::Reaching::run(cmd, &node, ctx, &peers).await;
+    let ended = crate::decision::tests::by_own_bind(
+        &crate::Dialing::Send(cmd),
+        &node,
+        &peers,
+        &home,
+        &peer,
+        &contacts,
+        Admitted::unheard(),
+    )
+    .await;
     drop(held);
     assert!(ended.is_ok(), "{ended:?}");
     assert_eq!(scripted_peer.requests().len(), 4);
@@ -968,10 +965,6 @@ async fn an_anyone_send_by_own_bind_presents_the_link_alone() {
         .unwrap();
     let typed_link = format!("{}{}", swoosh::link::PREFIX, link.as_str());
     let contacts = Contacts::default();
-    let bound = swoosh::transport::Bound {
-        local: false,
-        reach: swoosh::transport::Reach::default(),
-    };
     let unreadable = [
         (
             "revoked",
@@ -994,16 +987,16 @@ async fn an_anyone_send_by_own_bind_presents_the_link_alone() {
         let peers = Peers::new(&node);
         let home = empty_home(&format!("anyone-{tag}"));
         spoil(&home);
-        let ctx = swoosh::reaching::ReachCtx {
-            contacts: &contacts,
-            machine: Some(&peer),
-            bound: &bound,
-            present: None,
-            membership: None,
-            home: &home,
-            admitted: Admitted::unheard(),
-        };
-        let ended = swoosh::reaching::Reaching::run(cmd, &node, ctx, &peers).await;
+        let ended = crate::decision::tests::by_own_bind(
+            &crate::Dialing::Send(cmd),
+            &node,
+            &peers,
+            &home,
+            &peer,
+            &contacts,
+            Admitted::unheard(),
+        )
+        .await;
         assert!(ended.is_ok(), "{tag}: {ended:?}");
         let slots: Vec<_> = scripted_peer
             .requests()
@@ -1517,7 +1510,7 @@ async fn a_stalled_serve_ends_a_send_once() {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let ended = tokio::time::timeout(
         core::time::Duration::from_secs(600),
-        cmd.through(
+        cmd.send(
             &source,
             &route,
             &peer,

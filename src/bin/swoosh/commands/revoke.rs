@@ -25,23 +25,22 @@
 //! key into `revoked` first, so a crash leaves files rooted at a revoked key, which every read takes as
 //! absent, and running it again finishes.
 
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use bifrost::{Discovery, Node, NodeId, Session, Transport};
+use bifrost::NodeId;
 use clap::Args;
 use nauthy::{Link, Revocation, RevocationId, VerifyKey};
 use swoosh::contacts::{ContactRef, ContactsStore, DeviceLabel, ME, Petname, ResolveError};
 use swoosh::grants::{GrantKind, GrantRecord, Grants};
 use swoosh::home::{Home, HomeWrite};
-use swoosh::passphrase::{Prompt, Terminal};
+use swoosh::passphrase::Prompt;
 use swoosh::reach_report::{Reach, What};
 use swoosh::root::{Root, RootError, RootPlace, RootVerb};
 use swoosh::root_key::{RootKey, RootKeyError};
 use swoosh::roster::Epoch;
 use swoosh::standing::{Standing, StandingError};
-use swoosh::streams::OwnBind;
-use swoosh::sync::{Answer, Dial, ExchangeError, SourceDial};
+use swoosh::sync::{Answer, Dial, ExchangeError};
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -1072,28 +1071,6 @@ impl swoosh::reaching::Reaching for RevokeRoot {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
             present: None,
         })
-    }
-
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        let own = OwnBind::new(
-            peers,
-            ctx.home,
-            node.node_id(),
-            &swoosh::credential::Credential::Family { present: None },
-        );
-        let dial = SourceDial::new(&own, ctx.home);
-        self.publish
-            .run(ctx.home, &mut Terminal, &dial, &mut io::stderr())
-            .await
     }
 }
 

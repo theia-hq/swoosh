@@ -17,19 +17,18 @@ use core::time::Duration;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use bifrost::{Discovery, Node, NodeId, Session, Transport};
+use bifrost::NodeId;
 use clap::Args;
 use nauthy::{Link, VerifyKey};
 use swoosh::contacts::{ContactsStore, DeviceLabel, ME};
 use swoosh::home::Home;
 use swoosh::invite::Invite;
-use swoosh::passphrase::{Prompt, Terminal};
+use swoosh::passphrase::Prompt;
 use swoosh::peer::KeyTextError;
 use swoosh::root::{self, Date, Minted, Records, Root, RootError, RootPlace, RootVerb};
 use swoosh::roster::Member;
 use swoosh::standing::{Standing, StandingError};
-use swoosh::streams::OwnBind;
-use swoosh::sync::{Dial, SourceDial};
+use swoosh::sync::Dial;
 use swoosh::transport::ReachArgs;
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
@@ -591,33 +590,6 @@ impl swoosh::reaching::Reaching for InviteCmd {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
             present: None,
         })
-    }
-
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        let own = OwnBind::new(
-            peers,
-            ctx.home,
-            node.node_id(),
-            &swoosh::credential::Credential::Family { present: None },
-        );
-        let dial = SourceDial::new(&own, ctx.home);
-        self.issue(
-            ctx.home,
-            &mut Terminal,
-            &dial,
-            &mut io::stdout(),
-            &mut io::stderr(),
-        )
-        .await
     }
 }
 

@@ -80,7 +80,7 @@ impl Connected {
 /// so the uid-socket client and the resident implement the same contract and a behavior change lands
 /// once.
 ///
-/// The methods return `impl Future` (RPITIT, matching `Handler::serve` and `Reaching::run`), NOT
+/// The methods return `impl Future` (RPITIT, matching `Handler::serve`), NOT
 /// `impl Future + Send`: nothing spawns a `NodeClient` future, and the transport's `Session` contract
 /// is deliberately not `Send`-bounded, so a `Send` demand here would force that contract to change for
 /// the daemon's convenience.
