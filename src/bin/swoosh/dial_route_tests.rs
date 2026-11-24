@@ -109,7 +109,7 @@ async fn dialed_out(
     let ended = tokio::time::timeout(
         bound,
         crate::dial_through_serve(
-            crate::Dialing::of(&outward).unwrap(),
+            crate::decision::tests::dialing(&outward),
             crate::Beside::of(&outward, home, Some(&machine)),
             crate::ThroughServe {
                 machine: &machine,

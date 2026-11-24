@@ -149,7 +149,7 @@ async fn an_own_bind_exchange_presents_the_badge_it_stored() {
 
     // After a restore, as `root restore` writes the home: the root kept here, beside the standing.
     let restored = bare("stored-restore");
-    let _ = restoring(&restored, &mut Asked::default()).await;
+    let _ = restoring(&restored, &mut Asked::default(), &[]).await;
     let stored = swoosh::config::load_badge(&restored).await.unwrap();
     assert!(stored.is_some(), "the restore stored a standing");
     assert_eq!(
@@ -183,7 +183,7 @@ struct Routed {
 
 /// A prompt that answers every passphrase and counts each by the key it opens.
 #[derive(Default)]
-struct Asked {
+pub(crate) struct Asked {
     root: usize,
     machine: usize,
 }
@@ -249,7 +249,7 @@ fn sealed_machine_key(home: &Home) {
 }
 
 /// An empty home, holding nothing yet.
-fn bare(tag: &str) -> Home {
+pub(crate) fn bare(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!("swoosh-exchange-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     swoosh::config::create_store_dir(&dir).unwrap();
@@ -302,7 +302,7 @@ fn outward(argv: &[&str]) -> Outward {
 
 /// `revoke <target>` on `home`, its block run first as the composition root runs it: the part your root
 /// publishes, which offers the cut.
-async fn revoking(home: &Home, target: &str, asked: &mut Asked) -> Outward {
+pub(crate) async fn revoking(home: &Home, target: &str, asked: &mut Asked) -> Outward {
     let Verb::Revoke(cmd) = verb(&["revoke", target]) else {
         panic!("revoke parses");
     };
@@ -324,13 +324,15 @@ async fn revoking(home: &Home, target: &str, asked: &mut Asked) -> Outward {
 }
 
 /// `root restore` of a copy of `ROOT` listing [`siblings`] onto `home`, a machine that is none of its
-/// devices yet, its local part run first: the exchange that brings the restored root up to date.
-async fn restoring(home: &Home, asked: &mut Asked) -> Outward {
+/// devices yet, its local part run first: the exchange that brings the restored root up to date. `flags`
+/// follow the verb as typed.
+pub(crate) async fn restoring(home: &Home, asked: &mut Asked, flags: &[&str]) -> Outward {
     sealed_machine_key(home);
     let dir = home.dir().with_extension("copy");
     let _ = std::fs::remove_dir_all(&dir);
     copy(&dir, &records(1, &siblings()[1..], Vec::new()));
-    let Verb::RootRestore(cmd) = verb(&["root", "restore", dir.to_str().unwrap()]) else {
+    let argv = [&["root", "restore", dir.to_str().unwrap()][..], flags].concat();
+    let Verb::RootRestore(cmd) = verb(&argv) else {
         panic!("root restore parses");
     };
     let restored = cmd.restore(home, asked).await.unwrap();
@@ -421,7 +423,7 @@ async fn ride_with(name: &str, answers: Vec<Answer>) -> Routed {
             a_device(&served.home, true).await;
             revoking(&served.home, "me/phone", &mut asked).await
         }
-        "restore" => restoring(&served.home, &mut asked).await,
+        "restore" => restoring(&served.home, &mut asked, &[]).await,
         _ => unreachable!("no such verb here"),
     };
     let mut ran = routed(&mut served, answers, verb, asked).await;

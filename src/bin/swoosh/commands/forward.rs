@@ -147,6 +147,19 @@ impl ForwardCmd {
         match self.to {
             To::Port(port) => self.listen(source, route, machine, contacts, port).await,
             To::Stdout => self.bridge(source, route, machine, stdio).await,
+            To::UnixListener(_) => self.refuse_unbuilt_end(),
+        }
+    }
+
+    /// Refuse a local end that is not built yet, a `unix:` one, on its own line. Asked first through
+    /// `serve`, so the line is this one whatever reach flag came with it.
+    ///
+    /// # Errors
+    ///
+    /// The local end is a `unix:` path.
+    pub(crate) fn refuse_unbuilt_end(&self) -> eyre::Result<()> {
+        match self.to {
+            To::Port(_) | To::Stdout => Ok(()),
             // The path is not echoed: a typed path would read as a missing socket, not a missing feature.
             To::UnixListener(_) => {
                 eyre::bail!("a unix:<path> local end is not built yet: use a port, or - for stdout")
