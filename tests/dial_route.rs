@@ -103,20 +103,16 @@ fn a_file(home: &Home) -> String {
 struct Seen {
     /// Every connection it accepted.
     connects: AtomicUsize,
+    /// The connections that closed before a request: a run asking whether `serve` answers.
+    probes: AtomicUsize,
     /// The services of the Opens it heard, in order.
     opens: Mutex<Vec<String>>,
     /// The addresses each Open carried, in order.
     hints: Mutex<Vec<Vec<core::net::SocketAddr>>>,
 }
 
-/// A resident on `home`'s control socket, `serve.lock` held and the socket bound before it returns: it
-/// reads one request per connection, one at a time, answers status as [`RESIDENT`] and refuses each Open
-/// as busy, until `stop`.
-async fn resident(
-    home: &Home,
-    seen: Arc<Seen>,
-    stop: tightbeam::tunnel::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+/// `home`'s `serve.lock` and control socket, taken as a `serve` takes them, its listener on this runtime.
+async fn claimed(home: &Home) -> (swoosh::serve::InstanceLock, tokio::net::UnixListener) {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = swoosh::home::runtime_root().unwrap();
@@ -136,7 +132,18 @@ async fn resident(
         }
     };
     listener.set_nonblocking(true).unwrap();
-    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    (lock, tokio::net::UnixListener::from_std(listener).unwrap())
+}
+
+/// A resident on `home`'s control socket, `serve.lock` held and the socket bound before it returns: it
+/// reads one request per connection, one at a time, answers status as [`RESIDENT`] and refuses each Open
+/// as busy, until `stop`.
+async fn resident(
+    home: &Home,
+    seen: Arc<Seen>,
+    stop: tightbeam::tunnel::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let (lock, listener) = claimed(home).await;
     tokio::spawn(async move {
         loop {
             let (mut conn, _) = tokio::select! {
@@ -160,7 +167,10 @@ async fn resident(
                         .write(&mut conn)
                         .await;
                 }
-                _ => {}
+                Ok(_) => {}
+                Err(_) => {
+                    seen.probes.fetch_add(1, Ordering::SeqCst);
+                }
             }
         }
         drop(lock);
@@ -416,5 +426,185 @@ async fn stop_through_serve_asks_no_passphrase() {
         stderr.starts_with("error: too many connections open through swoosh serve on this machine"),
         "{stderr}"
     );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A run through `serve` asks it whether it answers once, whatever the verb: every dialing verb, every
+/// `forward` end, and an exchange verb.
+#[tokio::test]
+async fn a_run_through_serve_probes_it_once() {
+    let home = device("probes-once", 60).await;
+    let file = a_file(&home);
+    let more = [
+        vec!["forward", "me/nas", "ssh", "5432"],
+        vec!["forward", "me/nas", "ssh", "unix:/x"],
+        vec!["proxy", "me/nas", "http://example.com/x"],
+        vec!["sync"],
+    ];
+    for argv in dialing(&file).into_iter().chain(more) {
+        let seen = Arc::new(Seen::default());
+        let stop = tightbeam::tunnel::CancellationToken::new();
+        let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+        let (_, stderr) = swoosh(&home, &argv).await;
+        stop.cancel();
+        resident.await.unwrap();
+        assert_eq!(seen.probes.load(Ordering::SeqCst), 1, "{argv:?}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// With a resident answering, `stop`, `proxy` and `forward` to a `unix:` end bind nothing beside it, so
+/// they end without the sealed machine key's passphrase asked: `stop` and `proxy` Open there, and a `unix:` end refuses on its own line with
+/// no Open, since its body refuses it on either path.
+#[tokio::test]
+async fn a_verb_binds_no_endpoint_while_serve_runs() {
+    let home = device("no-endpoint", 60).await;
+    for argv in [
+        vec!["stop", "me/nas"],
+        vec!["forward", "me/nas", "ssh", "unix:/x"],
+        vec!["proxy", "me/nas", "http://example.com/x"],
+    ] {
+        let seen = Arc::new(Seen::default());
+        let stop = tightbeam::tunnel::CancellationToken::new();
+        let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+        let (status, stderr) = swoosh(&home, &argv).await;
+        stop.cancel();
+        resident.await.unwrap();
+        assert_eq!(status, Some(1), "{argv:?}: {stderr}");
+        assert!(!stderr.contains("passphrase"), "{argv:?}: {stderr}");
+        let opens = seen.opens.lock().unwrap().clone();
+        match argv[0] {
+            "forward" => {
+                assert_eq!(
+                    stderr,
+                    "error: a unix:<path> local end is not built yet: use a port, or - for stdout\n"
+                );
+                assert!(opens.is_empty(), "{opens:?}");
+            }
+            _ => {
+                assert!(!opens.is_empty(), "{argv:?}: {stderr}");
+                assert!(
+                    stderr.starts_with("error: too many connections open through swoosh serve"),
+                    "{argv:?}: {stderr}"
+                );
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// With a resident answering, `ping` typed with an `anyone` link binds a throwaway key of its own and
+/// never asks `serve`: the resident sees no connection, and the run ends on its own bind's line.
+#[tokio::test]
+async fn an_anyone_link_binds_its_own_key_while_serve_runs() {
+    let issuer = TestRoot::seeded(0x91);
+    let link = issuer
+        .slip(
+            &swoosh::reach::PING_SERVICE.parse().unwrap(),
+            SystemTime::now() + Duration::from_secs(3600),
+        )
+        .unwrap()
+        .seal()
+        .unwrap()
+        .link()
+        .unwrap();
+    let link = swoosh::link::Link::from(link).to_string();
+    // A port nothing answers on, so the own bind's dial fails here without asking the internet.
+    let hint = format!("{}=127.0.0.1:9", issuer.node_id());
+    let home = device("anyone", 60).await;
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    let argv = ["ping", &link, "-c", "1", "--local", "--peer", &hint];
+    let (status, stderr) = swoosh(&home, &argv).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(seen.connects.load(Ordering::SeqCst), 0, "{stderr}");
+    assert_eq!(status, Some(1), "{stderr}");
+    // The `--local` teaching line is the own bind's: through `serve` the flag is refused first.
+    assert!(stderr.starts_with("error: could not reach "), "{stderr}");
+    assert!(
+        stderr.contains("With --local or SWOOSH_LOCAL, swoosh looks on this network only."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("swoosh serve"), "{stderr}");
+    assert!(!stderr.contains("passphrase"), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A control socket whose listener is not the process its home's `serve.lock` records cannot be trusted:
+/// the run ends on that error, exit 1, with no own bind, so the sealed machine key is never asked for.
+#[tokio::test]
+async fn an_untrusted_socket_reads_no_key() {
+    let home = device("untrusted", 60).await;
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    // The lock stays held; only the process it names is another.
+    std::fs::write(home.serve_lock(), format!("{}\n", std::process::id() + 1)).unwrap();
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("error: refusing to trust the control path "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("passphrase"), "{stderr}");
+    assert!(seen.opens.lock().unwrap().is_empty(), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `serve` answers the run's one probe, then stops before the first Open: the run ends on the line for
+/// `serve` stopped, exit 1, and never falls back to a bind of its own. A connect landing between the
+/// probe's close and the lock's release would read a freed lock instead; the run's file reads make that
+/// window microseconds against milliseconds, so the row runs several times to catch it should it widen.
+#[tokio::test]
+async fn serve_gone_after_the_probe_is_the_stopped_line() {
+    let home = device("gone-after-probe", 60).await;
+    for run in 0..5 {
+        let (lock, listener) = claimed(&home).await;
+        let resident = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let probe = Request::read(&mut conn).await.is_err();
+            // The lock first: freeing it removes the socket, so no later connect finds a listener.
+            drop(lock);
+            drop(listener);
+            probe
+        });
+        let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+        assert!(
+            resident.await.unwrap(),
+            "run {run}: the first connection was the probe"
+        );
+        assert_eq!(status, Some(1), "run {run}: {stderr}");
+        assert!(
+            stderr
+                .starts_with("error: swoosh serve stopped here and ended the connection to me/nas"),
+            "run {run}: {stderr}"
+        );
+        assert!(!stderr.contains("passphrase"), "run {run}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// Through `serve`, `forward` to a `unix:` end with a reach flag ends on the `unix:` line, not the
+/// flag's: the end is why it cannot run, whatever the flag. Exit 1, no Open, no passphrase asked.
+#[tokio::test]
+async fn a_unix_end_refuses_before_a_reach_flag_through_serve() {
+    let home = device("unix-moot", 60).await;
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    let argv = ["forward", "me/nas", "ssh", "unix:/x", "--local"];
+    let (status, stderr) = swoosh(&home, &argv).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(
+        stderr,
+        "error: a unix:<path> local end is not built yet: use a port, or - for stdout\n"
+    );
+    assert!(seen.opens.lock().unwrap().is_empty(), "{stderr}");
     let _ = std::fs::remove_dir_all(home.dir());
 }

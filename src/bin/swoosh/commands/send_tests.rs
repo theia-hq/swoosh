@@ -246,7 +246,7 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
     let ended = tokio::time::timeout(
         ROW_BOUND,
         crate::dial_through_serve(
-            crate::Dialing::of(&outward).unwrap(),
+            crate::decision::tests::dialing(&outward),
             crate::Beside::of(&outward, &served.home, Some(&peer)),
             crate::ThroughServe {
                 machine: &peer,
