@@ -60,6 +60,20 @@ async fn dialed_to(
     bound: Duration,
     err: &mut impl std::io::Write,
 ) -> Printed {
+    let mut out = Vec::new();
+    let mut printed = dialed_out(home, argv, bound, &mut out, err).await;
+    printed.out = String::from_utf8(out).unwrap();
+    printed
+}
+
+/// [`dialed_to`], its stdout to `out`, which a row can read as the run goes.
+async fn dialed_out(
+    home: &Home,
+    argv: &[&str],
+    bound: Duration,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> Printed {
     let Verb::Outward(outward) =
         Cli::try_parse_from(core::iter::once("swoosh").chain(argv.iter().copied()))
             .unwrap()
@@ -78,7 +92,7 @@ async fn dialed_to(
         crate::commands::through_serve::hints(swoosh::reaching::Reaching::reach_args(&outward))
             .unwrap();
     let socket = UidSocket::resolve(home).unwrap();
-    let (mut out, mut down) = (Vec::new(), Vec::new());
+    let mut down = Vec::new();
     let (stdin, input) = tokio::sync::mpsc::channel(1);
     stdin.try_send(Ok(UP.to_vec())).unwrap();
     drop(stdin);
@@ -103,7 +117,7 @@ async fn dialed_to(
             },
             crate::commands::learning::Asking::NoTerminal,
             stdio,
-            &mut out,
+            out,
             err,
         ),
     )
@@ -112,7 +126,7 @@ async fn dialed_to(
     Printed {
         ok: ended.is_ok(),
         error: ended.err().map(|report| format!("{report:#}")),
-        out: String::from_utf8(out).unwrap(),
+        out: String::new(),
         err: String::new(),
         down: String::from_utf8(down).unwrap(),
     }
@@ -291,7 +305,7 @@ fn dialing_verbs_through_serve_make_the_stale_exchange() {
 /// With `serve` answering and a stale list, `forward … -` makes the beside-exchange with its device as
 /// one Open on Main beside the bridge's own, each carrying the `--peer` addresses typed for it, and its
 /// stdout carries only the stream's bytes; with a fresh list it makes none, and the run is the same. So
-/// does `forward <port>`, its Opens on Bulk.
+/// do `forward <port>` and `proxy`, their Opens on Bulk.
 #[test]
 fn forward_and_proxy_through_serve_make_the_stale_exchange() {
     on_a_big_stack(async || {
@@ -416,6 +430,103 @@ fn forward_and_proxy_through_serve_make_the_stale_exchange() {
             "{ported:?}"
         );
         assert_eq!(ported.out, "");
+        assert_eq!(printed[0], printed[1], "the exchange printed nothing");
+
+        // `proxy`: its admission and requests ride Bulk beside the exchange on Main, its stdout is the URL
+        // alone, and a later request refused ends the run, once the exchange was heard.
+        let argv = ["proxy", "me/nas", "http://example.com/x", "--peer", &hint];
+        let mut printed = Vec::new();
+        for stale in [true, false] {
+            let mut served = a_device(&format!("exch-proxy-{stale}"), stale).await;
+            let rig = Rig::default();
+            let synced = std::sync::Arc::new(tokio::sync::Notify::new());
+            let heard_sync = std::sync::Arc::clone(&synced);
+            let mut admitted = false;
+            let resident = routed(
+                &mut served,
+                move |service| match service {
+                    "control.sync" => {
+                        heard_sync.notify_one();
+                        Reply::Refuse(OpenRefusal::Busy)
+                    }
+                    "proxy" if !admitted => {
+                        admitted = true;
+                        Reply::Exchange(Vec::new())
+                    }
+                    _ => Reply::Refuse(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
+                },
+                &rig,
+            );
+            let url = Shared::default();
+            let request = async {
+                if stale {
+                    synced.notified().await;
+                }
+                // The URL prints once the admission is made.
+                let printed = loop {
+                    if let Some(line) = url.line() {
+                        break line;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                };
+                let (addr, path) = printed
+                    .strip_prefix("http://")
+                    .and_then(|rest| rest.split_once('/'))
+                    .unwrap();
+                let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+                let head = format!("GET /{path} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                client.write_all(head.as_bytes()).await.unwrap();
+                let mut response = Vec::new();
+                let _ = client.read_to_end(&mut response).await;
+                String::from_utf8(response).unwrap()
+            };
+            let (mut out, mut err) = (url.clone(), Vec::new());
+            let (ran, response) = tokio::join!(
+                dialed_out(&served.home, &argv, ROW_BOUND, &mut out, &mut err),
+                request
+            );
+            assert!(
+                response.starts_with("HTTP/1.1 403 Forbidden"),
+                "{stale}: {response}"
+            );
+            let out = url.text();
+            assert!(
+                out.starts_with("http://127.0.0.1:") && out.lines().count() == 1,
+                "{stale}: {out}"
+            );
+            printed.push(ran);
+            rig.stop.cancel();
+            let events = resident.await.unwrap();
+            let heard = opens(&events);
+            assert_eq!(
+                heard
+                    .iter()
+                    .filter(|open| open.service == "control.sync")
+                    .count(),
+                usize::from(stale),
+                "{stale}: the exchange"
+            );
+            for open in heard {
+                let lane = match open.service.as_str() {
+                    "proxy" => OpenLane::Bulk,
+                    _ => OpenLane::Main,
+                };
+                assert_eq!(open.lane, lane, "{stale}: {}", open.service);
+                assert_eq!(
+                    open.hints,
+                    vec![NAS_HINT.parse().unwrap()],
+                    "{stale}: {}",
+                    open.service
+                );
+            }
+        }
+        let proxied = &printed[0];
+        assert_eq!(
+            proxied.error.as_deref(),
+            Some("me/nas refused proxy\n  nas does not count this machine as one of your devices."),
+            "{proxied:?}"
+        );
         assert_eq!(printed[0], printed[1], "the exchange printed nothing");
     });
 }
@@ -781,7 +892,7 @@ fn a_serve_gone_beside_a_whole_send_ends_without_resending() {
     });
 }
 
-/// A stderr the resident can read as it hears an Open.
+/// A stderr the resident can read as it hears an Open, or a stdout a row reads as the run goes.
 #[derive(Clone, Default)]
 struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -799,6 +910,13 @@ impl std::io::Write for Shared {
 impl Shared {
     fn text(&self) -> String {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// The first whole line written, if one has been.
+    fn line(&self) -> Option<String> {
+        self.text()
+            .split_once('\n')
+            .map(|(line, _)| line.to_owned())
     }
 }
 
@@ -951,7 +1069,7 @@ fn a_stalled_serve_ends_a_send_of_many_files_once() {
 }
 
 /// A device's list of what it serves, naming `entries`, as `control.services` answers it.
-fn catalog_of(entries: &[&str]) -> Vec<u8> {
+pub(crate) fn catalog_of(entries: &[&str]) -> Vec<u8> {
     let gate = nauthy::Gate::rooted(
         TestRoot::seeded(7).verify_key(),
         nauthy::Denylist::load(std::env::temp_dir().join("swoosh-dialroute-no-revocations"))

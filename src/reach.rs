@@ -9,7 +9,7 @@
 
 use core::time::Duration;
 
-use bifrost::{ConnInfo, Discovery, Node, NodeId, Path, Session, Transport};
+use bifrost::{ConnInfo, NodeId, Path};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::{self, Connector};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -90,44 +90,13 @@ pub enum Diagnosis {
     Unknown,
 }
 
-/// Why `machine` refused a dial of `service`, asked over a second connection to it on the same `node`:
-/// one `control.services` call presenting the refused dial's own `present` and `membership` slots, since
-/// the route is member-only and a call presenting nothing would always be refused. Asked of your own
-/// devices only (`None` for any other kind, a link included, since the refusal could then be the
-/// link's), and only after a `NotAdmitted`, which the caller checks. Bounded by [`FOLLOW_UP_TIMEOUT`];
-/// past it, or on any failure, the answer is [`Diagnosis::Unknown`], which claims no cause.
-///
-/// For a verb whose gated view of the refused session opens no other service. The same endpoint dials
-/// it, so the home key gets no second registration; the dial counts against [`FOLLOW_UP_TIMEOUT`].
-pub async fn diagnose_over<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
-    machine: &Machine,
-    service: &Service,
-    present: Option<Link>,
-    membership: Option<Link>,
-) -> Option<Diagnosis> {
-    if machine.kind() != Kind::Yours {
-        return None;
-    }
-    let asked = async {
-        match node.connect(machine.key()).await {
-            Ok(session) => ask(&session, machine.key(), service, present, membership).await,
-            Err(error) => {
-                tracing::debug!(%error, "the follow-up could not reach the machine");
-                Diagnosis::Unknown
-            }
-        }
-    };
-    Some(
-        tokio::time::timeout(FOLLOW_UP_TIMEOUT, asked)
-            .await
-            .unwrap_or(Diagnosis::Unknown),
-    )
-}
-
-/// [`diagnose_over`] through `source`, the path the refused stream took: one `control.services` stream on Main,
-/// presenting `slip` when the machine was typed as a link, else what `source` presents for the route.
-/// Asked of your own devices only, and bounded by [`FOLLOW_UP_TIMEOUT`], as [`diagnose_over`] is.
+/// Why `machine` refused a stream of `service`, asked through `source`, the path the refused stream
+/// took: one `control.services` stream on Main, presenting `slip` when the machine was typed as a link,
+/// else what `source` presents for the route, since the route is member-only and a call presenting
+/// nothing would always be refused. Asked of your own devices only (`None` for any other kind, a link
+/// included, since the refusal could then be the link's), and only after a `NotAdmitted`, which the
+/// caller checks. Bounded by [`FOLLOW_UP_TIMEOUT`]; past it, or on any failure, the answer is
+/// [`Diagnosis::Unknown`], which claims no cause.
 pub async fn diagnose_through(
     source: &impl StreamSource,
     machine: &Machine,
@@ -171,34 +140,6 @@ pub async fn diagnose_through(
             .await
             .unwrap_or(Diagnosis::Unknown),
     )
-}
-
-/// The one `control.services` call: open the route with the refused dial's credentials, read the list,
-/// and say whether it holds `service`. Nothing from the reply is printed, only whether the name is in it.
-async fn ask<S: Session>(
-    session: &S,
-    key: NodeId,
-    service: &Service,
-    present: Option<Link>,
-    membership: Option<Link>,
-) -> Diagnosis {
-    let Ok(route) = CONTROL_SERVICES_SERVICE.parse::<Service>() else {
-        return Diagnosis::Unknown;
-    };
-    let (writer, reader) = match gated(key, route, present, membership)
-        .open_on(session)
-        .await
-    {
-        Ok(halves) => halves,
-        Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted)) => return Diagnosis::NotYours,
-        Err(error) => {
-            tracing::debug!(%error, "the follow-up call failed");
-            return Diagnosis::Unknown;
-        }
-    };
-    // The read sends nothing; dropping the write half lets the node's reply complete.
-    drop(writer);
-    listed(reader, service).await
 }
 
 /// Whether the list `reader` carries holds `service`. Nothing from it is printed.

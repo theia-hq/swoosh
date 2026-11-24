@@ -69,13 +69,14 @@ All notable changes to swoosh, newest first.
   connection works again. A connection that opened never warns, whatever ends it. This holds by `swoosh serve`
   and without it. A `forward <port>` listener stays up across a dropped connection, with or without `serve`:
   the next connection redials. It ends when a new connection is refused (a revoke, a lapsed badge or link, or
-  `serve` stopping) with the refusal's line, and a host that cuts the session no longer ends it. A machine that
+  `serve` stopping) with the refusal's line, and a host that cuts the session no longer ends it. The same holds
+  for `proxy`, with or without `serve`. A machine that
   refuses the stream ends it with `error: stream refused: <why>`, and a failed connection's cause line reads the
   same through `serve` as without it. A machine that refuses you mid-run ends a `proxy` run with the refusal
-  (`proxy` answers the request with a `403` first). Without `serve`, a host that cuts the session ends `proxy`
-  with `error: connection lost`. A `proxy` client waiting on a host that was cut gets
-  `proxy failed: connection lost`, and one mid-body is reset. The `502` body of `proxy` no longer carries raw
-  peer text. Each holds at most 96 connections at once, so one listener cannot fill the streams a machine allows.
+  (`proxy` answers the request with a `403` first). A `proxy` client waiting on a host that was cut gets a
+  `502` for its own request, and one mid-body is reset. A request that ends the run also answers the clients
+  still waiting, with a `502` whose body is `proxy failed: <what went wrong>`. The `502` body of `proxy` no
+  longer carries raw peer text. Each holds at most 96 connections at once, so one listener cannot fill the streams a machine allows.
 - **A forward to a port, or a TCP service you serve, that the other machine cuts off now ends with a reset, not a clean
   close.** A cut-off transfer no longer reads as complete. A forward's local client is also reset when the session
   is lost or the stream is refused.

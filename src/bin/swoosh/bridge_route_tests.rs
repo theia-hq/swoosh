@@ -133,8 +133,6 @@ async fn through(
     let dial = Dial {
         machine,
         service: &cmd.service,
-        slip: None,
-        reach: &cmd.reach,
         contacts,
     };
     let route = Route::Serve {
@@ -352,8 +350,6 @@ fn one_open_table_for_the_bridge() {
         let dial = Dial {
             machine: &machine,
             service: &cmd.service,
-            slip: None,
-            reach: &cmd.reach,
             contacts: &contacts,
         };
         let serve = Route::Serve {

@@ -103,8 +103,6 @@ async fn admitted<R>(
     let dial = Dial {
         machine: &machine,
         service: &cmd.service,
-        slip: None,
-        reach: &cmd.reach,
         contacts: &contacts,
     };
     let route = Route::Serve {
@@ -125,11 +123,11 @@ async fn admitted<R>(
 }
 
 /// What a row's source meets at every open.
-type Meet = fn() -> Option<Unopened>;
+pub(crate) type Meet = fn() -> Option<Unopened>;
 
 /// What a row's open does to the run.
 #[derive(Clone, Copy)]
-enum Then {
+pub(crate) enum Then {
     /// The run ends: its line starts so, by own bind and through `serve`.
     Ends {
         own: &'static str,
@@ -142,6 +140,145 @@ enum Then {
 /// A detail the machine gave.
 fn down() -> RefusalDetail {
     RefusalDetail::bounded("down")
+}
+
+/// Each way a listener pipe's open gives no stream, as a source meets it, and what it does to the run of
+/// `me/nas`'s `ssh`: the line it ends with on each path, or the warning's clause.
+pub(crate) fn table() -> [(Meet, Then); 21] {
+    let not_yours = "me/nas refused ssh\n  nas does not count this machine as one of your devices.";
+    let ended =
+        "this device's membership badge has ended, so a family-gated peer will refuse this dial; ";
+    [
+        (
+            || {
+                Some(Unopened::Refused(OpenRefusal::Peer(
+                    PeerRefusal::NotAdmitted,
+                )))
+            },
+            Then::Ends {
+                own: not_yours,
+                serve: not_yours,
+            },
+        ),
+        (
+            || Some(Unopened::Refused(OpenRefusal::StandingEnded)),
+            Then::Ends {
+                own: ended,
+                serve: ended,
+            },
+        ),
+        (
+            || Some(Unopened::Refused(OpenRefusal::NotHere)),
+            Then::Ends {
+                own: "me/nas is this machine",
+                serve: "me/nas is this machine",
+            },
+        ),
+        (
+            || Some(Unopened::Malformed(MalformedOpen::HintCount)),
+            Then::Ends {
+                own: "open request has too many hints",
+                serve: "open request has too many hints",
+            },
+        ),
+        (
+            || {
+                Some(Unopened::Control(ControlError::Untrusted {
+                    path: "/tmp/swoosh.sock".into(),
+                }))
+            },
+            Then::Ends {
+                own: "connection lost",
+                serve: "refusing to trust the control path /tmp/swoosh.sock",
+            },
+        ),
+        (
+            || Some(Unopened::ServeGone),
+            Then::Ends {
+                own: "connection lost",
+                serve: "swoosh serve stopped here and ended the connection to me/nas",
+            },
+        ),
+        (
+            || Some(Unopened::Skew),
+            Then::Ends {
+                own: "swoosh serve on this machine is a different version",
+                serve: "swoosh serve on this machine is a different version",
+            },
+        ),
+        (
+            || Some(Unopened::Refused(OpenRefusal::Busy)),
+            Then::Warns("too many connections here"),
+        ),
+        (
+            || Some(Unopened::Refused(OpenRefusal::Unreachable(down()))),
+            Then::Warns("unreachable"),
+        ),
+        (
+            || Some(Unopened::Refused(OpenRefusal::Timeout)),
+            Then::Warns("unreachable"),
+        ),
+        (
+            || Some(Unopened::Refused(OpenRefusal::Broken(down()))),
+            Then::Warns("interrupted (down)"),
+        ),
+        (
+            || Some(Unopened::Refused(OpenRefusal::PeerUnreadable(down()))),
+            Then::Warns("interrupted"),
+        ),
+        (
+            || {
+                Some(Unopened::Refused(OpenRefusal::Peer(
+                    PeerRefusal::Unavailable(down()),
+                )))
+            },
+            Then::Warns("reached, but refused (unavailable: down)"),
+        ),
+        (
+            || {
+                Some(Unopened::Refused(OpenRefusal::Peer(
+                    PeerRefusal::BadRequest(down()),
+                )))
+            },
+            Then::Warns("reached, but refused (bad request: down)"),
+        ),
+        (
+            || Some(Unopened::Own(OpenError::Busy)),
+            Then::Warns("too many connections here"),
+        ),
+        (
+            || Some(Unopened::Own(OpenError::Timeout)),
+            Then::Warns("unreachable"),
+        ),
+        (
+            || Some(Unopened::Own(OpenError::Unreachable(DialFailure::TimedOut))),
+            Then::Warns("unreachable"),
+        ),
+        (
+            || {
+                Some(Unopened::Own(OpenError::Open(bifrost::Error::Stream(
+                    "closed".into(),
+                ))))
+            },
+            Then::Warns("interrupted"),
+        ),
+        (
+            || Some(Unopened::Home(eyre::eyre!("unreadable"))),
+            Then::Warns("interrupted"),
+        ),
+        (
+            || Some(Unopened::ServeError("disk full".to_owned())),
+            Then::Warns("interrupted"),
+        ),
+        (
+            || {
+                Some(Unopened::Control(ControlError::Timeout {
+                    phase: "response read",
+                }))
+            },
+            Then::Warns("interrupted"),
+        ),
+    ]
 }
 
 /// Each way a later pipe's open gives no stream ends the run where the table says, on both paths, with
@@ -167,148 +304,13 @@ fn one_ending_table_on_both_paths() {
         let dial = Dial {
             machine: &machine,
             service: &cmd.service,
-            slip: None,
-            reach: &cmd.reach,
             contacts: &contacts,
         };
         let serve = Route::Serve {
             dial: &dial,
             socket: &socket,
         };
-        let not_yours =
-            "me/nas refused ssh\n  nas does not count this machine as one of your devices.";
-        let ended = "this device's membership badge has ended, so a family-gated peer will refuse this dial; ";
-        let table: [(Meet, Then); 21] = [
-            (
-                || {
-                    Some(Unopened::Refused(OpenRefusal::Peer(
-                        PeerRefusal::NotAdmitted,
-                    )))
-                },
-                Then::Ends {
-                    own: not_yours,
-                    serve: not_yours,
-                },
-            ),
-            (
-                || Some(Unopened::Refused(OpenRefusal::StandingEnded)),
-                Then::Ends {
-                    own: ended,
-                    serve: ended,
-                },
-            ),
-            (
-                || Some(Unopened::Refused(OpenRefusal::NotHere)),
-                Then::Ends {
-                    own: "me/nas is this machine",
-                    serve: "me/nas is this machine",
-                },
-            ),
-            (
-                || Some(Unopened::Malformed(MalformedOpen::HintCount)),
-                Then::Ends {
-                    own: "open request has too many hints",
-                    serve: "open request has too many hints",
-                },
-            ),
-            (
-                || {
-                    Some(Unopened::Control(ControlError::Untrusted {
-                        path: "/tmp/swoosh.sock".into(),
-                    }))
-                },
-                Then::Ends {
-                    own: "connection lost",
-                    serve: "refusing to trust the control path /tmp/swoosh.sock",
-                },
-            ),
-            (
-                || Some(Unopened::ServeGone),
-                Then::Ends {
-                    own: "connection lost",
-                    serve: "swoosh serve stopped here and ended the connection to me/nas",
-                },
-            ),
-            (
-                || Some(Unopened::Skew),
-                Then::Ends {
-                    own: "swoosh serve on this machine is a different version",
-                    serve: "swoosh serve on this machine is a different version",
-                },
-            ),
-            (
-                || Some(Unopened::Refused(OpenRefusal::Busy)),
-                Then::Warns("too many connections here"),
-            ),
-            (
-                || Some(Unopened::Refused(OpenRefusal::Unreachable(down()))),
-                Then::Warns("unreachable"),
-            ),
-            (
-                || Some(Unopened::Refused(OpenRefusal::Timeout)),
-                Then::Warns("unreachable"),
-            ),
-            (
-                || Some(Unopened::Refused(OpenRefusal::Broken(down()))),
-                Then::Warns("interrupted (down)"),
-            ),
-            (
-                || Some(Unopened::Refused(OpenRefusal::PeerUnreadable(down()))),
-                Then::Warns("interrupted"),
-            ),
-            (
-                || {
-                    Some(Unopened::Refused(OpenRefusal::Peer(
-                        PeerRefusal::Unavailable(down()),
-                    )))
-                },
-                Then::Warns("reached, but refused (unavailable: down)"),
-            ),
-            (
-                || {
-                    Some(Unopened::Refused(OpenRefusal::Peer(
-                        PeerRefusal::BadRequest(down()),
-                    )))
-                },
-                Then::Warns("reached, but refused (bad request: down)"),
-            ),
-            (
-                || Some(Unopened::Own(OpenError::Busy)),
-                Then::Warns("too many connections here"),
-            ),
-            (
-                || Some(Unopened::Own(OpenError::Timeout)),
-                Then::Warns("unreachable"),
-            ),
-            (
-                || Some(Unopened::Own(OpenError::Unreachable(DialFailure::TimedOut))),
-                Then::Warns("unreachable"),
-            ),
-            (
-                || {
-                    Some(Unopened::Own(OpenError::Open(bifrost::Error::Stream(
-                        "closed".into(),
-                    ))))
-                },
-                Then::Warns("interrupted"),
-            ),
-            (
-                || Some(Unopened::Home(eyre::eyre!("unreadable"))),
-                Then::Warns("interrupted"),
-            ),
-            (
-                || Some(Unopened::ServeError("disk full".to_owned())),
-                Then::Warns("interrupted"),
-            ),
-            (
-                || {
-                    Some(Unopened::Control(ControlError::Timeout {
-                        phase: "response read",
-                    }))
-                },
-                Then::Warns("interrupted"),
-            ),
-        ];
+        let table = table();
         for (at, (meets, then)) in table.into_iter().enumerate() {
             for (path, route) in [("own", &own), ("serve", &serve)] {
                 let opened = RefCell::new(Vec::new());

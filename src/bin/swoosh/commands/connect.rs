@@ -40,7 +40,7 @@ use futures::stream::FuturesUnordered;
 use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, escaped_report};
 use swoosh::peer::Machine as PeerMachine;
-use swoosh::peers::{OpenError, SessionEnd};
+use swoosh::peers::OpenError;
 use swoosh::serve::control_codec::OpenRefusal;
 use swoosh::streams::{Ask, Opened, StreamSource, Unopened};
 use tokio::io::{self, AsyncWriteExt as _};
@@ -225,38 +225,6 @@ where
     Ok(())
 }
 
-/// Resolve once the session the latest stream rode has closed: the host cut it on a revoke or an expiry,
-/// or the path to it failed. Each stream's watch arrives on `rode` as it opens, the first one before
-/// anything closes; until one does, and after every sender has gone, this waits.
-///
-/// A channel, not a shared cell: the watch must wake to re-arm when a stream rides a new session, and a
-/// send is what wakes it. The owner can drop an idle session from its map while a watch holds it open,
-/// so the run's session is the latest stream's, never only the first's. Unbounded, since each stream
-/// sends once and this, on the run's task, drains it as it runs.
-pub async fn session_cut<S: Session>(mut rode: mpsc::UnboundedReceiver<SessionEnd<S>>) {
-    let Some(mut watched) = rode.recv().await else {
-        return core::future::pending().await;
-    };
-    loop {
-        tokio::select! {
-            () = watched.closed() => return,
-            Some(end) = rode.recv() => watched = end,
-        }
-    }
-}
-
-/// Whether a later pipe's own-bind failure ends the run, by the rule the resident's outcomes are sorted
-/// by: only the machine's `NotAdmitted` does, a ruling on this machine (a revoke or a pause) that the wire
-/// says not to retry, so listening on would refuse every connection. The resident's other two, an ended
-/// standing and this machine as the target, are no own-bind open's outcome: by own bind a lease end cuts
-/// the session instead. Every other failure, a refusal this build cannot read among them, is that pipe's.
-pub fn ends_the_run(error: &OpenError) -> bool {
-    matches!(
-        error,
-        OpenError::Open(bifrost::Error::Refused(Refusal::NotAdmitted))
-    )
-}
-
 /// The start lines of a forwarded port, on stderr, once admission is proven: one shape on both paths.
 pub fn forwarding(service: &impl core::fmt::Display, machine: &Machine, port: u16) {
     eprintln!("Forwarding {service} on {machine} to 127.0.0.1:{port}.");
@@ -350,12 +318,6 @@ where
 #[derive(Debug, thiserror::Error)]
 #[error("connection lost")]
 pub struct ConnectionLost;
-
-/// A later pipe's `NotAdmitted` by own bind, which ends the run: the loop breaks with this at once, and
-/// the run then words it as the dial refusal, asking one of your devices why. Never printed as it is.
-#[derive(Debug, thiserror::Error)]
-#[error("not admitted")]
-pub struct NotAdmittedLater;
 
 /// What a listener tells the person of its pipes' failures: one `warning:` for the first pipe whose Open
 /// fails after one carried, or after the start, then nothing until a pipe carries again, so a machine
@@ -465,16 +427,6 @@ impl Failure {
     /// The machine's `refusal`.
     pub fn refused(refusal: &Refusal) -> Self {
         Self::Refused(Escaped(&refusal.to_string()).to_string())
-    }
-
-    /// An own-bind Open's `error`: a refusal by its kind, and a stream that failed to open interrupted.
-    pub fn of_open(error: &OpenError) -> Self {
-        match error {
-            OpenError::Busy => Self::Busy,
-            OpenError::Timeout | OpenError::Unreachable(_) => Self::Unreachable,
-            OpenError::Open(bifrost::Error::Refused(refusal)) => Self::refused(refusal),
-            OpenError::Open(_) => Self::Interrupted(None),
-        }
     }
 }
 
@@ -817,17 +769,6 @@ impl<R: io::AsyncRead + Unpin, S: Session> Download for swoosh::peers::Half<R, S
             io::ErrorKind::ConnectionAborted,
             "session closed",
         ))
-    }
-}
-
-impl Upload for swoosh::serve::control_codec::OpenWrite {
-    fn cut(self) {
-        self.abort();
-    }
-
-    /// The resident's Landed comes on the read half.
-    fn delivered(self) -> impl Future<Output = io::Result<()>> {
-        core::future::pending()
     }
 }
 

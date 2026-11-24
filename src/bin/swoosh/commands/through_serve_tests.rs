@@ -17,7 +17,13 @@ use swoosh::serve::control_codec::{
 };
 use swoosh::transport::ReachArgs;
 
-use super::{Busy, Dial, Moot, Skew, StandingEnded, Stream, ThisMachine};
+use super::{Busy, Dial, Moot, Skew, StandingEnded, ThisMachine};
+
+/// A stream the resident attached, as the socket gives its halves.
+type Stream = swoosh::streams::Opened<
+    swoosh::serve::control_codec::OpenWrite,
+    swoosh::serve::control_codec::OpenRead,
+>;
 use crate::commands::connect::{ConnectionLost, Machine};
 
 /// The key of `me/nas`.
@@ -82,19 +88,14 @@ impl Dialing {
             Resident::new(Rc::clone(&socket)),
             std::collections::HashMap::new(),
         );
-        let (service, reach) = match self {
-            Self::Ping(cmd) => (swoosh::reach::PING_SERVICE.parse().unwrap(), &cmd.reach),
-            Self::Status(cmd) => (
-                crate::commands::status::StatusCmd::service(machine).unwrap(),
-                &cmd.reach,
-            ),
-            Self::Speed(cmd) => (swoosh::reach::SPEED_SERVICE.parse().unwrap(), &cmd.reach),
+        let service = match self {
+            Self::Ping(_) => swoosh::reach::PING_SERVICE.parse().unwrap(),
+            Self::Status(_) => crate::commands::status::StatusCmd::service(machine).unwrap(),
+            Self::Speed(_) => swoosh::reach::SPEED_SERVICE.parse().unwrap(),
         };
         let dial = Dial {
             machine,
             service: &service,
-            slip: None,
-            reach,
             contacts,
         };
         let route = crate::commands::route::Route::Serve {
@@ -446,12 +447,9 @@ async fn an_ended_standing_names_the_own_binds_remedy_when_serve_says_who_it_is(
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
     let service = "ssh".parse().unwrap();
-    let reach = reach(&["forward"]);
     let pipe = Dial {
         machine: &peer,
         service: &service,
-        slip: None,
-        reach: &reach,
         contacts: &contacts,
     };
     let this = NodeId::from_ed25519_secret(&[0x62; 32]);
@@ -475,12 +473,9 @@ async fn a_refusal_through_serve_prints_the_own_binds_line() {
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
     let service = "ssh".parse().unwrap();
-    let reach = reach(&["forward"]);
     let pipe = Dial {
         machine: &peer,
         service: &service,
-        slip: None,
-        reach: &reach,
         contacts: &contacts,
     };
     // The dial refusal for one of your devices, with no cause asked: the same head the own bind prints
@@ -578,16 +573,11 @@ async fn attached(
     let listener = tokio::net::UnixListener::from_std(listener).unwrap();
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
-    let service = "ssh".parse().unwrap();
-    let reach = reach(&["forward"]);
-    let pipe = Dial {
-        machine: &peer,
-        service: &service,
-        slip: None,
-        reach: &reach,
-        contacts: &contacts,
+    let ask = swoosh::streams::Ask {
+        lane: OpenLane::Main,
+        ..crate::commands::connect::tests::listening(&peer)
     };
-    let (socket, connected) = super::serve(&served.home).await.unwrap().unwrap();
+    let (_socket, connected) = super::serve(&served.home).await.unwrap().unwrap();
     let resident = async {
         let (mut conn, _) = listener.accept().await.unwrap();
         Request::read(&mut conn).await.unwrap();
@@ -597,11 +587,12 @@ async fn attached(
             .unwrap();
         conn
     };
-    let (stream, conn) = tokio::join!(
-        pipe.open(&socket, connected, OpenLane::Main, Observation::Unobserved),
+    let (attached, conn) = tokio::join!(
+        swoosh::streams::Resident::attach(connected, &ask, Observation::Unobserved),
         resident
     );
-    (stream.unwrap(), conn)
+    let (stream, _reference) = attached.unwrap();
+    (stream, conn)
 }
 
 fn direct() -> bifrost::ConnInfo {
@@ -918,13 +909,10 @@ async fn asking_a_stalled_serve_whether_it_went_is_bounded_and_says_no() {
     let listener = tokio::net::UnixListener::from_std(listener).unwrap();
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
-    let reach = reach(&["forward"]);
     let service = "ping".parse().unwrap();
     let dial = Dial {
         machine: &peer,
         service: &service,
-        slip: None,
-        reach: &reach,
         contacts: &contacts,
     };
     let (socket, _connected) = super::serve(&served.home).await.unwrap().unwrap();
@@ -980,6 +968,9 @@ pub(crate) enum Answer {
     AfterEnd(Vec<u8>),
     /// Attach, then drop the connection with no End: a cut, the resident still up.
     Cut,
+    /// Attach, send these bytes with no End, and drop the connection once the row's `cut` fires: a cut
+    /// mid-download, the resident still up.
+    SaysThenCut(Vec<u8>),
     /// Attach, end the download with End, then drop the connection with no Landed, the resident still
     /// up.
     EndThenCut,
@@ -1037,6 +1028,8 @@ pub(crate) struct Rig {
     pub(crate) heard: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// Whether a [`routed`] resident starts as [`Reply::Wedge`] leaves it, answering nothing.
     pub(crate) wedged: bool,
+    /// Fired by a row to cut a [`scripted`] resident's [`Answer::SaysThenCut`] connection.
+    pub(crate) cut: tightbeam::tunnel::CancellationToken,
 }
 
 /// A resident on `served`'s socket that reads one request per connection and answers each Open with the
@@ -1056,6 +1049,7 @@ pub(crate) fn scripted(
     let mut listener = Some(tokio::net::UnixListener::from_std(listener).unwrap());
     let mut lock = Some(served.lock());
     let stop = rig.stop.clone();
+    let cut = rig.cut.clone();
     let landed = std::sync::Arc::clone(&rig.landed);
     tokio::spawn(async move {
         let mut answers = VecDeque::from(answers);
@@ -1134,6 +1128,18 @@ pub(crate) fn scripted(
                         Answer::EndThenCut => {
                             let _ = conn.write_all(&END).await;
                             drop(conn);
+                        }
+                        Answer::SaysThenCut(download) => {
+                            let _ = conn.write_all(&data(&download)).await;
+                            let cut = cut.clone();
+                            held.push((
+                                at,
+                                tokio::spawn(async move {
+                                    cut.cancelled().await;
+                                    drop(conn);
+                                    Vec::new()
+                                }),
+                            ));
                         }
                         Answer::EndThenStop => {
                             let _ = conn.write_all(&END).await;
@@ -1472,12 +1478,9 @@ async fn warned(
     let contacts = book();
     let peer = machine(&contacts, "me/nas");
     let service = "ssh".parse().unwrap();
-    let reach = reach(&["forward"]);
     let dial = Dial {
         machine: &peer,
         service: &service,
-        slip: slip.clone(),
-        reach: &reach,
         contacts: &contacts,
     };
     let socket = Rc::new(swoosh::node_client::UidSocket::resolve(&served.home).unwrap());
@@ -1854,8 +1857,6 @@ async fn a_stalled_serve_is_unresponsive_at_a_port_admission() {
     let dial = Dial {
         machine: &peer,
         service: &cmd.service,
-        slip: None,
-        reach: &cmd.reach,
         contacts: &contacts,
     };
     let socket = Rc::new(swoosh::node_client::UidSocket::resolve(&served.home).unwrap());
