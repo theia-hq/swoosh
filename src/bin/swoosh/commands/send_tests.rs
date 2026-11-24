@@ -1572,7 +1572,7 @@ async fn an_untrusted_socket_ends_a_send_once() {
     let _ = std::fs::remove_dir_all(dir);
     let report = format!("{:#}", ran.ended.expect_err("the run ended non-zero"));
     assert!(
-        report.starts_with("refusing to trust the control path "),
+        report.starts_with("another process is answering swoosh serve's socket\n  Process "),
         "{report}"
     );
     assert!(!report.contains("could not be sent"), "{report}");

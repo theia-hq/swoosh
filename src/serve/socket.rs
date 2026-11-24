@@ -11,6 +11,9 @@ use bifrost::NodeId;
 use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
+use crate::escape::EscapedPath;
+use crate::home::ProcessId;
+
 mod attached;
 mod local_detail;
 mod open;
@@ -898,21 +901,51 @@ enum ResponseRead {
 
 /// Why a control frame could not be read or written, or a control operation could not be attempted.
 /// One typed error the codec, the socket client, and the resident all map into, so a caller can
-/// match `NoResident`/`Untrusted`/`Refused` instead of stringifying a cause it cannot inspect.
+/// match `NoResident`/`Untrusted`/`Unattributed`/`Refused` instead of stringifying a cause it cannot
+/// inspect.
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {
     /// No resident node is addressable under this home: either no socket exists, or the runtime root
     /// cannot be resolved. The bare control verbs teach from this rather than dialing cold.
     #[error("swoosh serve is not running on this machine")]
     NoResident,
-    /// A path exists but is not this user's 0700 runtime dir/socket: never trusted enough to connect.
-    #[error("refusing to trust the control path {path}: not this user's 0700 runtime dir/socket")]
+    /// A path is not this user's alone (a foreign owner, a mode wider than 0700, a symlink, a stat
+    /// failure), or the connected peer is another uid or its credentials could not be read: never
+    /// trusted enough to send to. A peer the kernel names no process for lands here too, even when it
+    /// is this user's: on Linux `SO_PEERCRED` reports pid 0 for a listener outside the reader's pid
+    /// namespace, which the credential query rejects.
+    #[error(
+        "swoosh serve's socket is not private to you\n  {} is not yours alone.\n  Nothing was sent \
+         through it.",
+        EscapedPath(path)
+    )]
     Untrusted {
         /// The path that failed the ownership, mode, or socket check.
         path: PathBuf,
     },
-    /// The resident did not answer an exchange phase within its bound.
-    #[error("the resident did not answer the control {phase} within the bound")]
+    /// The socket's listener is this user's but not the process `serve.lock` records, or there is no
+    /// readable record: another process holds `serve`'s socket, so nothing is sent to it. A cause of its
+    /// own, apart from [`Untrusted`](Self::Untrusted), since the path's owner and mode are fine and the
+    /// line naming them would be false.
+    #[error(
+        "another process is answering swoosh serve's socket\n  Process {pid} answers at {}.\n  \
+         Nothing was sent through it.",
+        EscapedPath(path)
+    )]
+    Unattributed {
+        /// The socket it answered at.
+        path: PathBuf,
+        /// The answering process, as the kernel reports it. Always a real pid, because the code builds
+        /// this variant only from one: a credential query that failed, or a pid of 0 (Linux, across pid
+        /// namespaces), is [`Untrusted`](Self::Untrusted) instead.
+        pid: ProcessId,
+    },
+    /// The resident did not answer an exchange phase within its bound. The line names no phase: what
+    /// to do is the same whichever ran out.
+    #[error(
+        "swoosh serve did not answer here\n  Run this command again. If swoosh serve still does not \
+         answer, restart it."
+    )]
     Timeout {
         /// Which phase hit its deadline: `"connect"`, `"request write"`, or `"response read"`.
         phase: &'static str,

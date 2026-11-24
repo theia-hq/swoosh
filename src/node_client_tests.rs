@@ -277,6 +277,46 @@ async fn connect_refuses_a_foreign_uid_peer() {
         matches!(error, ControlError::Untrusted { ref path } if path == &client.socket),
         "a forged peer is Untrusted naming the socket: {error}"
     );
+    // Another user's listener is Untrusted whatever the record says, never the line naming a process.
+    std::fs::remove_file(leaf.join("serve.lock")).unwrap();
+    let error = client
+        .connect_checked_with(tokio::net::UnixStream::connect(&client.socket), foreign_uid)
+        .await
+        .expect_err("a foreign-uid peer must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { .. }),
+        "a forged peer with no record is still Untrusted: {error}"
+    );
+
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+fn no_credentials(_: i32) -> std::io::Result<super::PeerCredentials> {
+    Err(std::io::Error::other("the credential query failed"))
+}
+
+/// A credential query that fails is Untrusted, even with a record naming this process: with no pid
+/// from the kernel there is no process to name, so the line naming one never prints.
+#[tokio::test]
+async fn connect_refuses_a_peer_whose_credentials_cannot_be_read() {
+    let leaf = scratch("nocred", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
+
+    let error = client
+        .connect_checked_with(
+            tokio::net::UnixStream::connect(&client.socket),
+            no_credentials,
+        )
+        .await
+        .expect_err("a peer with no credentials must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { ref path } if path == &client.socket),
+        "a peer with no credentials is Untrusted naming the socket: {error}"
+    );
 
     drop(listener);
     let _ = std::fs::remove_dir_all(&leaf);
@@ -506,10 +546,48 @@ async fn stop_treats_a_clean_eof_as_success() {
 }
 
 /// The verb-boundary rendering of the typed control errors: `NoResident` teaches the fix verbatim,
-/// a wire `Refused` renders the resident's reason verbatim (never doubled), and a `Protocol`
-/// error names the skew fix, so a stale resident is never silently bypassed.
+/// a wire `Refused` renders the resident's reason verbatim (never doubled), a `Protocol`
+/// error names the skew fix, so a stale resident is never silently bypassed, and a socket that cannot
+/// be trusted, one another process answers, and a `serve` with no answer in time each print their own
+/// lines whole, the last with no phase.
 #[test]
 fn control_errors_render_through_their_taxonomy() {
+    let socket = PathBuf::from("/run/user/1000/swoosh/home/control.sock");
+    let untrusted = format!(
+        "{:#}",
+        super::control_error_report(ControlError::Untrusted {
+            path: PathBuf::clone(&socket)
+        })
+    );
+    assert_eq!(
+        untrusted,
+        "swoosh serve's socket is not private to you\n  /run/user/1000/swoosh/home/control.sock is \
+         not yours alone.\n  Nothing was sent through it."
+    );
+    let unattributed = format!(
+        "{:#}",
+        super::control_error_report(ControlError::Unattributed {
+            path: socket,
+            pid: 4242.try_into().unwrap(),
+        })
+    );
+    assert_eq!(
+        unattributed,
+        "another process is answering swoosh serve's socket\n  Process 4242 answers at \
+         /run/user/1000/swoosh/home/control.sock.\n  Nothing was sent through it."
+    );
+    let timeout = format!(
+        "{:#}",
+        super::control_error_report(ControlError::Timeout {
+            phase: "response read"
+        })
+    );
+    assert_eq!(
+        timeout,
+        "swoosh serve did not answer here\n  Run this command again. If swoosh serve still does not \
+         answer, restart it."
+    );
+
     let missing = format!(
         "{:#}",
         super::control_error_report(ControlError::NoResident)
@@ -573,7 +651,13 @@ async fn every_exchange_rereads_the_record_and_refuses_before_request_bytes() {
                 2 => client.stop_attributed().await.map(|_| ()),
                 _ => client.local_service_detail().await.map(|_| ()),
             };
-            assert!(matches!(result, Err(ControlError::Untrusted { .. })));
+            assert!(
+                matches!(
+                    result,
+                    Err(ControlError::Unattributed { pid, .. }) if pid.get() == std::process::id()
+                ),
+                "{bytes:?}: {result:?}"
+            );
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut byte = [0];
             assert_eq!(
@@ -591,7 +675,7 @@ async fn every_exchange_rereads_the_record_and_refuses_before_request_bytes() {
     std::fs::create_dir(&record).unwrap();
     assert!(matches!(
         client.services().await,
-        Err(ControlError::Untrusted { .. })
+        Err(ControlError::Unattributed { .. })
     ));
     drop(listener);
     std::fs::remove_dir_all(leaf).unwrap();
@@ -617,7 +701,7 @@ async fn record_at_connect_not_resolution_controls_attribution() {
         client
             .connect_checked_with(dial, super::real_peer_credentials)
             .await,
-        Err(ControlError::Untrusted { .. })
+        Err(ControlError::Unattributed { .. })
     ));
     drop(listener);
     std::fs::remove_dir_all(leaf).unwrap();
