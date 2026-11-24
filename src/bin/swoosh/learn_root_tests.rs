@@ -290,33 +290,21 @@ where
         .unwrap()
         .machine(&contacts)
         .unwrap();
-    let bound = swoosh::transport::Bound {
-        local: false,
-        reach: swoosh::transport::Reach::default(),
-    };
-    let ctx = swoosh::reaching::ReachCtx {
-        contacts: &contacts,
-        machine: Some(&machine),
-        bound: &bound,
-        present: None,
-        membership: None,
-        home,
-        admitted: swoosh::learn::Admitted::unheard(),
-    };
+    // What runs beside the verb, read before it splits into its one body.
+    let beside = Beside::of(&outward, home, Some(&machine));
+    let dialing = crate::decision::tests::dialing(outward);
     let mut told = Vec::new();
     let started = Instant::now();
     let (result, shown) = {
         let peers = swoosh::peers::Peers::new(node);
         tokio::time::timeout(
             Duration::from_secs(30),
-            run_verb(
-                Beside::of(&outward, home, ctx.machine),
-                &Answering::with(Answer::Same),
-                async |admitted| {
-                    let ctx = swoosh::reaching::ReachCtx { admitted, ..ctx };
-                    swoosh::reaching::Reaching::run(outward, node, ctx, &peers).await
-                },
-            ),
+            run_verb(beside, &Answering::with(Answer::Same), async |admitted| {
+                crate::decision::tests::by_own_bind(
+                    &dialing, node, &peers, home, &machine, &contacts, admitted,
+                )
+                .await
+            }),
         )
         .await
         .expect("the verb ends")

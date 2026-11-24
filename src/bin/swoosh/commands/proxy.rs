@@ -18,15 +18,15 @@ use core::ops::ControlFlow;
 use core::time::Duration;
 
 use ::fetch::http::{FetchRequest, FetchResponse};
-use bifrost::{Discovery, Node, Refusal, Session, Transport};
+use bifrost::Refusal;
 use clap::Args;
 use nauthy::Service;
 use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, escaped_report};
 use swoosh::peer::{Machine, Peer};
-use swoosh::peers::{Hints, Peers};
+use swoosh::peers::Hints;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
-use swoosh::streams::{Ask, OwnBind, StreamSource, Unopened};
+use swoosh::streams::{Ask, StreamSource, Unopened};
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -91,42 +91,7 @@ impl swoosh::reaching::Reaching for ProxyCmd {
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
-            &self.peer,
-            self.service.as_str(),
-        ))
-    }
-
-    /// Answer requests over the run's own bind: each request's stream rides the run's `peers`,
-    /// presenting what its open reads from the home, as `forward`'s streams do.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        peers: &'p Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        let Some(machine) = ctx.machine else {
-            eyre::bail!("internal: `proxy` ran without its machine resolved (root-dispatch bug)");
-        };
-        let route = Route::Own {
-            peer: &self.peer,
-            bound: ctx.bound,
-            this: node.node_id(),
-        };
-        let credential = swoosh::credential::Credential::dialing(&self.peer, self.service.as_str());
-        let source = OwnBind::new(peers, ctx.home, node.node_id(), &credential);
-        self.proxy(
-            source,
-            &route,
-            machine,
-            ctx.contacts,
-            &mut std::io::stdout(),
-        )
-        .await
+        swoosh::reaching::BindRole::Dialing(self.credential())
     }
 }
 
@@ -141,6 +106,11 @@ pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const PROXY_LANE: OpenLane = OpenLane::Bulk;
 
 impl ProxyCmd {
+    /// What this run dials as: the one value that picks its bind and what its streams present.
+    pub(crate) fn credential(&self) -> swoosh::credential::Credential {
+        swoosh::credential::Credential::dialing(&self.peer, self.service.as_str())
+    }
+
     /// The one stream every request asks of `machine`, admission included.
     fn ask(&self, machine: &Machine) -> Ask {
         Ask {

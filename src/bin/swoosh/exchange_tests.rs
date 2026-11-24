@@ -356,7 +356,10 @@ async fn routed(served: &mut Served, answers: Vec<Answer>, verb: Outward, asked:
     let result = tokio::time::timeout(
         ROW_BOUND * 6,
         crate::exchange_through_serve(
-            verb,
+            match verb.split() {
+                crate::Run::Exchanges(exchanging) => exchanging,
+                crate::Run::Serve(_) | crate::Run::Dials(_) => panic!("not an exchange verb"),
+            },
             &served.home,
             socket,
             hints,

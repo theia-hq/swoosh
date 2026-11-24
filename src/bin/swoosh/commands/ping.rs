@@ -20,7 +20,7 @@ use core::cell::RefCell;
 use core::time::Duration;
 use std::io::{self, Write};
 
-use bifrost::{Discovery, Node, Path, Session, Transport};
+use bifrost::{Path, Session};
 use clap::Args;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::Service;
@@ -31,7 +31,7 @@ use swoosh::peer::{Machine, Peer};
 use swoosh::peers::Hints;
 use swoosh::reach;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
-use swoosh::streams::{Ask, Observing, OwnBind, StreamSource, Unopened};
+use swoosh::streams::{Ask, Observing, StreamSource, Unopened};
 use swoosh::transport::{self, ReachArgs};
 
 use crate::commands::route::Route;
@@ -80,47 +80,16 @@ impl swoosh::reaching::Reaching for PingCmd {
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
-            &self.peer,
-            reach::PING_SERVICE,
-        ))
-    }
-
-    /// Uniform dispatch: one stream on the run's held Main session to the machine resolved before the
-    /// bind, presenting what the open reads from the home, or an `anyone` link alone.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'p>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        T::Session: 'static,
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        let Some(machine) = ctx.machine else {
-            eyre::bail!("internal: `ping` ran without its machine resolved (root-dispatch bug)");
-        };
-        let credential = swoosh::credential::Credential::dialing(&self.peer, reach::PING_SERVICE);
-        let route = Route::Own {
-            peer: &self.peer,
-            bound: ctx.bound,
-            this: node.node_id(),
-        };
-        self.probe(
-            OwnBind::new(peers, ctx.home, node.node_id(), &credential),
-            &route,
-            machine,
-            ctx.admitted,
-            &mut io::stdout(),
-            &mut io::stderr(),
-        )
-        .await
+        swoosh::reaching::BindRole::Dialing(self.credential())
     }
 }
 
 impl PingCmd {
+    /// What this run dials as: the one value that picks its bind and what its stream presents.
+    pub(crate) fn credential(&self) -> swoosh::credential::Credential {
+        swoosh::credential::Credential::dialing(&self.peer, reach::PING_SERVICE)
+    }
+
     /// Probe `machine` over one stream from `source` on Main, printing on `out` and `err`, as `route`
     /// words what it meets: its path and RTT summary, or the line for how far it got, and only an
     /// answered probe exits green. A machine that refuses the probe `NotAdmitted` prints the refusal as
@@ -401,7 +370,7 @@ mod tests {
                 Script::Lists(vec!["ping"]),
             ],
         );
-        let node = Node::new(peer.clone(), bifrost::NoDiscovery);
+        let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
         let peers = swoosh::peers::Peers::new(&node);
         let home = crate::commands::through_serve::tests::empty_home("ping-refused");
         let ran = cmd

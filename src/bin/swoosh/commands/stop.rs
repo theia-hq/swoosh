@@ -34,7 +34,7 @@
 use core::time::Duration;
 use std::io;
 
-use bifrost::{Discovery, Node, NodeId, Transport};
+use bifrost::NodeId;
 use clap::Args;
 use swoosh::contacts::{ContactRef, Contacts, ContactsStore, DeviceLabel, ME, Petname};
 use swoosh::credential::Credential;
@@ -47,7 +47,7 @@ use swoosh::root_key::RootKey;
 use swoosh::roster::RosterDoc;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal};
 use swoosh::serve::{ACK_GRACE, CONTROL_STOP_SERVICE, STOP_ACK};
-use swoosh::streams::{Ask, Opened, OwnBind, StreamSource, Unopened};
+use swoosh::streams::{Ask, Opened, StreamSource, Unopened};
 use swoosh::transport::{BareReachFlag, ReachArgs};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::time::Instant;
@@ -423,41 +423,17 @@ impl swoosh::reaching::Reaching for StopDevice {
     /// so its bind must not write the key's address record (0.9.0 F1). It presents this device's membership
     /// badge, rooted at the dialing key: only one of your devices may stop another.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(Credential::Family { present: None })
-    }
-
-    /// Uniform dispatch: the stop over the run's own bind, presenting this home's standing as it reads at
-    /// the open, its lines on stderr.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'p>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        T::Session: 'static,
-        <T::Session as bifrost::Session>::Write: Send + 'static,
-        <T::Session as bifrost::Session>::Read: Send + 'static,
-    {
-        let Some(machine) = ctx.machine else {
-            eyre::bail!("internal: `stop` ran without its machine resolved (root-dispatch bug)");
-        };
-        let route = Route::Own {
-            peer: &self.peer,
-            bound: ctx.bound,
-            this: node.node_id(),
-        };
-        let source = OwnBind::new(
-            peers,
-            ctx.home,
-            node.node_id(),
-            &Credential::Family { present: None },
-        );
-        self.stop(source, &route, machine, &mut io::stderr()).await
+        swoosh::reaching::BindRole::Dialing(self.credential())
     }
 }
 
 impl StopDevice {
+    /// What this run dials as: this home's standing, as it reads at the open. Never a link: a stop goes
+    /// only from one of your devices to another.
+    pub(crate) fn credential(&self) -> Credential {
+        Credential::Family { present: None }
+    }
+
     /// Stop the device over one `control.stop` stream from `source`, on a connection of its own, its lines
     /// on `err`, each outcome worded by `route` where `stop` has no line of its own. On admission the node
     /// writes one ack byte and waits for this side to close before it cancels its teardown token; a node

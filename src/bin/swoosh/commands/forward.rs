@@ -17,14 +17,13 @@
 //! `ProxyCommand` (`forward <peer> <service> -`), so the bridge is a verb an operator can run by hand to
 //! debug a launch that fails.
 
-use bifrost::{Discovery, Node, Transport};
 use clap::Args;
 use nauthy::Service;
 use swoosh::contacts::Contacts;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::OpenLane;
-use swoosh::streams::{Ask, OwnBind, StreamSource};
+use swoosh::streams::{Ask, StreamSource};
 use swoosh::transport::ReachArgs;
 use tokio::net::TcpListener;
 
@@ -87,36 +86,7 @@ impl swoosh::reaching::Reaching for ForwardCmd {
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
-            &self.peer,
-            self.service.as_str(),
-        ))
-    }
-
-    /// Drive the local end over the run's own bind: its streams ride the run's `peers`, each presenting
-    /// what its open reads from the home, as `send`'s streams do.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as bifrost::Session>::Write: Send + 'static,
-        <T::Session as bifrost::Session>::Read: Send + 'static,
-    {
-        let Some(machine) = ctx.machine else {
-            eyre::bail!("internal: `forward` ran without its machine resolved (root-dispatch bug)");
-        };
-        let route = Route::Own {
-            peer: &self.peer,
-            bound: ctx.bound,
-            this: node.node_id(),
-        };
-        let credential = swoosh::credential::Credential::dialing(&self.peer, self.service.as_str());
-        let source = OwnBind::new(peers, ctx.home, node.node_id(), &credential);
-        self.forward(source, &route, machine, ctx.contacts, connect::stdio)
-            .await
+        swoosh::reaching::BindRole::Dialing(self.credential())
     }
 }
 
@@ -129,6 +99,11 @@ const BRIDGE_LANE: OpenLane = OpenLane::Main;
 const LISTENER_LANE: OpenLane = OpenLane::Bulk;
 
 impl ForwardCmd {
+    /// What this run dials as: the one value that picks its bind and what its streams present.
+    pub(crate) fn credential(&self) -> swoosh::credential::Credential {
+        swoosh::credential::Credential::dialing(&self.peer, self.service.as_str())
+    }
+
     /// Drive the local end on either path: a port through [`listen`](Self::listen), stdout through
     /// [`bridge`](Self::bridge), with streams from `source` to `machine`, each outcome worded by `route`.
     pub(crate) async fn forward<S, O>(

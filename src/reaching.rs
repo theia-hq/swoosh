@@ -22,62 +22,20 @@
 //! badge that is already dead is refused here, locally, before any dial, so the operator reads the cause
 //! and the fix instead of the far gate's deliberately uniform `not admitted`.
 
-use core::future::Future;
 use core::net::SocketAddr;
 use std::time::SystemTime;
 
-use bifrost::{Discovery, Node, NodeId, Session, Transport};
+use bifrost::{NodeId, Transport};
 use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
 
-use crate::contacts::Contacts;
 use crate::credential::Credential;
 use crate::home::Home;
 use crate::identity::Identity;
 use crate::standing::{Standing, StandingError};
 use crate::{badge, config, transport};
 
-/// The uniform context every reaching verb runs against, so dispatch is ONE line (`self.run(node, ctx, peers)`)
-/// instead of a per-verb argument-threading match with a different signature per arm.
-///
-/// It carries what a reach-outward verb needs and no more: the [`contacts`](Self::contacts) to resolve a
-/// petname, the [`bound`](Self::bound) facts a verb reports and a failed dial names, the
-/// ALREADY-RESOLVED [`present`](Self::present) badge (minted once by [`resolve`], so the verb never
-/// re-derives it), and the [`home`](Self::home) a verb that opens its own store needs. A verb ignores
-/// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here: it lives on
-/// the serve command's own type (the CLI's `ServeCmd`), which reads its own, so this context stays uniform.
-pub struct ReachCtx<'a> {
-    /// The address book, for a verb that names a machine it reached by the name this home gives it.
-    pub contacts: &'a Contacts,
-    /// The one machine the verb's peer resolved to, once, before the key was read
-    /// ([`Peer::machine`](crate::peer::Peer::machine)); `None` for a verb that dials no peer of its own.
-    pub machine: Option<&'a crate::peer::Machine>,
-    /// What this run bound: the backend a verb reports, the `--local` bit, and the two reach services.
-    /// One value, composed once in the composition root, because a failed dial reads all three: iroh's
-    /// own error names none of them, so without this an unreachable resolver of your own reads as "the
-    /// peer is offline".
-    pub bound: &'a transport::Bound,
-    /// Slot 1, the grant to present, resolved ONCE in the composition root via [`resolve`]: the link the
-    /// peer was typed as, else the stored member badge on a device (the plain member dial). `None` for the
-    /// [`Serving`](BindRole::Serving) verb, which resolves no slots because it never dials, and for a
-    /// plain dial from a machine that is not a device, which has no badge to present.
-    pub present: Option<Link>,
-    /// Slot 2, the membership badge under the dialing key, for a signet-bound slip's AND: the badge the
-    /// far gate verifies under the FOREIGN fleet a slip in slot 1 names. `None` on a plain member dial
-    /// (the badge is slot 1 there) and on every non-signet slip, so a dial never leaks this device's
-    /// fleet-signet linkage where it cannot help.
-    pub membership: Option<Link>,
-    /// The node home, for a verb that opens its OWN store (`fleet` writes contacts; a write, unlike the
-    /// read-only `contacts` the reach verbs share) or reads a trust file (its signet).
-    pub home: &'a Home,
-    /// The signal a verb that may teach a root gives when its first stream is admitted
-    /// ([`Admitted::ask`](crate::learn::Admitted::ask), or [`Admitted::watch`](crate::learn::Admitted::watch)
-    /// on its session): the question of which root vouches for the machine, for the composition root to
-    /// ask. Unheard for every other verb.
-    pub admitted: crate::learn::Admitted<'a>,
-}
-
-/// A verb that reaches a peer over a transport, stating how it authenticates and how it runs.
+/// A verb that reaches a peer over a transport, stating how it authenticates and what its bind is for.
 ///
 /// The compiler forces every method on every reaching verb, so adding a verb that forgets its auth need
 /// does not compile (the fleet/fetch bug class). [`bind_role`](Self::bind_role) is TOTAL and carries the
@@ -110,26 +68,6 @@ pub trait Reaching {
     /// MUST NOT publish (or a short-lived command overwrites a live `serve`'s record), and carries the
     /// credential it dials with. Required with no default body, like `identity`.
     fn bind_role(&self) -> BindRole;
-
-    /// Run this verb against the composed node under the uniform [`ReachCtx`]. Every verb takes the same
-    /// context, so the composition root dispatches with ONE line (`cmd.run(node, ctx, peers)`), not a per-verb
-    /// argument-threading match. A verb reads the ctx fields it needs and ignores the rest. The `Send`
-    /// bounds on the session halves are stated once here (structured concurrency across `.await`s).
-    ///
-    /// Written as a returned `impl Future` (RPITIT), not `async fn`, matching the `Handler` trait: an
-    /// `async fn` in a trait cannot state its auto-trait bounds and draws the `async_fn_in_trait` lint;
-    /// the impls stay plain `async fn`, which coerces to this on the pinned toolchain.
-    fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: ReachCtx<'p>,
-        peers: &'p crate::peers::Peers<'n, T, D>,
-    ) -> impl Future<Output = eyre::Result<()>>
-    where
-        Self: Sized,
-        T::Session: 'static,
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static;
 }
 
 /// What a reaching verb's bind is for: accepting connections under the home key, or dialing out as the

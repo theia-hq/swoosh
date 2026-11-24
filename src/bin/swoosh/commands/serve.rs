@@ -46,7 +46,7 @@ use swoosh::gate::AnchorCut;
 use swoosh::grants::LinksForAnother;
 use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::identity::Identity;
-use swoosh::reaching::{BindRole, ReachCtx, Reaching};
+use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
     Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FirstRound,
@@ -338,13 +338,14 @@ impl Reaching for ServeCmd {
     fn bind_role(&self) -> BindRole {
         BindRole::Serving
     }
+}
 
-    /// Uniform dispatch: `serve` reads its OWN [`Claim`] and [`ExposeContext`] (attached by the root before
-    /// dispatch), so it ignores every `ReachCtx` field.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
+impl ServeCmd {
+    /// Serve on the composed `node`, over its `peers`: the one command that receives a node. It reads its
+    /// OWN [`Claim`] and [`ExposeContext`], attached by the root before dispatch.
+    pub async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
         mut self,
         node: &'n Node<T, D>,
-        _ctx: ReachCtx<'_>,
         peers: &'p swoosh::peers::Peers<'n, T, D>,
     ) -> eyre::Result<()>
     where
@@ -361,9 +362,7 @@ impl Reaching for ServeCmd {
         };
         self.run_serve(node, peers, *claim, *expose).await
     }
-}
 
-impl ServeCmd {
     /// Capture this invocation's service selection from positional definitions or the saved/default base, applying relative flags when supplied.
     pub async fn claim(mut self, home: &Home) -> eyre::Result<Self> {
         // Typed services that cannot be one list are a usage error: refused before the lock, so it reads

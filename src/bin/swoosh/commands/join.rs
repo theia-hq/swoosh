@@ -13,7 +13,7 @@ use core::time::Duration;
 use std::io::{self, BufRead, IsTerminal as _, Read as _, Write};
 use std::time::SystemTime;
 
-use bifrost::{Discovery, Node, NodeId, Session, Transport};
+use bifrost::NodeId;
 use clap::Args;
 use keystore::{KeyFile, Stored};
 use swoosh::home::{Home, HomeWrite, ServeLock};
@@ -22,8 +22,7 @@ use swoosh::joining::Join;
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::root::Date;
 use swoosh::standing::{Disagreement, Standing, StandingError};
-use swoosh::streams::OwnBind;
-use swoosh::sync::{Dial, SourceDial};
+use swoosh::sync::Dial;
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
@@ -410,26 +409,6 @@ impl swoosh::reaching::Reaching for JoinPull {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
             present: None,
         })
-    }
-
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'_>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        let own = OwnBind::new(
-            peers,
-            ctx.home,
-            node.node_id(),
-            &swoosh::credential::Credential::Family { present: None },
-        );
-        pull(&SourceDial::new(&own, ctx.home), self.from).await;
-        Ok(())
     }
 }
 

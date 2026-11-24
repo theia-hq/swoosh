@@ -28,7 +28,7 @@
 use core::time::Duration;
 use std::io::Write;
 
-use bifrost::{Discovery, Node, Path, Session, Transport};
+use bifrost::{Path, Session};
 use clap::Args;
 use measure::{Ping, ProtocolError};
 use nauthy::Service;
@@ -41,7 +41,7 @@ use swoosh::peers::Hints;
 use swoosh::reach;
 use swoosh::serve::CONTROL_SERVICES_SERVICE;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
-use swoosh::streams::{Ask, Observing, OwnBind, Unopened};
+use swoosh::streams::{Ask, Observing, Unopened};
 use swoosh::transport::ReachArgs;
 use tokio::io::AsyncWriteExt as _;
 
@@ -90,49 +90,20 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// [`Kind::Link`], which is pinged: so `ping` is the service here, before the machine resolves, and
     /// the probe itself is picked from the resolved kind.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(match &self.peer {
-            Some(peer) => swoosh::credential::Credential::dialing(peer, reach::PING_SERVICE),
-            None => swoosh::credential::Credential::Family { present: None },
-        })
-    }
-
-    /// Uniform dispatch: one stream on the run's held Main session to the machine resolved before the
-    /// bind, presenting what the open reads from the home, or an `anyone` link alone.
-    async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-        self,
-        node: &'n Node<T, D>,
-        ctx: swoosh::reaching::ReachCtx<'p>,
-        peers: &'p swoosh::peers::Peers<'n, T, D>,
-    ) -> eyre::Result<()>
-    where
-        T::Session: 'static,
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        // A bare `status` splits to `run_local` in the root BEFORE any transport is composed, so a
-        // missing machine or peer here is a root-dispatch bug, not a user error.
-        let (Some(machine), Some(peer)) = (ctx.machine, &self.peer) else {
-            eyre::bail!("internal: `status` ran without its machine resolved (root-dispatch bug)");
-        };
-        let credential = swoosh::credential::Credential::dialing(peer, reach::PING_SERVICE);
-        let route = Route::Own {
-            peer,
-            bound: ctx.bound,
-            this: node.node_id(),
-        };
-        self.probe(
-            OwnBind::new(peers, ctx.home, node.node_id(), &credential),
-            &route,
-            machine,
-            ctx.admitted,
-            &mut std::io::stdout(),
-            &mut std::io::stderr(),
-        )
-        .await
+        swoosh::reaching::BindRole::Dialing(self.credential())
     }
 }
 
 impl StatusCmd {
+    /// What this run dials as: the one value that picks its bind and what its stream presents. A bare
+    /// `status` dials nobody; it is never a reaching verb, so its arm only keeps the match total.
+    pub(crate) fn credential(&self) -> swoosh::credential::Credential {
+        match &self.peer {
+            Some(peer) => swoosh::credential::Credential::dialing(peer, reach::PING_SERVICE),
+            None => swoosh::credential::Credential::Family { present: None },
+        }
+    }
+
     /// Probe `machine` over one stream from `source` on Main, printing its status line on `out` and
     /// any warning on `err`, as `route` words what it meets: an unreachable machine prints an honest
     /// line, and only an answered probe exits green. Once the stream is admitted, `admitted` gets its

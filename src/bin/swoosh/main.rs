@@ -143,16 +143,16 @@ enum Command {
     Tree(tree::TreeCmd),
 }
 
-/// Declare the reaching verbs ONCE: the list below becomes both the [`Reach`] enum and its whole
+/// Declare the reaching verbs ONCE: the list below becomes both the [`Outward`] enum and its whole
 /// [`Reaching`] impl, so a verb joins the reach family by adding one line rather than an arm in each of
-/// five parallel matches. Five hand-written arm lists is the shape the retired `self_badge()` drifted in:
+/// four parallel matches. Four hand-written arm lists is the shape the retired `self_badge()` drifted in:
 /// nothing keeps them in step but the author's eye, and a `_` wildcard in any one of them silently admits
-/// a verb that never stated its auth need. Generated, the five cannot disagree, and a verb missing from the
+/// a verb that never stated its auth need. Generated, the four cannot disagree, and a verb missing from the
 /// list is a compile error at [`Command::split`] rather than a verb that reaches a gate carrying nothing.
 ///
-/// Earned by that invariant, not by the keystrokes: the forwarding is mechanical, identical per arm, and
-/// there is no way to express "these five matches share one arm list" in the type system, because
-/// [`Reaching::run`] is generic over the transport and cannot be a `dyn` object.
+/// Earned by that invariant, not by the keystrokes: the forwarding is mechanical and identical per arm.
+/// How each verb runs is not generated here: [`Outward::split`] names that per verb, by hand, because
+/// the verbs' bodies take different arguments.
 macro_rules! reaching_verbs {
     ($($(#[$note:meta])* $verb:ident($cmd:ty)),+ $(,)?) => {
         /// A verb that reaches a peer: it binds a transport and dials. Split from the local `contact` group,
@@ -194,27 +194,6 @@ macro_rules! reaching_verbs {
             fn bind_role(&self) -> BindRole {
                 match self {
                     $(Self::$verb(cmd) => cmd.bind_role(),)+
-                }
-            }
-
-            /// Run the selected verb against the composed node with ONE uniform [`reaching::ReachCtx`], not
-            /// a per-verb argument-threading match. Every verb is generic over `Node<T, D>`, so this stays
-            /// transport-blind: the concrete transport was chosen once, at the seam below. A verb reads the
-            /// ctx fields it needs and ignores the rest; `serve` reads its own attached
-            /// [`serve::ExposeContext`] instead.
-            async fn run<'n: 'p, 'p, T: Transport, D: Discovery>(
-                self,
-                node: &'n Node<T, D>,
-                ctx: reaching::ReachCtx<'p>,
-                peers: &'p swoosh::peers::Peers<'n, T, D>,
-            ) -> eyre::Result<()>
-            where
-                T::Session: 'static,
-                <T::Session as bifrost::Session>::Write: Send + 'static,
-                <T::Session as bifrost::Session>::Read: Send + 'static,
-            {
-                match self {
-                    $(Self::$verb(cmd) => cmd.run(node, ctx, peers).await,)+
                 }
             }
         }
@@ -373,99 +352,6 @@ impl Outward {
         match self {
             Self::Serve(cmd) => Ok(Self::Serve(cmd.claim(home).await?)),
             verb => Ok(verb),
-        }
-    }
-
-    /// `<home>/serve.toml` as a claimed `serve`'s one watcher first read it; `None` for every other verb,
-    /// which reads the file itself.
-    fn serve_toml(&self) -> Option<&swoosh::serve_toml::ServeToml> {
-        match self {
-            Self::Serve(cmd) => cmd.first_read(),
-            _ => None,
-        }
-    }
-
-    /// Attach the resolved [`serve::ExposeContext`] to the `serve` verb (a no-op for every other verb, which
-    /// carries no expose context), so `serve` reads its OWN context at run time. Called once in the root
-    /// after the context is cut (while the secret is still live), before dispatch. This is why the reach
-    /// [`ReachCtx`] stays uniform: the one verb that needs more than the shared context gets it on ITSELF
-    /// here, not as an `Option` field threaded through every verb's dispatch.
-    fn attach_expose(self, expose: Option<serve::ExposeContext>) -> Self {
-        match (self, expose) {
-            (Self::Serve(cmd), Some(expose)) => Self::Serve(cmd.with_expose(expose)),
-            // A non-serve verb resolves `expose` to `None` (see `expose_context`), so there is nothing to
-            // attach; a `serve` with no context is a root bug caught at its own `run`, not here.
-            (reach, _) => reach,
-        }
-    }
-
-    /// Attach the composed discovery's live [`MdnsState`] to the `serve` verb (a no-op for every other
-    /// verb), so `serve`'s banner reports the discovery that started instead of assuming one. Called
-    /// once per bind, at the seam that composed discovery, beside
-    /// [`attach_expose`](Self::attach_expose); a `serve` that reaches its banner without one is a root
-    /// bug caught there, not here.
-    fn attach_mdns(self, mdns: MdnsState) -> Self {
-        match self {
-            Self::Serve(cmd) => Self::Serve(cmd.with_mdns(mdns)),
-            reach => reach,
-        }
-    }
-
-    /// Attach the composed [`transport::Reach`] to the `serve` verb (a no-op for every other verb), so
-    /// its banner names the relay it offers and the resolver it publishes to instead of promising n0's.
-    /// Called at the iroh arm only, beside [`attach_mdns`](Self::attach_mdns): every other bind leans on
-    /// neither, and its banner says the same thing it always did.
-    fn attach_bound_reach(self, bound: &transport::Reach) -> Self {
-        match self {
-            Self::Serve(cmd) => Self::Serve(cmd.with_bound_reach(transport::Reach::clone(bound))),
-            verb => verb,
-        }
-    }
-
-    /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:
-    /// swoosh's ssh host seed (derived from the secret), and the one gate `serve` runs in every standing
-    /// with its live cut ([`swoosh::gate::anchored`]). All read from swoosh's OWN store, the node home.
-    /// Every other verb returns `None`. Async because the gate's files are read from disk.
-    ///
-    /// The gate never treats this machine's own key as a root: with no pin it admits no member, and the
-    /// own key admits only the links this machine recorded signing.
-    async fn expose_context(
-        &self,
-        secret: &swoosh::identity::Secret,
-        home: &Home,
-    ) -> eyre::Result<Option<serve::ExposeContext>> {
-        match self {
-            // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
-            // returns `None`. Nothing is signed here (or anywhere in `serve`): an update it gives or
-            // takes was signed by the root.
-            Self::Serve(cmd) => {
-                if let Some(root) = cmd.admit {
-                    cmd.admit(home, secret.node_id(), root).await?;
-                }
-                let admitted = cmd
-                    .admit
-                    .map(|root| tightbeam::identity::AsVerifyKey::verify_key(&root))
-                    .transpose()?;
-                let (gate, cut) = swoosh::gate::anchored_admitting(
-                    home,
-                    secret.node_id(),
-                    admitted,
-                    cmd.bound_targets()?,
-                )
-                .await?;
-                Ok(Some(serve::ExposeContext {
-                    #[cfg(feature = "ssh")]
-                    host_seed: secret.ssh_host_seed(),
-                    #[cfg(not(feature = "ssh"))]
-                    host_seed: [0u8; 32],
-                    gate,
-                    cut,
-                    // The SAME home the root resolved once, so the serve and its control clients name
-                    // the same paths.
-                    home: home.clone(),
-                }))
-            }
-            _ => Ok(None),
         }
     }
 }
@@ -946,22 +832,29 @@ async fn run() -> eyre::Result<()> {
                 outward.reach_args(),
             );
             // The exchange verbs and the dialing verbs take `--peer` on every path: what one Open could not
-            // carry is usage here, `serve` running or not, before `serve` is asked.
-            if matches!(
-                outward,
+            // carry is usage here, `serve` running or not, before `serve` is asked. Exhaustive with no
+            // wildcard, so a new verb says whether its Opens carry them.
+            match &outward {
+                // The resident: its `--peer` seeds its own discovery, and it makes no Open here.
+                Outward::Serve(_) => {}
+                // These arrive through their local step, which checked them there.
+                Outward::Stop(_)
+                | Outward::Join(_)
+                | Outward::Revoke(_)
+                | Outward::RootRestore(_) => {}
                 Outward::Sync(_)
-                    | Outward::Invite(_)
-                    | Outward::Ping(_)
-                    | Outward::Speed(_)
-                    | Outward::Status(_)
-                    | Outward::Send(_)
-                    | Outward::Forward(_)
-                    | Outward::Proxy(_)
-            ) {
-                hints = hints_or_usage(
-                    &[verb_word.as_deref().unwrap_or_default()],
-                    outward.reach_args(),
-                );
+                | Outward::Invite(_)
+                | Outward::Ping(_)
+                | Outward::Speed(_)
+                | Outward::Status(_)
+                | Outward::Send(_)
+                | Outward::Forward(_)
+                | Outward::Proxy(_) => {
+                    hints = hints_or_usage(
+                        &[verb_word.as_deref().unwrap_or_default()],
+                        outward.reach_args(),
+                    );
+                }
             }
             // A `serve` takes its home's lock and control socket before anything is opened or bound, so a
             // second one for the home refuses leaving everything as the running one has it. Its typed
@@ -993,10 +886,17 @@ async fn run() -> eyre::Result<()> {
         })
         .transpose()?;
 
+    // What the own bind reads off the verb, and what runs beside it on either path, read before the verb
+    // splits into how it runs: facts of the verb alone, so nothing is opened or read for them.
+    let identity = reach.identity();
+    let bind_role = reach.bind_role();
+    let own_peer = reach.dialed().is_some();
+    let beside = Beside::of(&reach, &home, machine.as_ref());
+
     // The run's path, decided once, here: after the machine resolves and before the key is read, so a run
     // through `serve` never unlocks or mints one.
-    match decision::decide(&reach, &home).await? {
-        decision::Decision::Own => {}
+    let run = match decision::decide(reach.split(), &home).await? {
+        decision::Decision::Own(run) => run,
         // `speed`, `ping`, `status <machine>`, `send`, `forward`, `proxy` and `stop` while `serve` runs
         // here: each stream, the stale-list exchange beside it and the root question are each one Open
         // there. Every one of them names a machine, resolved above; were it missing, the run ends on the
@@ -1021,7 +921,7 @@ async fn run() -> eyre::Result<()> {
             };
             return dial_through_serve(
                 dialing,
-                Beside::of(&reach, &home, Some(machine)),
+                beside,
                 through,
                 learning::Asking::here(),
                 commands::connect::stdio,
@@ -1039,9 +939,9 @@ async fn run() -> eyre::Result<()> {
         // `sync`, `invite`, `revoke`, `root restore` and `join`'s pull while `serve` runs here: each
         // exchange, offer, pick-up and root question is one Open there, so nothing is bound beside it and
         // no machine key is unlocked.
-        decision::Decision::Exchanges { socket } => {
+        decision::Decision::Exchanges { exchanging, socket } => {
             return exchange_through_serve(
-                reach,
+                exchanging,
                 &home,
                 socket,
                 hints,
@@ -1051,26 +951,24 @@ async fn run() -> eyre::Result<()> {
             )
             .await;
         }
-    }
+    };
 
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
     // writing nothing. Resolve it before binding, since the secret is what the transport is bound under.
     // A serving node took `serve.lock` with its claim, before its key is read, so a key replacement can
     // never replace the key it is serving as.
-    let secret = swoosh::identity::resolve(reach.identity(), &home).await?;
-    let contacts = Contacts::clone(store.contacts());
+    let secret = swoosh::identity::resolve(identity, &home).await?;
 
     // The one and only place a concrete transport is named. Everything downstream speaks `bifrost`. The
     // reach-family flags travel on the verb itself, so the bind mode and the dial hints are read off the
     // chosen reaching verb, not a root global.
-    let local = reach.reach_args().local;
-    // The verb's bind role, read BEFORE the bind selects a constructor: only a `Serving` verb publishes
-    // the home key's address record, so a dial-only command never overwrites the live `serve` record
-    // (0.9.0 F1). It carries the dialing verb's credential too, so the one read below answers both what
-    // this bind publishes and what it presents. Read here, before `reach` is consumed by dispatch.
-    let bind_role = reach.bind_role();
-    let peers = reach.reach_args().peer.clone();
+    let local = run.reach_args().local;
+    // The verb's bind role, read off the verb above, BEFORE the bind selects a constructor: only a
+    // `Serving` verb publishes the home key's address record, so a dial-only command never overwrites the
+    // live `serve` record (0.9.0 F1). It carries the dialing verb's credential too, so the one read
+    // answers both what this bind publishes and what it presents.
+    let peers = run.reach_args().peer.clone();
     // What this run bound, as ONE value: every consumer (a failed dial's teaching line, `serve`'s banner)
     // reads both facts, so they travel together from here. The relay and the resolver come from the
     // flags and the home files, over the ONE bind that reads them (the guard at the arm above refused the
@@ -1078,39 +976,38 @@ async fn run() -> eyre::Result<()> {
     // opened it.
     let bound = transport::Bound {
         local,
-        reach: match reach.reach_args().unused_reach_bind() {
+        reach: match run.reach_args().unused_reach_bind() {
             Some(_unused) => transport::Reach::default(),
             // A serving verb keeps the two servers it was pointed at in the home once its routes bind
             // (`serve`'s own write); a dialing verb's flag is this run only. Nothing is written here.
             // A `serve` binds over what its one watcher of `serve.toml` first read, when it claimed the
             // home: the same read its services came from.
-            None => match reach.serve_toml() {
-                Some(kept) => reach.reach_args().reach_over(kept),
-                None => reach.reach_args().reach(&home).await?,
+            None => match run.serve_toml() {
+                Some(kept) => run.reach_args().reach_over(kept),
+                None => run.reach_args().reach(&home).await?,
             },
         },
     };
-    // Resolve the membership badge to present BEFORE the secret is consumed by the transport bind: a
-    // device presents its STORED badge (bound to this key, which the dial then binds under, so the far
-    // gate's device-binding matches), and a machine that is not a device presents none. The exposer
+    // Resolve the membership badge BEFORE the secret is consumed by the transport bind, for what the
+    // resolve checks: a badge about to expire is warned of, and one already dead is refused here, before
+    // the bind, with its cause. Each stream's open reads what it presents itself. The exposer
     // context (`serve`) is resolved before the bind too: its ssh host seed derives from the secret
     // before the bind consumes it.
     //
     // The SERVING verb resolves nothing: it is the gate, so it presents no credential and never mints or
     // loads a badge it would not send. There is no wildcard here and no "present nothing" credential for a
-    // dialing verb to reach for: the role it declared decides, and only one of its arms carries slots.
+    // dialing verb to reach for: the role it declared decides, and only one of its arms resolves.
     //
-    // Only a verb that dials a peer of its own resolves slots. `sync`, `invite` and `join` dial your
+    // Only a verb that dials a peer of its own resolves. `sync`, `invite` and `join` dial your
     // devices themselves and present this home's standing on each exchange, so they resolve nothing
     // here: a standing that has passed its date must reach their exchange, whose refusal is what sends
     // them to the pick-up route.
     //
     // A verb that dials its own peer and presents this home's standing, when that standing has passed
     // its date or was revoked here, first tries the pick-up route at your own devices, once the node is
-    // bound; its slots are resolved after that, so the standing it presents is the one it may just have
+    // bound; its badge is resolved after that, so the standing checked is the one it may just have
     // taken. An `anyone` link dials under a throwaway key, which must never reach your devices, and a
     // slip presents its own authority, so neither tries it.
-    let own_peer = reach.dialed().is_some();
     let renew = match &bind_role {
         BindRole::Dialing(dial @ credential::Credential::Family { present: None })
             if own_peer && swoosh::renewal::is_due(&home, std::time::SystemTime::now()).await =>
@@ -1121,29 +1018,16 @@ async fn run() -> eyre::Result<()> {
         }
         BindRole::Serving | BindRole::Dialing(_) => None,
     };
-    let (present, membership) = match (&bind_role, &renew) {
+    match (&bind_role, &renew) {
         (BindRole::Dialing(dial), None) if own_peer => {
-            reaching::resolve(credential::Credential::clone(dial), secret.node_id(), &home)
-                .await?
-                .into_slots()
+            reaching::resolve(credential::Credential::clone(dial), secret.node_id(), &home).await?;
         }
-        (BindRole::Serving | BindRole::Dialing(_), _) => (None, None),
-    };
-    let expose = reach.expose_context(&secret, &home).await?;
+        (BindRole::Serving | BindRole::Dialing(_), _) => {}
+    }
+    let expose = run.expose_context(&secret, &home).await?;
     // Attach the resolved exposer context to the `serve` verb (a no-op otherwise), so `serve` reads its OWN
-    // context and every verb dispatches through the uniform `ReachCtx` below.
-    let reach = reach.attach_expose(expose);
-    // The one uniform context every verb runs against: the badge is already resolved, so the dispatch is
-    // `cmd.run(node, ctx)` per verb, not a per-verb argument-threading match.
-    let ctx = reaching::ReachCtx {
-        contacts: &contacts,
-        machine: machine.as_ref(),
-        bound: &bound,
-        present,
-        membership,
-        home: &home,
-        admitted: swoosh::learn::Admitted::unheard(),
-    };
+    // context.
+    let run = run.attach_expose(expose);
     // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed discovery
     // feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct addresses, so a
     // same-network dial goes straight there instead of relaying. With nothing known locally the resolve
@@ -1156,8 +1040,18 @@ async fn run() -> eyre::Result<()> {
         .await?;
     let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
     let node = Node::new(endpoint, composed.discovery);
-    let reach = reach.attach_bound_reach(&bound.reach);
-    run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
+    let run = run.attach_bound_reach(&bound.reach);
+    let verb = verb_word.as_deref().unwrap_or_default();
+    run_and_close(
+        run.attach_mdns(composed.mdns),
+        &node,
+        beside,
+        store.contacts(),
+        &bound,
+        renew,
+        verb,
+    )
+    .await
 }
 
 /// The `--peer` addresses as each machine's hints, or the usage error they make, exit 2: checked before
@@ -1170,31 +1064,196 @@ fn hints_or_usage(
         .unwrap_or_else(|error| usage_error(path, &error.to_string()))
 }
 
-/// A dialing verb that runs through `serve` when one answers here, read once from the verb
-/// ([`Outward::rides`]).
-enum Dialing<'a> {
-    Ping(&'a commands::ping::PingCmd),
-    Speed(&'a commands::speed::SpeedCmd),
-    Status(&'a status::StatusCmd),
-    Send(&'a commands::send::SendCmd),
-    /// `forward`, to every local end: a `unix:` end is refused by its body on either path.
-    Forward(&'a commands::forward::ForwardCmd),
-    Proxy(&'a commands::proxy::ProxyCmd),
-    /// `stop me/<name>`: its one stream rides a connection of its own on both paths.
-    Stop(&'a stop::StopDevice),
+/// A reaching verb split by how it runs: `serve` itself, one machine of its own, or an exchange with your
+/// devices. Built once from the verb ([`Outward::split`]), before the run's path is decided, so both paths
+/// dispatch from this one value and each verb has one body they share.
+enum Run {
+    /// `serve`, the resident: the one verb that runs on a node of its own.
+    Serve(serve::ServeCmd),
+    /// A verb that dials one machine of its own.
+    Dials(Dialing),
+    /// A verb that exchanges with your devices.
+    Exchanges(Exchanging),
 }
 
-impl Dialing<'_> {
+impl Outward {
+    /// Split the verb by how it runs. Exhaustive with no wildcard: a new reaching verb does not compile
+    /// until it says which body it has.
+    fn split(self) -> Run {
+        match self {
+            Self::Serve(cmd) => Run::Serve(cmd),
+            Self::Ping(cmd) => Run::Dials(Dialing::Ping(cmd)),
+            Self::Speed(cmd) => Run::Dials(Dialing::Speed(cmd)),
+            Self::Status(cmd) => Run::Dials(Dialing::Status(cmd)),
+            Self::Send(cmd) => Run::Dials(Dialing::Send(cmd)),
+            Self::Forward(cmd) => Run::Dials(Dialing::Forward(cmd)),
+            Self::Proxy(cmd) => Run::Dials(Dialing::Proxy(cmd)),
+            Self::Stop(cmd) => Run::Dials(Dialing::Stop(cmd)),
+            Self::Sync(cmd) => Run::Exchanges(Exchanging::Sync(cmd)),
+            Self::Invite(cmd) => Run::Exchanges(Exchanging::Invite(cmd)),
+            Self::Revoke(cmd) => Run::Exchanges(Exchanging::Revoke(cmd)),
+            Self::RootRestore(cmd) => Run::Exchanges(Exchanging::RootRestore(cmd)),
+            Self::Join(pull) => Run::Exchanges(Exchanging::Join(pull)),
+        }
+    }
+}
+
+impl Run {
     /// The verb's reach flags.
     fn reach_args(&self) -> &transport::ReachArgs {
         match self {
-            Self::Ping(cmd) => &cmd.reach,
-            Self::Speed(cmd) => &cmd.reach,
-            Self::Status(cmd) => &cmd.reach,
-            Self::Send(cmd) => &cmd.reach,
-            Self::Forward(cmd) => &cmd.reach,
-            Self::Proxy(cmd) => &cmd.reach,
+            Self::Serve(cmd) => cmd.reach_args(),
+            Self::Dials(dialing) => dialing.reach_args(),
+            Self::Exchanges(exchanging) => exchanging.reach_args(),
+        }
+    }
+
+    /// `<home>/serve.toml` as a claimed `serve`'s one watcher first read it; `None` for every other verb,
+    /// which reads the file itself.
+    fn serve_toml(&self) -> Option<&swoosh::serve_toml::ServeToml> {
+        match self {
+            Self::Serve(cmd) => cmd.first_read(),
+            Self::Dials(_) | Self::Exchanges(_) => None,
+        }
+    }
+
+    /// Attach the resolved [`serve::ExposeContext`] to the `serve` verb (a no-op for every other verb, which
+    /// carries no expose context), so `serve` reads its OWN context at run time. Called once in the root
+    /// after the context is cut (while the secret is still live), before dispatch: the one verb that needs
+    /// it gets it on ITSELF here, not as an `Option` threaded through every verb's dispatch.
+    fn attach_expose(self, expose: Option<serve::ExposeContext>) -> Self {
+        match (self, expose) {
+            (Self::Serve(cmd), Some(expose)) => Self::Serve(cmd.with_expose(expose)),
+            // A non-serve verb resolves `expose` to `None` (see `expose_context`), so there is nothing to
+            // attach; a `serve` with no context is a root bug caught at its own `run`, not here.
+            (run @ (Self::Serve(_) | Self::Dials(_) | Self::Exchanges(_)), _) => run,
+        }
+    }
+
+    /// Attach the composed discovery's live [`MdnsState`] to the `serve` verb (a no-op for every other
+    /// verb), so `serve`'s banner reports the discovery that started instead of assuming one. Called
+    /// once per bind, at the seam that composed discovery, beside
+    /// [`attach_expose`](Self::attach_expose); a `serve` that reaches its banner without one is a root
+    /// bug caught there, not here.
+    fn attach_mdns(self, mdns: MdnsState) -> Self {
+        match self {
+            Self::Serve(cmd) => Self::Serve(cmd.with_mdns(mdns)),
+            run @ (Self::Dials(_) | Self::Exchanges(_)) => run,
+        }
+    }
+
+    /// Attach the composed [`transport::Reach`] to the `serve` verb (a no-op for every other verb), so
+    /// its banner names the relay it offers and the resolver it publishes to instead of promising n0's.
+    /// Called at the iroh arm only, beside [`attach_mdns`](Self::attach_mdns): every other bind leans on
+    /// neither, and its banner says the same thing it always did.
+    fn attach_bound_reach(self, bound: &transport::Reach) -> Self {
+        match self {
+            Self::Serve(cmd) => Self::Serve(cmd.with_bound_reach(transport::Reach::clone(bound))),
+            run @ (Self::Dials(_) | Self::Exchanges(_)) => run,
+        }
+    }
+
+    /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:
+    /// swoosh's ssh host seed (derived from the secret), and the one gate `serve` runs in every standing
+    /// with its live cut ([`swoosh::gate::anchored`]). All read from swoosh's OWN store, the node home.
+    /// Every other verb returns `None`. Async because the gate's files are read from disk.
+    ///
+    /// The gate never treats this machine's own key as a root: with no pin it admits no member, and the
+    /// own key admits only the links this machine recorded signing.
+    async fn expose_context(
+        &self,
+        secret: &swoosh::identity::Secret,
+        home: &Home,
+    ) -> eyre::Result<Option<serve::ExposeContext>> {
+        match self {
+            // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
+            // returns `None`. Nothing is signed here (or anywhere in `serve`): an update it gives or
+            // takes was signed by the root.
+            Self::Serve(cmd) => {
+                if let Some(root) = cmd.admit {
+                    cmd.admit(home, secret.node_id(), root).await?;
+                }
+                let admitted = cmd
+                    .admit
+                    .map(|root| tightbeam::identity::AsVerifyKey::verify_key(&root))
+                    .transpose()?;
+                let (gate, cut) = swoosh::gate::anchored_admitting(
+                    home,
+                    secret.node_id(),
+                    admitted,
+                    cmd.bound_targets()?,
+                )
+                .await?;
+                Ok(Some(serve::ExposeContext {
+                    #[cfg(feature = "ssh")]
+                    host_seed: secret.ssh_host_seed(),
+                    #[cfg(not(feature = "ssh"))]
+                    host_seed: [0u8; 32],
+                    gate,
+                    cut,
+                    // The SAME home the root resolved once, so the serve and its control clients name
+                    // the same paths.
+                    home: home.clone(),
+                }))
+            }
+            Self::Dials(_) | Self::Exchanges(_) => Ok(None),
+        }
+    }
+}
+
+/// A verb that dials one machine of its own, on either path: by its own bind, or through `serve` when one
+/// answers here.
+enum Dialing {
+    Ping(ping::PingCmd),
+    Speed(speed::SpeedCmd),
+    Status(status::StatusCmd),
+    Send(send::SendCmd),
+    /// `forward`, to every local end: a `unix:` end is refused by its body on either path.
+    Forward(forward::ForwardCmd),
+    Proxy(proxy::ProxyCmd),
+    /// `stop me/<name>`: its one stream rides a connection of its own on both paths.
+    Stop(stop::StopDevice),
+}
+
+impl Dialing {
+    /// The verb's reach flags.
+    fn reach_args(&self) -> &transport::ReachArgs {
+        match self {
+            Self::Ping(cmd) => cmd.reach_args(),
+            Self::Speed(cmd) => cmd.reach_args(),
+            Self::Status(cmd) => cmd.reach_args(),
+            Self::Send(cmd) => cmd.reach_args(),
+            Self::Forward(cmd) => cmd.reach_args(),
+            Self::Proxy(cmd) => cmd.reach_args(),
             Self::Stop(cmd) => cmd.reach_args(),
+        }
+    }
+
+    /// The machine as typed, which the own bind's lines name. `None` only for a bare `status`, which
+    /// never reaches here.
+    fn peer(&self) -> Option<&Peer> {
+        match self {
+            Self::Ping(cmd) => cmd.dialed(),
+            Self::Speed(cmd) => cmd.dialed(),
+            Self::Status(cmd) => cmd.dialed(),
+            Self::Send(cmd) => cmd.dialed(),
+            Self::Forward(cmd) => cmd.dialed(),
+            Self::Proxy(cmd) => cmd.dialed(),
+            Self::Stop(cmd) => cmd.dialed(),
+        }
+    }
+
+    /// What the verb dials as: the credential its bind role carries, and what each of its own bind's
+    /// streams presents.
+    fn credential(&self) -> credential::Credential {
+        match self {
+            Self::Ping(cmd) => cmd.credential(),
+            Self::Speed(cmd) => cmd.credential(),
+            Self::Status(cmd) => cmd.credential(),
+            Self::Send(cmd) => cmd.credential(),
+            Self::Forward(cmd) => cmd.credential(),
+            Self::Proxy(cmd) => cmd.credential(),
+            Self::Stop(cmd) => cmd.credential(),
         }
     }
 
@@ -1220,6 +1279,168 @@ impl Dialing<'_> {
             Self::Forward(cmd) => nauthy::Service::clone(&cmd.service),
             Self::Proxy(cmd) => nauthy::Service::clone(&cmd.service),
             Self::Stop(_) => swoosh::serve::CONTROL_STOP_SERVICE.parse()?,
+        })
+    }
+
+    /// Run the verb's one body over `source` to `machine`, on either path, each outcome worded by `route`.
+    /// Its first admitted stream gives `admitted` its question. `send` sets `sent` at each file it sent;
+    /// the bridge's stream goes to the stdin and stdout `stdio` opens; every other line goes to `out` and
+    /// `err`, `proxy`'s URL to `out`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's machine, its book, its signal and its writers ride beside its source"
+    )]
+    async fn run<'s, S, O>(
+        &self,
+        source: S,
+        route: &commands::route::Route<'_>,
+        machine: &Machine,
+        contacts: &Contacts,
+        admitted: swoosh::learn::Admitted<'s>,
+        sent: &core::cell::Cell<bool>,
+        stdio: impl FnOnce() -> eyre::Result<(commands::connect::Stdin, O)>,
+        out: &mut impl std::io::Write,
+        err: &mut impl std::io::Write,
+    ) -> eyre::Result<()>
+    where
+        S: swoosh::streams::Observing + Copy + 's,
+        S::Read: commands::connect::Download,
+        O: commands::connect::Output,
+    {
+        match self {
+            Self::Ping(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
+            Self::Speed(cmd) => {
+                cmd.measure(source, route, machine, admitted, out, err)
+                    .await
+            }
+            Self::Status(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
+            Self::Send(cmd) => {
+                cmd.send(source, route, machine, admitted, sent, out, err)
+                    .await
+            }
+            // None of these asks a root, so the signal goes unheard.
+            Self::Forward(cmd) => cmd.forward(source, route, machine, contacts, stdio).await,
+            Self::Proxy(cmd) => cmd.proxy(source, route, machine, contacts, out).await,
+            Self::Stop(cmd) => cmd.stop(source, route, machine, err).await,
+        }
+    }
+
+    /// Run the verb's one body over this run's own bind on `node`: its streams from `peers`, each presenting
+    /// what its open reads from `home` (or the link typed as `peer`), worded by the own route, which names
+    /// what was `bound`. Its lines go to this process's stdout and stderr, the bridge's stream to its stdin
+    /// and stdout.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the own bind's parts, the machine as resolved and as typed, and the run's signal"
+    )]
+    async fn by_own_bind<'s, 'n: 's, T: Transport, D: Discovery>(
+        &self,
+        node: &Node<T, D>,
+        peers: &'s swoosh::peers::Peers<'n, T, D>,
+        home: &'s Home,
+        bound: &transport::Bound,
+        machine: &Machine,
+        peer: &Peer,
+        contacts: &Contacts,
+        admitted: swoosh::learn::Admitted<'s>,
+    ) -> eyre::Result<()>
+    where
+        T::Session: 'static,
+        <T::Session as bifrost::Session>::Write: Send + 'static,
+        <T::Session as bifrost::Session>::Read: Send + 'static,
+    {
+        let route = commands::route::Route::Own {
+            peer,
+            bound,
+            this: node.node_id(),
+        };
+        let credential = self.credential();
+        self.run(
+            swoosh::streams::OwnBind::new(peers, home, node.node_id(), &credential),
+            &route,
+            machine,
+            contacts,
+            admitted,
+            // By own bind no `serve` can stop under the run, so nothing reads it.
+            &core::cell::Cell::new(false),
+            commands::connect::stdio,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )
+        .await
+    }
+}
+
+/// A verb that exchanges with your devices, on either path: by its own bind, or through `serve` when one
+/// answers here.
+enum Exchanging {
+    Sync(sync::SyncCmd),
+    Invite(invite::InviteCmd),
+    Revoke(revoke::RevokeRoot),
+    RootRestore(Box<root::restore::RestoreSync>),
+    Join(join::JoinPull),
+}
+
+/// What an exchange verb did, for the line a `serve` gone under it ends on.
+enum Exchanged {
+    /// `sync`: the devices its exchanges named.
+    Synced(Vec<swoosh::sync::Device>),
+    /// `invite`, `revoke` or `root restore`: a root act, which may cut the very device its exchange met.
+    Acted,
+    /// `join`'s pull: never printed, so nothing after it is either.
+    Pulled,
+}
+
+impl Exchanging {
+    /// The verb's reach flags.
+    fn reach_args(&self) -> &transport::ReachArgs {
+        match self {
+            Self::Sync(cmd) => cmd.reach_args(),
+            Self::Invite(cmd) => cmd.reach_args(),
+            Self::Revoke(cmd) => cmd.reach_args(),
+            Self::RootRestore(cmd) => cmd.reach_args(),
+            Self::Join(pull) => pull.reach_args(),
+        }
+    }
+
+    /// Run the verb's one body from `home`, on either path: its exchanges through `dial`, `sync`'s
+    /// pick-up through `fetch` and its streams from `source`, a root act's passphrase asked of `prompt`,
+    /// its lines on `out` and `err`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's three ways to reach your devices and its writers ride beside its home"
+    )]
+    async fn run(
+        self,
+        home: &Home,
+        source: &impl swoosh::streams::StreamSource,
+        dial: &impl swoosh::sync::Dial,
+        fetch: &impl swoosh::renewal::Fetch,
+        prompt: &mut impl swoosh::passphrase::Prompt,
+        out: &mut impl std::io::Write,
+        err: &mut impl std::io::Write,
+    ) -> eyre::Result<Exchanged> {
+        Ok(match self {
+            Self::Sync(cmd) => {
+                Exchanged::Synced(cmd.exchange(home, dial, fetch, source, out).await?)
+            }
+            Self::Invite(cmd) => {
+                cmd.issue(home, prompt, dial, out, err).await?;
+                Exchanged::Acted
+            }
+            Self::Revoke(cmd) => {
+                cmd.publish.run(home, prompt, dial, err).await?;
+                Exchanged::Acted
+            }
+            Self::RootRestore(cmd) => {
+                cmd.finish(home, dial, err).await?;
+                Exchanged::Acted
+            }
+            // The pull is never printed: a machine that does not answer now is asked at the next sync.
+            Self::Join(pull) => {
+                join::pull(dial, pull.from).await;
+                Exchanged::Pulled
+            }
         })
     }
 }
@@ -1249,7 +1470,7 @@ struct ThroughServe<'a> {
 /// Its lines go to `out` and `err`, `proxy`'s URL to `out`; the bridge's stream goes to the stdin and
 /// stdout `stdio` opens.
 async fn dial_through_serve<O: commands::connect::Output>(
-    dialing: Dialing<'_>,
+    dialing: Dialing,
     beside: Beside<'_>,
     through: ThroughServe<'_>,
     asking: learning::Asking,
@@ -1306,21 +1527,12 @@ async fn dial_through_serve<O: commands::connect::Output>(
     // Set once a `send` file prints `sent`, for the record's line below; no other verb sets it.
     let sent = &core::cell::Cell::new(false);
     let reports_gone = dialing.reports_gone();
-    let verb = async |admitted| match dialing {
-        Dialing::Ping(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
-        Dialing::Speed(cmd) => {
-            cmd.measure(source, route, machine, admitted, out, err)
-                .await
-        }
-        Dialing::Status(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
-        Dialing::Send(cmd) => {
-            cmd.through(source, route, machine, admitted, sent, out, err)
-                .await
-        }
-        // None of these asks a root, so the signal goes unheard.
-        Dialing::Forward(cmd) => cmd.forward(source, route, machine, contacts, stdio).await,
-        Dialing::Proxy(cmd) => cmd.proxy(source, route, machine, contacts, out).await,
-        Dialing::Stop(cmd) => cmd.stop(source, route, machine, err).await,
+    let verb = async |admitted| {
+        dialing
+            .run(
+                source, route, machine, contacts, admitted, sent, stdio, out, err,
+            )
+            .await
     };
     let (ended, shown) = run_verb(beside, &swoosh::sync::SourceDial::new(source, home), verb).await;
     // Told once the run is done, as by own bind: a question at the terminal can wait on the person.
@@ -1348,7 +1560,7 @@ async fn dial_through_serve<O: commands::connect::Output>(
 /// the first Open. When `serve` went away or stopped answering during the run, the verb's own lines come
 /// first and its line ends the run; once it has, nothing more is opened through it.
 async fn exchange_through_serve(
-    outward: Outward,
+    exchanging: Exchanging,
     home: &Home,
     socket: swoosh::node_client::UidSocket,
     hints: std::collections::HashMap<bifrost::NodeId, swoosh::peers::Hints>,
@@ -1359,7 +1571,7 @@ async fn exchange_through_serve(
     use commands::through_serve::{Moot, ServeStopped, Skew, StoppedAfterAct, Unresponsive};
     use swoosh::streams::GoneWhy;
 
-    if let Some(moot) = Moot::first(outward.reach_args()) {
+    if let Some(moot) = Moot::first(exchanging.reach_args()) {
         return Err(moot.into());
     }
     let source = swoosh::streams::Tracked::new(
@@ -1371,31 +1583,13 @@ async fn exchange_through_serve(
     // A root act may cut the very device its exchange met, so its names are read before it, and after.
     let before = swoosh::sync::devices(home, []).await.unwrap_or_default();
     let after = async || swoosh::sync::devices(home, []).await.unwrap_or_default();
-    let (named, act) = match outward {
-        Outward::Sync(cmd) => (
-            cmd.exchange(home, &dial, &fetch, &source, out).await?,
-            false,
-        ),
-        Outward::Invite(cmd) => {
-            cmd.issue(home, prompt, &dial, out, err).await?;
-            (after().await, true)
-        }
-        Outward::Revoke(cmd) => {
-            cmd.publish.run(home, prompt, &dial, err).await?;
-            (after().await, true)
-        }
-        Outward::RootRestore(cmd) => {
-            cmd.finish(home, &dial, err).await?;
-            (after().await, true)
-        }
-        // The pull is never printed: a machine that does not answer now is asked at the next sync.
-        Outward::Join(pull) => {
-            join::pull(&dial, pull.from).await;
-            return Ok(());
-        }
-        _ => eyre::bail!(
-            "internal: a verb that makes no exchange reached the exchange route (root-dispatch bug)"
-        ),
+    let (named, act) = match exchanging
+        .run(home, &source, &dial, &fetch, prompt, out, err)
+        .await?
+    {
+        Exchanged::Synced(named) => (named, false),
+        Exchanged::Acted => (after().await, true),
+        Exchanged::Pulled => return Ok(()),
     };
     source.settle().await;
     let Some(gone) = source.went() else {
@@ -1584,26 +1778,33 @@ pub(crate) fn lookup<'s>(
     (admitted, lookup)
 }
 
-/// Run a reaching verb, then await node close on success or error. Cancellation can bypass this close.
+/// Run a reaching verb over its own bind on `node`, then await node close on success or error.
+/// Cancellation can bypass this close. `serve` runs on the node itself; a dialing verb's one body runs over
+/// the run's own streams, worded by its own route, which names what was `bound`; an exchange verb's over
+/// the same streams, presenting this home's standing. `beside` runs beside it, as on the other path.
 ///
 /// A root the machine showed is told after the close: a question at the terminal can wait on the person
 /// for as long as they take, and nothing is held open meanwhile.
 async fn run_and_close<T: Transport, D: Discovery>(
-    outward: Outward,
+    run: Run,
     node: &Node<T, D>,
-    mut ctx: reaching::ReachCtx<'_>,
+    beside: Beside<'_>,
+    contacts: &Contacts,
+    bound: &transport::Bound,
     renew: Option<Renew>,
+    verb: &str,
 ) -> eyre::Result<()>
 where
     T::Session: 'static,
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
-    let home = ctx.home;
+    let (home, machine) = (beside.home, beside.machine);
     let (result, shown) = {
         // Every borrower and the sweep end inside this scope, before the endpoint's awaited close.
         let peers = swoosh::peers::Peers::new(node);
-        // The pick-up and the stale-list exchange present this home's standing, never the verb's slip.
+        // The pick-up, the stale-list exchange and every exchange verb present this home's standing, never
+        // the verb's slip.
         let own = swoosh::streams::OwnBind::new(
             &peers,
             home,
@@ -1614,19 +1815,43 @@ where
             if let Some(renew) = renew {
                 let fetch = swoosh::renewal::SourceFetch::new(&own);
                 reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
-                match reaching::resolve(renew.credential, node.node_id(), home).await {
-                    Ok(resolved) => (ctx.present, ctx.membership) = resolved.into_slots(),
-                    Err(error) => return (Err(error), None),
+                if let Err(error) = reaching::resolve(renew.credential, node.node_id(), home).await
+                {
+                    return (Err(error), None);
                 }
             }
-            let beside = Beside::of(&outward, home, ctx.machine);
-            // The question may borrow what the verb opens through, so the context is the run's for as
+            // The question may borrow what the verb opens through, so the streams are the run's for as
             // long.
-            let verb = async |admitted| {
-                let ctx = reaching::ReachCtx { admitted, ..ctx };
-                outward.run(node, ctx, &peers).await
+            let body = async |admitted| match run {
+                Run::Serve(cmd) => cmd.run(node, &peers).await,
+                Run::Dials(dialing) => {
+                    // A bare `status` splits to its local run before any transport is composed, and every
+                    // other dialing verb names a machine resolved before the bind, so a missing one here is
+                    // a root-dispatch bug, not a user error.
+                    let (Some(machine), Some(peer)) = (machine, dialing.peer()) else {
+                        eyre::bail!(
+                            "internal: `{verb}` ran without its machine resolved (root-dispatch bug)"
+                        );
+                    };
+                    dialing
+                        .by_own_bind(node, &peers, home, bound, machine, peer, contacts, admitted)
+                        .await
+                }
+                // The names and the act only word a `serve` gone under the run, which cannot happen here.
+                Run::Exchanges(exchanging) => exchanging
+                    .run(
+                        home,
+                        &own,
+                        &swoosh::sync::SourceDial::new(&own, home),
+                        &swoosh::renewal::SourceFetch::new(&own),
+                        &mut swoosh::passphrase::Terminal,
+                        &mut std::io::stdout(),
+                        &mut std::io::stderr(),
+                    )
+                    .await
+                    .map(drop),
             };
-            run_verb(beside, &swoosh::sync::SourceDial::new(&own, home), verb).await
+            run_verb(beside, &swoosh::sync::SourceDial::new(&own, home), body).await
         };
         tokio::select! {
             result = run => result,
@@ -1647,7 +1872,7 @@ where
     result
 }
 
-/// What a dialing verb that tries the pick-up route first resolves its slots from, after the try.
+/// What a dialing verb that tries the pick-up route first resolves its badge from, after the try.
 struct Renew {
     /// The credential the verb declared; the bound endpoint already owns the machine identity.
     credential: credential::Credential,
@@ -2066,7 +2291,7 @@ mod tests {
             Verb::Outward(outward) => outward,
             _ => panic!("serve splits to a reaching verb"),
         };
-        let built = serve.expose_context(&secret, &home).await;
+        let built = serve.split().expose_context(&secret, &home).await;
         let _ = std::fs::remove_dir_all(&dir);
         let Err(error) = built else {
             panic!("no gate before the claim");

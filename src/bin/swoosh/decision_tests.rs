@@ -8,25 +8,56 @@
 use core::time::Duration;
 use std::time::SystemTime;
 
+use bifrost::{Discovery, Node, Transport};
 use clap::Parser as _;
+use swoosh::contacts::Contacts;
 use swoosh::home::Home;
+use swoosh::learn::Admitted;
+use swoosh::peer::Machine;
+use swoosh::peers::Peers;
 use swoosh::serve::control_codec::{OpenRefusal, Request, Response};
 use swoosh::testkit::{TestNode, TestRoot};
 
 use super::{Decision, Rides, decide};
 use crate::commands::through_serve::tests::Served;
 use crate::exchange_tests::{Asked, a_device, bare, restoring, revoking};
-use crate::{Cli, Dialing, Outward, Verb};
+use crate::{Cli, Dialing, Outward, Run, Verb};
 
 /// The key that signs the links typed as the machine here.
 const ISSUER: u8 = 0x91;
 
-/// `outward`'s dialing verb, as the dialing route takes it: a row that drives that route needs one.
-pub(crate) fn dialing(outward: &Outward) -> Dialing<'_> {
-    match outward.rides() {
-        Rides::Dials { dialing, .. } => dialing,
-        Rides::Never | Rides::Exchanges => panic!("not a dialing verb that rides serve"),
+/// `outward`'s dialing verb, as either path takes it: a row that drives one needs one.
+pub(crate) fn dialing(outward: Outward) -> Dialing {
+    match outward.split() {
+        Run::Dials(dialing) => dialing,
+        Run::Serve(_) | Run::Exchanges(_) => panic!("not a dialing verb"),
     }
+}
+
+/// Run `dialing` to `machine` over its own bind on `node`, from `home`, as the composition root runs it,
+/// its route naming a bind with no flags.
+pub(crate) async fn by_own_bind<'s, 'n: 's, T: Transport, D: Discovery>(
+    dialing: &Dialing,
+    node: &Node<T, D>,
+    peers: &'s Peers<'n, T, D>,
+    home: &'s Home,
+    machine: &Machine,
+    contacts: &Contacts,
+    admitted: Admitted<'s>,
+) -> eyre::Result<()>
+where
+    T::Session: 'static,
+    <T::Session as bifrost::Session>::Write: Send + 'static,
+    <T::Session as bifrost::Session>::Read: Send + 'static,
+{
+    let bound = swoosh::transport::Bound {
+        local: false,
+        reach: swoosh::transport::Reach::default(),
+    };
+    let peer = dialing.peer().expect("a dialing verb names its machine");
+    dialing
+        .by_own_bind(node, peers, home, &bound, machine, peer, contacts, admitted)
+        .await
 }
 
 /// `argv`, parsed and split as the composition root splits it.
@@ -178,9 +209,9 @@ fn scratch(tag: &str) -> [Home; 4] {
 async fn rides_names_every_verb() {
     let scratch = scratch("rides");
     for (name, verb, arm) in every_verb(&scratch).await {
-        match (verb.rides(), arm) {
+        match (verb.split().rides(), arm) {
             (Rides::Never, None) | (Rides::Exchanges, Some(false)) => {}
-            (Rides::Dials { slip, .. }, Some(true)) => {
+            (Rides::Dials { slip }, Some(true)) => {
                 // Only the link typed as the machine travels as the slip.
                 assert_eq!(slip.is_some(), name.contains("link"), "{name}");
             }
@@ -252,14 +283,14 @@ async fn the_decision_is_made_once() {
     let mut served = Served::new("decision-once").await;
     let mut told = counting(&mut served);
     for (name, verb, arm) in every_verb(&scratch).await {
-        let decision = decide(&verb, &served.home).await.unwrap();
+        let decision = decide(verb.split(), &served.home).await.unwrap();
         assert_eq!(
             probes(&served.home, &mut told).await,
             usize::from(arm.is_some()),
             "{name}"
         );
         match (decision, arm) {
-            (Decision::Own, None)
+            (Decision::Own(_), None)
             | (Decision::Dials { .. }, Some(true))
             | (Decision::Exchanges { .. }, Some(false)) => {}
             (_, arm) => panic!("{name}: the wrong path for {arm:?}"),
@@ -279,7 +310,7 @@ async fn a_stale_socket_binds_its_own() {
     drop(served.listener());
     let ping = outward(&["ping", "me/nas"]);
     assert!(matches!(
-        decide(&ping, &served.home).await.unwrap(),
-        Decision::Own
+        decide(ping.split(), &served.home).await.unwrap(),
+        Decision::Own(_)
     ));
 }
