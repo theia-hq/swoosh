@@ -270,3 +270,47 @@ fn a_loose_root_key_names_chmod_not_damage() {
     assert_eq!(refused.status.code(), Some(1));
     assert_eq!(text(&refused.stderr), access);
 }
+
+/// A key no one answers at, for a dial that reaches nobody.
+fn absent_key() -> String {
+    bifrost::NodeId::from_ed25519_secret(&[0x5a; 32]).to_string()
+}
+
+/// A verb that only reads, named a home that does not exist, leaves it not existing: the run asks whether
+/// a `serve` runs there and makes nothing to ask it, so a mistyped `--home` leaves no directory behind.
+#[test]
+fn a_read_only_verb_leaves_a_missing_home_missing() {
+    let scratch = Scratch::new("missing");
+    let typo = scratch.0.join("typo");
+    let home = typo.join("home");
+    let ran = swoosh_at(&home, &["ping", &absent_key(), "-c", "1", "--local"]);
+    assert_eq!(ran.status.code(), Some(1), "{}", text(&ran.stderr));
+    assert!(
+        text(&ran.stdout).ends_with(": unreachable\n"),
+        "it dialed: {}",
+        text(&ran.stdout)
+    );
+    assert!(!typo.exists(), "nothing was made at {}", typo.display());
+}
+
+/// A home this user cannot write still runs a verb that only reads: asking whether a `serve` runs there
+/// writes nothing, so it needs no write to the home.
+#[test]
+fn a_read_only_verb_runs_in_a_home_it_cannot_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("unwritable");
+    let home = scratch.0.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let ran = swoosh_at(&home, &["ping", &absent_key(), "-c", "1", "--local"]);
+    let left = std::fs::read_dir(&home).unwrap().count();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(ran.status.code(), Some(1), "{}", text(&ran.stderr));
+    assert!(
+        text(&ran.stdout).ends_with(": unreachable\n"),
+        "it dialed: {}",
+        text(&ran.stdout)
+    );
+    assert_eq!(left, 0, "nothing was made in the home");
+}

@@ -194,9 +194,34 @@ fn status_of(node_id: NodeId) -> StatusReply {
 /// Run the compiled binary on `home` with `argv`, nothing on stdin and no reach setting from the
 /// environment, polled so the resident on this thread keeps answering: its exit code and stderr.
 async fn swoosh(home: &Home, argv: &[&str]) -> (Option<i32>, String) {
+    swoosh_with(home, argv, |_| {}).await
+}
+
+/// [`swoosh`] with `XDG_RUNTIME_DIR` set to `xdg`, or unset with `None`.
+#[cfg(target_os = "linux")]
+async fn swoosh_in(home: &Home, argv: &[&str], xdg: Option<&str>) -> (Option<i32>, String) {
+    swoosh_with(home, argv, |command| match xdg {
+        Some(value) => {
+            command.env("XDG_RUNTIME_DIR", value);
+        }
+        None => {
+            command.env_remove("XDG_RUNTIME_DIR");
+        }
+    })
+    .await
+}
+
+/// [`swoosh`], its command first shaped by `shape`.
+async fn swoosh_with(
+    home: &Home,
+    argv: &[&str],
+    shape: impl FnOnce(&mut std::process::Command),
+) -> (Option<i32>, String) {
     use std::io::BufRead as _;
 
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_swoosh"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_swoosh"));
+    shape(&mut command);
+    let mut child = command
         .arg("--home")
         .arg(home.dir())
         .args(argv)
@@ -606,5 +631,189 @@ async fn a_unix_end_refuses_before_a_reach_flag_through_serve() {
         "error: a unix:<path> local end is not built yet: use a port, or - for stdout\n"
     );
     assert!(seen.opens.lock().unwrap().is_empty(), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `home`'s `serve.lock`, held as a `serve` or a key replacement holds it, recording this process when
+/// `serving`, with no runtime leaf or socket made: a `serve` this command's runtime root does not show.
+async fn held(home: &Home, serving: bool) -> swoosh::home::ServeLock {
+    let write = swoosh::home::HomeWrite::take(home).await.unwrap();
+    // A sibling test's fork holds the last lock's O_CLOEXEC flock copy until its exec: wait, bounded.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let lock = loop {
+        match swoosh::home::ServeLock::take(&write, home) {
+            Err(swoosh::home::ServeLockError::Held) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            taken => break taken.unwrap(),
+        }
+    };
+    if serving {
+        lock.record(&write, None).unwrap();
+    }
+    lock
+}
+
+/// The own bind's sign on a sealed key: it asks for the passphrase, which no command through `serve` or
+/// refused before its bind ever does.
+fn asked_the_passphrase(stderr: &str) -> bool {
+    stderr.contains("passphrase")
+}
+
+/// `serve.lock` free, whatever it records (here this live process's pid, of this user), and no socket:
+/// no `serve` runs, so the run binds its own.
+#[tokio::test]
+async fn a_free_serve_lock_binds_its_own_whatever_it_records() {
+    let home = device("free-lock", 60).await;
+    std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(asked_the_passphrase(&stderr), "own bind: {stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// Section 6's second form for `home`: `serve` holds the lock but nothing answers where this command
+/// looked. Its last line is left out on macOS, where no variable sets the root.
+fn unreached(home: &Home) -> String {
+    let last = match cfg!(target_os = "macos") {
+        true => "",
+        false => "\n  Otherwise set XDG_RUNTIME_DIR to the value swoosh serve has.",
+    };
+    format!(
+        "error: swoosh serve is running for this home, but this command cannot reach it\n  Nothing \
+         answers at {}.\n  If swoosh serve has just started, run this command again.{last}\n",
+        home.control_socket().unwrap().display()
+    )
+}
+
+/// `serve.lock` held by a `serve` whose runtime root is not this command's, so no leaf is under it: the
+/// line for a `serve` out of reach, exit 1, nothing bound and no passphrase asked.
+#[tokio::test]
+async fn a_held_serve_lock_with_another_runtime_dir_is_an_error() {
+    let home = device("other-root", 60).await;
+    let lock = held(&home, true).await;
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    drop(lock);
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(stderr, unreached(&home));
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A socket file no listener holds while `serve.lock` stays held: the connect is refused, as a live
+/// macOS `serve` with a full accept queue refuses it, and that is a `serve` out of reach, not none.
+#[tokio::test]
+async fn a_held_lock_behind_a_refused_connect_is_an_error() {
+    let home = device("refused-held", 60).await;
+    let (lock, listener) = claimed(&home).await;
+    drop(listener);
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    drop(lock);
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(stderr, unreached(&home));
+    assert!(!asked_the_passphrase(&stderr), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// The case behind it, on macOS: a live `serve` whose accept queue is full refuses a connect with
+/// `ECONNREFUSED`, as a socket with no listener does. It still holds the lock, so the run names it out of
+/// reach rather than binding beside it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_full_accept_queue_is_not_no_serve() {
+    let home = device("full-queue", 60).await;
+    let (lock, listener) = claimed(&home).await;
+    let socket = home.control_socket().unwrap();
+    // Connect without accepting until the kernel refuses one: the queue is full. Bounded, so a kernel that
+    // queues without limit fails the row rather than exhausting descriptors.
+    let mut queued = Vec::new();
+    let full = loop {
+        match std::os::unix::net::UnixStream::connect(&socket) {
+            Ok(stream) if queued.len() < 4096 => queued.push(stream),
+            Ok(_) => break false,
+            Err(error) => {
+                assert_eq!(error.raw_os_error(), Some(libc::ECONNREFUSED), "{error}");
+                break true;
+            }
+        }
+    };
+    assert!(full, "the accept queue never filled");
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    drop(queued);
+    drop(listener);
+    drop(lock);
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(stderr, unreached(&home));
+    assert!(!asked_the_passphrase(&stderr), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `serve.lock` held with nothing recorded, as a key replacement holds it, and no socket: its own line,
+/// never the out-of-reach one and never an own bind.
+#[tokio::test]
+async fn a_key_replacement_under_way_is_its_own_line() {
+    let home = device("replacing", 60).await;
+    let lock = held(&home, false).await;
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    drop(lock);
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(
+        stderr,
+        "error: this machine's key is being replaced\n  Run this command again when that has \
+         finished.\n"
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `home.lock` held by another process for good, beside a `serve.lock` a `serve` once left, and no
+/// socket: the run's lock read ends within its bound on an error, exit 1, and binds nothing, so one stuck
+/// holder cannot wedge every command here.
+#[tokio::test]
+async fn a_home_lock_held_for_good_binds_nothing() {
+    let home = device("wedged", 60).await;
+    // Free and empty, as a stopped `serve` leaves it: an absent one is free without the lock read.
+    std::fs::write(home.serve_lock(), b"").unwrap();
+    let write = swoosh::home::HomeWrite::take(&home).await.unwrap();
+    let started = std::time::Instant::now();
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    let took = started.elapsed();
+    drop(write);
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "error: could not lock {}",
+            home.home_lock().display()
+        )),
+        "{stderr}"
+    );
+    assert!(!asked_the_passphrase(&stderr), "{stderr}");
+    assert!(took < Duration::from_secs(20), "bounded: {took:?}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// No `XDG_RUNTIME_DIR`, or a relative one, while `serve` holds the lock: the line naming the variable,
+/// exit 1, no passphrase asked and nothing bound.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn no_runtime_dir_with_serve_running_is_an_error() {
+    let home = device("no-xdg", 60).await;
+    let (lock, listener) = claimed(&home).await;
+    for (xdg, why) in [
+        (None, "is not set here"),
+        (Some("run/user/1000"), "is not a full path here"),
+    ] {
+        let (status, stderr) = swoosh_in(&home, &["ping", "me/nas", "-c", "1"], xdg).await;
+        assert_eq!(status, Some(1), "{xdg:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "error: swoosh serve is running for this home, but this command cannot reach it\n  \
+                 Commands find it through XDG_RUNTIME_DIR, which {why}.\n  Set XDG_RUNTIME_DIR to the \
+                 value swoosh serve has, usually /run/user/$(id -u).\n"
+            ),
+            "{xdg:?}"
+        );
+    }
+    drop(listener);
+    drop(lock);
     let _ = std::fs::remove_dir_all(home.dir());
 }

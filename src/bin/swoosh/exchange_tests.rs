@@ -346,10 +346,7 @@ async fn routed(served: &mut Served, answers: Vec<Answer>, verb: Outward, asked:
     let resident = scripted(served, answers, &rig);
     let mut asked = asked;
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let (socket, _) = crate::commands::through_serve::serve(&served.home)
-        .await
-        .unwrap()
-        .expect("serve answers");
+    let socket = crate::commands::through_serve::tests::answering(&served.home).await;
     let hints =
         crate::commands::through_serve::hints(swoosh::reaching::Reaching::reach_args(&verb))
             .unwrap();

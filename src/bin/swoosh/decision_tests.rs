@@ -301,16 +301,84 @@ async fn the_decision_is_made_once() {
     }
 }
 
-/// A socket file no listener holds, as a `serve` that crashed leaves it: the connect is refused, which
-/// reads as nothing answering, so the run binds its own.
+/// A socket file no listener holds and a free `serve.lock`, as a `serve` that crashed leaves them: the
+/// connect is refused and no `serve` holds the lock, so the run binds its own.
 #[tokio::test]
 async fn a_stale_socket_binds_its_own() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let mut served = Served::new("decision-stale").await;
-    // The socket file stays and its lock stays held; nothing accepts on it.
     drop(served.listener());
+    // Freeing the lock unlinks the socket and its leaf, as a clean stop does; a crash leaves the file.
+    drop(served.lock());
+    let socket = served.home.control_socket().unwrap();
+    let leaf = socket.parent().unwrap();
+    std::fs::create_dir_all(leaf).unwrap();
+    std::fs::set_permissions(leaf, std::fs::Permissions::from_mode(0o700)).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    assert!(socket.exists(), "the socket file stays with no listener");
     let ping = outward(&["ping", "me/nas"]);
     assert!(matches!(
         decide(ping.split(), &served.home).await.unwrap(),
         Decision::Own(_)
     ));
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_dir(leaf);
+}
+
+/// A `serve` that holds the lock but answers nowhere is an error for every riding verb, never an own
+/// bind; for `revoke`, `root restore` and `join`, whose act has landed by the decision, it is the error
+/// that says what landed first: for `revoke`, only this machine's block, and the rerun that finishes it.
+#[tokio::test]
+async fn a_held_unreachable_serve_after_a_landed_act_says_it_landed() {
+    let scratch = scratch("landed");
+    let mut served = Served::new("decision-landed").await;
+    // The socket file stays and the lock stays held; nothing accepts on it.
+    drop(served.listener());
+    for (name, verb, arm) in every_verb(&scratch).await {
+        let Some(_) = arm else { continue };
+        let Err(report) = decide(verb.split(), &served.home).await else {
+            panic!("{name}: a held lock with no answer is no own bind");
+        };
+        let landed = ["revoke", "root restore", "join"].contains(&name);
+        assert_eq!(
+            report.is::<crate::commands::through_serve::ActLanded>(),
+            landed,
+            "{name}"
+        );
+        let line = format!("error: {report:#}\n");
+        assert!(
+            line.starts_with(
+                "error: swoosh serve is running for this home, but this command cannot reach it\n"
+            ),
+            "{name}: {line}"
+        );
+        // As the composition root prints it: the landed act's line first, on its own, then the error.
+        let mut err = Vec::new();
+        let left = crate::landed_then(report, &mut err);
+        let err = String::from_utf8(err).unwrap();
+        match landed {
+            true => {
+                assert!(
+                    left.is::<crate::commands::through_serve::Reported>(),
+                    "{name}"
+                );
+                let said = match name {
+                    "revoke" => {
+                        "me/phone is blocked on this machine, not yet on your other devices\nto \
+                         finish, run it again: swoosh revoke me/phone"
+                    }
+                    _ => "The change is made and saved here. Your devices have not been told yet.",
+                };
+                assert_eq!(err, format!("{said}\n{line}"), "{name}");
+            }
+            false => {
+                assert_eq!(err, "", "{name}");
+                assert_eq!(format!("error: {left:#}\n"), line, "{name}");
+            }
+        }
+    }
+    for home in scratch {
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
 }

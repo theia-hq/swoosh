@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use super::{macos_state_home, xdg_runtime_root, xdg_state_home};
+use super::{RuntimeRoot, macos_state_home, xdg_runtime_root, xdg_state_home};
 use crate::escape::Escaped;
 
 /// Both platforms' default homes, whichever platform runs the test: macOS's under `Application Support`,
@@ -53,6 +53,17 @@ fn an_unset_or_relative_runtime_dir_is_refused_with_the_fix() {
         };
         assert_eq!(error.to_string(), NO_RUNTIME_DIR);
     }
+    // Which one is kept, for the line a command prints when it cannot reach a running `serve`: an empty
+    // value is no value, so unset; a value that is not a full path is relative.
+    assert_eq!(xdg_runtime_root(None), Err(RuntimeRoot::Unset));
+    assert_eq!(
+        xdg_runtime_root(Some(OsString::new())),
+        Err(RuntimeRoot::Unset)
+    );
+    assert_eq!(
+        xdg_runtime_root(Some(OsString::from("run/user/1000"))),
+        Err(RuntimeRoot::Relative)
+    );
     assert_eq!(
         xdg_runtime_root(Some(OsString::from("/run/user/1000"))).expect("an absolute dir roots"),
         PathBuf::from("/run/user/1000/swoosh")

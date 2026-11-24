@@ -59,6 +59,11 @@ impl Home {
     /// Probe the actual `serve.lock` flock without changing its record. This method takes `HomeWrite`
     /// internally and releases it and any temporary probe lock before returning.
     ///
+    /// An absent `serve.lock` is [`ResidentPresence::Free`] at once, before `HomeWrite`: a read-only verb
+    /// asks this, and it must leave a home that does not exist, or one it cannot write, as it found it.
+    /// The stat takes no lock and is sound: `serve.lock` is made only under `home.lock` and never
+    /// unlinked, so absent means no `serve` ever ran here.
+    ///
     /// The result describes only the probe time and reserves no future absence. Call this method
     /// without holding `HomeWrite`.
     ///
@@ -67,6 +72,9 @@ impl Home {
     /// Returns an error if taking `HomeWrite` or opening, inspecting or probing the serve-lock file
     /// fails. A symlink or nonregular serve-lock file is an error, not a free lock.
     pub async fn resident_presence(&self) -> Result<ResidentPresence, LockError> {
+        if ServeLock::absent(self) {
+            return Ok(ResidentPresence::Free);
+        }
         let held = HomeWrite::take(self).await?;
         ServeLock::presence(&held, self)
     }
@@ -307,7 +315,11 @@ impl Home {
     /// per-home dir holding this node's control socket. A pure function of the home
     /// (via [`home_key`](Self::home_key)) over the per-user runtime root, so daemon and client
     /// resolve the same paths. Never `~/.config`, never `/tmp`, never an abstract socket.
-    pub fn runtime_dir(&self) -> eyre::Result<PathBuf> {
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeRoot`]: there is no runtime root to put it under.
+    pub fn runtime_dir(&self) -> Result<PathBuf, RuntimeRoot> {
         Ok(self.runtime_leaf(&runtime_root()?))
     }
 
@@ -321,7 +333,11 @@ impl Home {
 
     /// `<runtime_dir>/control.sock`: the local control socket rendezvous. See
     /// [`runtime_dir`](Self::runtime_dir).
-    pub fn control_socket(&self) -> eyre::Result<PathBuf> {
+    ///
+    /// # Errors
+    ///
+    /// As [`runtime_dir`](Self::runtime_dir).
+    pub fn control_socket(&self) -> Result<PathBuf, RuntimeRoot> {
         Ok(self.runtime_dir()?.join("control.sock"))
     }
 }
@@ -371,30 +387,54 @@ pub fn keeps_root_in(dir: &Path) -> std::io::Result<bool> {
     dir.join("root.key").try_exists()
 }
 
+/// Why there is no per-user runtime root: a command and a `serve` find each other only under one, so a
+/// caller that must tell "no `serve`" from "no way to reach one" keeps which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeRoot {
+    /// Linux: `XDG_RUNTIME_DIR` is not set (or is empty).
+    #[error(
+        "swoosh serve needs a private runtime directory. Set XDG_RUNTIME_DIR to a directory only you \
+         can use (for example /run/user/$(id -u)), or run it as a systemd --user service."
+    )]
+    Unset,
+    /// Linux: `XDG_RUNTIME_DIR` is set but not an absolute path.
+    #[error(
+        "swoosh serve needs a private runtime directory. Set XDG_RUNTIME_DIR to a directory only you \
+         can use (for example /run/user/$(id -u)), or run it as a systemd --user service."
+    )]
+    Relative,
+    /// macOS: `confstr(_CS_DARWIN_USER_TEMP_DIR)` gave no usable per-user temp dir, with the line that
+    /// says how.
+    #[error("{0}")]
+    Unresolved(&'static str),
+}
+
 /// The per-user runtime root every `serve`'s socket lives under: `$XDG_RUNTIME_DIR/swoosh` on
 /// Linux, `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created and verified 0700 by the
 /// single-instance acquire, never assumed. An unset or relative `XDG_RUNTIME_DIR` on Linux is a refusal,
 /// never a fallback under the home, `/tmp` or the cwd. A client finds a `serve`'s socket only when the two
 /// resolve the same root, so a fallback would add one more way for them to miss it.
-pub fn runtime_root() -> eyre::Result<PathBuf> {
+///
+/// # Errors
+///
+/// [`RuntimeRoot`]: why there is none.
+pub fn runtime_root() -> Result<PathBuf, RuntimeRoot> {
     #[cfg(target_os = "macos")]
     {
+        const CONFSTR_FAILED: RuntimeRoot =
+            RuntimeRoot::Unresolved("could not resolve the per-user temp dir (confstr failed)");
         // SAFETY: `confstr` with a null buffer and zero length only returns the needed size; the
         // second call writes into a live `Vec` sized from that result. Both calls pass a valid
         // constant and a valid-or-null buffer, so no memory is touched out of bounds.
         let len =
             unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, core::ptr::null_mut(), 0) };
         if len == 0 {
-            return Err(eyre!(
-                "could not resolve the per-user temp dir (confstr failed)"
-            ));
+            return Err(CONFSTR_FAILED);
         }
         let mut buf = vec![0 as libc::c_char; len];
         let got = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), len) };
         if got == 0 {
-            return Err(eyre!(
-                "could not resolve the per-user temp dir (confstr failed)"
-            ));
+            return Err(CONFSTR_FAILED);
         }
         let bytes: Vec<u8> = buf
             .iter()
@@ -402,7 +442,7 @@ pub fn runtime_root() -> eyre::Result<PathBuf> {
             .map(|c| *c as u8)
             .collect();
         let dir = String::from_utf8(bytes)
-            .map_err(|_| eyre!("the per-user temp dir is not valid UTF-8"))?;
+            .map_err(|_| RuntimeRoot::Unresolved("the per-user temp dir is not valid UTF-8"))?;
         let uid = unsafe { libc::geteuid() };
         Ok(PathBuf::from(dir).join(format!("swoosh-{uid}")))
     }
@@ -412,22 +452,21 @@ pub fn runtime_root() -> eyre::Result<PathBuf> {
     }
 }
 
-/// The runtime root under a given `XDG_RUNTIME_DIR`: `<it>/swoosh` when it is set and absolute, else the
-/// refusal that names the variable. Split from [`runtime_root`] so the rule is one pure function over the
-/// value, the same on every platform a test runs on.
+/// The runtime root under a given `XDG_RUNTIME_DIR`: `<it>/swoosh` when it is set and absolute, else why
+/// not. Split from [`runtime_root`] so the rule is one pure function over the value, the same on every
+/// platform a test runs on.
 #[cfg_attr(
     all(target_os = "macos", not(test)),
     allow(dead_code, reason = "macOS resolves its runtime root through confstr")
 )]
-pub(crate) fn xdg_runtime_root(value: Option<std::ffi::OsString>) -> eyre::Result<PathBuf> {
-    let root = value.map(PathBuf::from).filter(|root| root.is_absolute());
-    let Some(root) = root else {
-        return Err(eyre!(
-            "swoosh serve needs a private runtime directory. Set XDG_RUNTIME_DIR to a directory only you \
-             can use (for example /run/user/$(id -u)), or run it as a systemd --user service."
-        ));
-    };
-    Ok(root.join("swoosh"))
+pub(crate) fn xdg_runtime_root(value: Option<std::ffi::OsString>) -> Result<PathBuf, RuntimeRoot> {
+    // An empty value is no value: `PathBuf::from("")` is relative, but nothing was set.
+    let root = value.filter(|value| !value.is_empty()).map(PathBuf::from);
+    match root {
+        None => Err(RuntimeRoot::Unset),
+        Some(root) if !root.is_absolute() => Err(RuntimeRoot::Relative),
+        Some(root) => Ok(root.join("swoosh")),
+    }
 }
 
 /// The default home, the platform's per-user state place: [`macos_state_home`] on macOS,

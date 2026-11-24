@@ -362,3 +362,133 @@ async fn an_unusable_hint_refuses_before_anything_is_written() {
         let _ = std::fs::remove_dir_all(home.dir());
     }
 }
+
+/// `home`'s `serve.lock` held and its socket file left with no listener, as a `serve` holds them while
+/// this command cannot reach it. Dropping it frees both.
+async fn held_unreachable(home: &Home) -> swoosh::serve::InstanceLock {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = swoosh::home::runtime_root().unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let (lock, listener) = loop {
+        match swoosh::serve::acquire_single(home, &root).await {
+            Err(
+                swoosh::serve::SingleError::KeyChanging
+                | swoosh::serve::SingleError::AlreadyResident { .. },
+            ) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            taken => break taken.unwrap(),
+        }
+    };
+    drop(listener);
+    lock
+}
+
+/// Section 6's second form for `home`, its last line left out on macOS.
+fn unreached(home: &Home) -> String {
+    let last = match cfg!(target_os = "macos") {
+        true => "",
+        false => "\n  Otherwise set XDG_RUNTIME_DIR to the value swoosh serve has.",
+    };
+    format!(
+        "error: swoosh serve is running for this home, but this command cannot reach it\n  Nothing \
+         answers at {}.\n  If swoosh serve has just started, run this command again.{last}\n",
+        home.control_socket().unwrap().display()
+    )
+}
+
+/// With a reach flag, `join`, `revoke` and `root restore` ask before their act, and a `serve` that holds
+/// the lock but cannot be reached refuses there: the out-of-reach line, then that nothing was changed,
+/// exit 1, the home as it was.
+#[tokio::test]
+async fn a_flagged_root_act_refuses_a_held_unreachable_serve_first() {
+    for argv in flagged_root_acts() {
+        let home = device(&format!("flagged-unreached-{}", argv[0])).await;
+        let lock = held_unreachable(&home).await;
+        let before = snapshot(home.dir());
+        let (status, stderr) = swoosh(&home, &argv).await;
+        let after = snapshot(home.dir());
+        drop(lock);
+        assert_eq!(status, Some(1), "{argv:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!("{}  Nothing was changed.\n", unreached(&home)),
+            "{argv:?}"
+        );
+        assert!(after == before, "{argv:?}: the home is as it was");
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
+}
+
+/// With a reach flag, `join`, `revoke` and `root restore` whose `serve.lock` cannot be read before their
+/// act (`home.lock` held for good beside one a `serve` left) refuse there: the lock error, then that
+/// nothing was changed, exit 1, the home as it was.
+#[tokio::test]
+async fn a_flagged_root_act_refuses_an_unread_lock_first() {
+    for argv in flagged_root_acts() {
+        let home = device(&format!("flagged-wedged-{}", argv[0])).await;
+        // Free and empty, as a stopped `serve` leaves it: an absent one is free without the lock read.
+        std::fs::write(home.serve_lock(), b"").unwrap();
+        let write = swoosh::home::HomeWrite::take(&home).await.unwrap();
+        let before = snapshot(home.dir());
+        let (status, stderr) = swoosh(&home, &argv).await;
+        let after = snapshot(home.dir());
+        drop(write);
+        assert_eq!(status, Some(1), "{argv:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "error: could not lock {}: timed out\n  Nothing was changed.\n",
+                home.home_lock().display()
+            ),
+            "{argv:?}"
+        );
+        assert!(after == before, "{argv:?}: the home is as it was");
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
+}
+
+/// `join`, `revoke` and `root restore`, each with a reach flag, so each asks `serve` before its act.
+fn flagged_root_acts() -> [Vec<&'static str>; 3] {
+    [
+        vec![
+            "join",
+            "--relay",
+            "https://relay.example.com",
+            "not-an-invite",
+        ],
+        vec!["revoke", "--relay", "https://relay.example.com", "me/phone"],
+        vec![
+            "root",
+            "restore",
+            "--relay",
+            "https://relay.example.com",
+            "/nonexistent-copy",
+        ],
+    ]
+}
+
+/// A revoke that dials nobody (a device's, with no root kept here) lands whole beside a control socket
+/// it could not trust (a 0755 leaf): no probe runs before or after its act, so `serve`'s socket can never
+/// stop a local cut. Exit 0, the home changed, no error.
+#[tokio::test]
+async fn a_local_only_revoke_lands_beside_an_untrusted_socket() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = device("local-revoke").await;
+    let lock = held_unreachable(&home).await;
+    let leaf = home.runtime_dir().unwrap();
+    std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let before = snapshot(home.dir());
+    let (status, stderr) = swoosh(&home, &["revoke", "me/phone"]).await;
+    let after = snapshot(home.dir());
+    std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700)).unwrap();
+    drop(lock);
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+    assert!(after != before, "the act landed");
+    let _ = std::fs::remove_dir_all(home.dir());
+}

@@ -374,6 +374,22 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// A root act's error after it landed: what [`Landed`](commands::through_serve::Landed) on its own lines,
+/// then the error, on `err`, and [`Reported`](commands::through_serve::Reported) for the exit 1. Any other
+/// error is returned as it is, for the composition root to print.
+fn landed_then(report: eyre::Report, err: &mut impl std::io::Write) -> eyre::Report {
+    use commands::through_serve::{ActLanded, Reported};
+
+    match report.downcast::<ActLanded>() {
+        Ok(ActLanded { landed, report }) => {
+            let _ = writeln!(err, "{landed}");
+            print_error(&report, err);
+            Reported.into()
+        }
+        Err(report) => report,
+    }
+}
+
 /// Print `report` as a run's error line, its message chain on `err`.
 fn print_error(report: &eyre::Report, err: &mut impl std::io::Write) {
     // Never `eprintln!`, which panics when the write fails: stderr can be a socket whose writing
@@ -895,7 +911,10 @@ async fn run() -> eyre::Result<()> {
 
     // The run's path, decided once, here: after the machine resolves and before the key is read, so a run
     // through `serve` never unlocks or mints one.
-    let run = match decision::decide(reach.split(), &home).await? {
+    let decided = decision::decide(reach.split(), &home)
+        .await
+        .map_err(|report| landed_then(report, &mut std::io::stderr()));
+    let run = match decided? {
         decision::Decision::Own(run) => run,
         // `speed`, `ping`, `status <machine>`, `send`, `forward`, `proxy` and `stop` while `serve` runs
         // here: each stream, the stale-list exchange beside it and the root question are each one Open
