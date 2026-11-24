@@ -456,7 +456,7 @@ impl Report {
     /// A `serve` is there and could not be read: the line says so, and why goes to stderr.
     fn serving_unknown(&mut self, why: &dyn core::fmt::Display) -> String {
         self.notices
-            .push(format!("could not read the running swoosh serve: {why}"));
+            .push(format!("could not read the running swoosh serve.\n{why}"));
         "serving: unknown".to_owned()
     }
 

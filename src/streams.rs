@@ -104,7 +104,9 @@ impl Unopened {
             | Self::ServeGone
             | Self::Skew
             | Self::Malformed(_)
-            | Self::Control(ControlError::Untrusted { .. }) => true,
+            | Self::Control(ControlError::Untrusted { .. } | ControlError::Unattributed { .. }) => {
+                true
+            }
             Self::Refused(
                 OpenRefusal::Peer(PeerRefusal::BadRequest(_) | PeerRefusal::Unavailable(_))
                 | OpenRefusal::PeerUnreadable(_)
@@ -760,7 +762,11 @@ impl Resident {
         match unopened {
             Unopened::Skew if self.attached.get() => Unopened::ServeGone,
             Unopened::Control(error) if self.socket.gone().await => {
-                tracing::debug!(%error, "an open through serve was cut before its reply, and serve is gone");
+                // Debug, not Display: a Timeout's text names no phase, and the log should.
+                tracing::debug!(
+                    ?error,
+                    "an open through serve was cut before its reply, and serve is gone"
+                );
                 Unopened::ServeGone
             }
             unopened => unopened,

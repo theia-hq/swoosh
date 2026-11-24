@@ -778,10 +778,13 @@ async fn the_exchange_beside_leaves_the_verbs_result() {
     }
 }
 
-/// A control socket that cannot be trusted at an Open's connect keeps its own error through `serve`,
-/// never a cut's `connection lost` or `serve`'s stopped line.
+/// A control socket that cannot be trusted at an Open's connect, its path or its listener's uid, or one
+/// another process answers, keeps its own error through `serve`, never a cut's `connection lost` or
+/// `serve`'s stopped line.
 #[test]
 fn an_untrusted_socket_at_an_open_keeps_its_own_line() {
+    use swoosh::serve::control_codec::ControlError;
+
     on_a_big_stack(async || {
         let served = Served::new("untrusted-open").await;
         let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
@@ -793,12 +796,18 @@ fn an_untrusted_socket_at_an_open_keeps_its_own_line() {
             service: &service,
             contacts: &contacts,
         };
-        let untrusted = swoosh::serve::control_codec::ControlError::Untrusted {
-            path: served.home.dir().join("serve.sock"),
-        };
-        let line = untrusted.to_string();
-        let unattached = dial.unopened(Unopened::Control(untrusted), &socket).await;
-        let report = dial.unattached(unattached, &socket).await;
-        assert_eq!(format!("{report:#}"), line);
+        let path = served.home.dir().join("serve.sock");
+        for untrusted in [
+            ControlError::Untrusted { path: path.clone() },
+            ControlError::Unattributed {
+                path: path.clone(),
+                pid: 4242.try_into().unwrap(),
+            },
+        ] {
+            let line = untrusted.to_string();
+            let unattached = dial.unopened(Unopened::Control(untrusted), &socket).await;
+            let report = dial.unattached(unattached, &socket).await;
+            assert_eq!(format!("{report:#}"), line);
+        }
     });
 }

@@ -193,11 +193,11 @@ pub async fn refuse_moot(home: &Home, reach: &ReachArgs) -> eyre::Result<()> {
     match serve(home).await {
         Ok(Found::Answering { .. }) => Err(moot.into()),
         Ok(Found::Absent) => Ok(()),
-        // An untrusted socket keeps its own line.
+        // A socket that cannot be trusted keeps its own line, which already says nothing was sent.
         Err(report)
             if matches!(
                 report.downcast_ref::<ControlError>(),
-                Some(ControlError::Untrusted { .. })
+                Some(ControlError::Untrusted { .. } | ControlError::Unattributed { .. })
             ) =>
         {
             Err(report)
@@ -252,8 +252,9 @@ impl Dial<'_> {
             Unopened::Skew => Unattached::Failed(Skew.into()),
             Unopened::ServeGone => Unattached::Failed(self.serve_stopped()),
             Unopened::Malformed(malformed) => Unattached::Failed(malformed.into()),
-            Unopened::Control(error @ ControlError::Timeout { .. }) => {
-                tracing::debug!(%error, "an open through serve got no reply in time");
+            Unopened::Control(error @ ControlError::Timeout { phase }) => {
+                // The text names no phase, so the log carries it: which exchange stalled.
+                tracing::debug!(%error, phase, "an open through serve got no reply in time");
                 if socket.stalled().await {
                     Unattached::Failed(Unresponsive.into())
                 } else {
@@ -261,9 +262,9 @@ impl Dial<'_> {
                 }
             }
             // A socket that cannot be trusted keeps its own error, never a cut's.
-            Unopened::Control(error @ ControlError::Untrusted { .. }) => {
-                Unattached::Failed(error.into())
-            }
+            Unopened::Control(
+                error @ (ControlError::Untrusted { .. } | ControlError::Unattributed { .. }),
+            ) => Unattached::Failed(error.into()),
             Unopened::Control(error) => {
                 tracing::debug!(%error, "an open through serve failed before its reply");
                 Unattached::Failed(self.cut(socket).await)
@@ -541,7 +542,7 @@ impl core::fmt::Display for Unreached {
 
 impl core::error::Error for Unreached {}
 
-/// Any error finding `serve` but an untrusted socket, met before a root act, which then never ran: the
+/// Any error finding `serve` but a socket that cannot be trusted, met before a root act, which then never ran: the
 /// line says so after its own. The whole chain renders inside this message, so the line ends it.
 #[derive(Debug, thiserror::Error)]
 #[error("{0:#}\n  Nothing was changed.")]

@@ -749,3 +749,34 @@ async fn service_off_needs_no_resident() {
     );
     assert!(ServeToml::read(&fixture.0).unwrap().off.contains("api"));
 }
+
+/// The control socket's own lines print whole through `service`, as through every verb: their line
+/// breaks and apostrophes are never escaped a second time. A resident's own text still is.
+#[test]
+fn control_socket_lines_print_unescaped() {
+    use swoosh::serve::control_codec::ControlError;
+
+    use crate::commands::service_state::ReadError;
+
+    let fixture = Fixture::new();
+    let path = PathBuf::from("/run/user/1000/swoosh/control.sock");
+    for error in [
+        ControlError::Untrusted { path: path.clone() },
+        ControlError::Unattributed {
+            path: path.clone(),
+            pid: 4242.try_into().unwrap(),
+        },
+        ControlError::Timeout {
+            phase: "response read",
+        },
+    ] {
+        let line = error.to_string();
+        let report = super::read_report(&fixture.0, ReadError::Daemon(error));
+        assert_eq!(format!("{report:#}"), line);
+    }
+    let refused = super::read_report(
+        &fixture.0,
+        ReadError::Daemon(ControlError::Refused("it's\n".to_owned())),
+    );
+    assert!(format!("{refused:#}").contains("it\\'s\\n"), "{refused:#}");
+}

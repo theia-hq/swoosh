@@ -446,7 +446,7 @@ async fn local_stop_missing_or_mismatched_record_never_writes_a_request_or_confi
         let error = super::stop_resolved(&client).await.unwrap_err();
         assert!(matches!(
             error.downcast_ref::<swoosh::serve::control_codec::ControlError>(),
-            Some(swoosh::serve::control_codec::ControlError::Untrusted { .. })
+            Some(swoosh::serve::control_codec::ControlError::Unattributed { .. })
         ));
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut byte = [0];

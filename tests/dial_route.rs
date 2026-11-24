@@ -626,11 +626,21 @@ async fn an_anyone_link_binds_its_own_key_while_serve_runs() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// A control socket whose listener is not the process its home's `serve.lock` records cannot be trusted:
-/// the run ends on that error, exit 1, with no own bind, so the sealed machine key is never asked for.
+/// Section 7's line for `home`: process `pid` answers at its control socket.
+fn unattributed(home: &Home, pid: u32) -> String {
+    format!(
+        "error: another process is answering swoosh serve's socket\n  Process {pid} answers at {}.\n  \
+         Nothing was sent through it.\n",
+        home.control_socket().unwrap().display()
+    )
+}
+
+/// A control socket whose listener is not the process its home's `serve.lock` records: the line naming
+/// the process that answered, never the mode or owner line, exit 1, no own bind, so the sealed machine
+/// key is never asked for, and no request written.
 #[tokio::test]
-async fn an_untrusted_socket_reads_no_key() {
-    let home = device("untrusted", 60).await;
+async fn a_socket_answered_by_another_pid_is_untrusted() {
+    let home = device("another-pid", 60).await;
     let seen = Arc::new(Seen::default());
     let stop = tightbeam::tunnel::CancellationToken::new();
     let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
@@ -640,12 +650,73 @@ async fn an_untrusted_socket_reads_no_key() {
     stop.cancel();
     resident.await.unwrap();
     assert_eq!(status, Some(1), "{stderr}");
-    assert!(
-        stderr.starts_with("error: refusing to trust the control path "),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("passphrase"), "{stderr}");
+    assert_eq!(stderr, unattributed(&home, std::process::id()));
+    assert_eq!(seen.probes.load(Ordering::SeqCst), 0, "nothing was asked");
     assert!(seen.opens.lock().unwrap().is_empty(), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A listener on this home's control socket with no `serve` behind it: `serve.lock` free and recording
+/// nothing, or absent. What answers is named, exit 1, and the run neither goes through it nor binds its
+/// own beside it.
+#[tokio::test]
+async fn a_squatted_socket_with_no_serve_record_is_an_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for record in [None, Some("")] {
+        let home = device("squatted", 60).await;
+        if let Some(record) = record {
+            std::fs::write(home.serve_lock(), record).unwrap();
+        }
+        let root = swoosh::home::runtime_root().unwrap();
+        let leaf = home.runtime_dir().unwrap();
+        std::fs::create_dir_all(&leaf).unwrap();
+        for dir in [&root, &leaf] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let squatter =
+            std::os::unix::net::UnixListener::bind(home.control_socket().unwrap()).unwrap();
+        let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+        drop(squatter);
+        let _ = std::fs::remove_dir_all(&leaf);
+        assert_eq!(status, Some(1), "{record:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            unattributed(&home, std::process::id()),
+            "{record:?}"
+        );
+        assert!(!asked_the_passphrase(&stderr), "{record:?}: {stderr}");
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
+}
+
+/// A control socket in a leaf that is not this user's alone (here mode 0755) is never connected to: the
+/// line naming the leaf, exit 1, with no own bind, so the sealed machine key is never asked for.
+#[tokio::test]
+async fn an_untrusted_socket_reads_no_key() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = device("untrusted", 60).await;
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    let leaf = home.runtime_dir().unwrap();
+    std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700)).unwrap();
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(
+        stderr,
+        format!(
+            "error: swoosh serve's socket is not private to you\n  {} is not yours alone.\n  Nothing \
+             was sent through it.\n",
+            leaf.display()
+        )
+    );
+    assert!(!asked_the_passphrase(&stderr), "{stderr}");
+    assert_eq!(seen.connects.load(Ordering::SeqCst), 0, "never connected");
     let _ = std::fs::remove_dir_all(home.dir());
 }
 

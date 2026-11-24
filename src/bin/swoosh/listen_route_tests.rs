@@ -144,7 +144,7 @@ fn down() -> RefusalDetail {
 
 /// Each way a listener pipe's open gives no stream, as a source meets it, and what it does to the run of
 /// `me/nas`'s `ssh`: the line it ends with on each path, or the warning's clause.
-pub(crate) fn table() -> [(Meet, Then); 21] {
+pub(crate) fn table() -> [(Meet, Then); 22] {
     let not_yours = "me/nas refused ssh\n  nas does not count this machine as one of your devices.";
     let ended =
         "this device's membership badge has ended, so a family-gated peer will refuse this dial; ";
@@ -189,7 +189,20 @@ pub(crate) fn table() -> [(Meet, Then); 21] {
             },
             Then::Ends {
                 own: "connection lost",
-                serve: "refusing to trust the control path /tmp/swoosh.sock",
+                serve: "swoosh serve's socket is not private to you\n  /tmp/swoosh.sock is not yours alone.",
+            },
+        ),
+        (
+            || {
+                Some(Unopened::Control(ControlError::Unattributed {
+                    path: "/tmp/swoosh.sock".into(),
+                    pid: 4242.try_into().unwrap(),
+                }))
+            },
+            Then::Ends {
+                own: "connection lost",
+                serve: "another process is answering swoosh serve's socket\n  Process 4242 answers at \
+                        /tmp/swoosh.sock.",
             },
         ),
         (

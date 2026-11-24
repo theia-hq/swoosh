@@ -1748,7 +1748,7 @@ async fn status_reports_a_damaged_serve_toml_as_unknown() {
     );
     let err = String::from_utf8(err).unwrap();
     assert!(
-        err.starts_with("could not read the running swoosh serve:"),
+        err.starts_with("could not read the running swoosh serve.\n"),
         "{err}"
     );
     std::fs::remove_file(&socket).unwrap();

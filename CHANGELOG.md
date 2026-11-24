@@ -43,9 +43,14 @@ All notable changes to swoosh, newest first.
   standing is about to expire, as the other commands do, and a refusal prints the same line with or without `serve`.
   A machine that hangs up on it prints `stream: early eof`, where it printed `early eof`. Without `serve`, it can end
   with `the machine did not answer the request to open a stream in time`.
-- **`send` ends on a socket to `swoosh serve` that cannot be trusted.** It prints one line,
-  `error: refusing to trust the control path <path>: not this user's 0700 runtime dir/socket`, and exits 1, where it
-  printed a `skip` line per remaining file.
+- **`send` ends on a socket to `swoosh serve` that cannot be trusted.** It exits 1 and prints one error
+  instead of a `skip` line per remaining file: the two below.
+- **A socket that another process answers is named.** If the process answering `swoosh serve`'s socket is not
+  the one `serve` recorded, `ping`, `speed`, `send`, `forward`, `proxy` and `status <machine>` exit 1 (`ssh` exits 255)
+  and print `error: another process is answering swoosh serve's socket`, then the process number and path, and
+  `Nothing was sent through it.` A socket path that is not yours alone, or a socket another user holds, prints
+  `error: swoosh serve's socket is not private to you` in the same way. Bare `status` prints either text as a
+  notice on stderr and exits 0.
 - **`send` says what to rerun when `swoosh serve` stops after files were sent.** The ending asks to rerun without
   the files already marked `sent`, or says every file was marked `sent` when none are left.
 - **`forward <port>` and `proxy` run through `swoosh serve` too.** If `serve` stops, both end with

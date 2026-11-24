@@ -578,6 +578,35 @@ async fn a_flagged_root_act_refuses_an_unread_lock_first() {
     }
 }
 
+/// With a reach flag, `join`, `revoke` and `root restore` ask before their act, and a control socket
+/// another process answers refuses there with its own line alone, which already says nothing was sent:
+/// exit 1, the home as it was.
+#[tokio::test]
+async fn a_flagged_root_act_refuses_a_socket_another_process_answers() {
+    for argv in flagged_root_acts() {
+        let home = device(&format!("flagged-unattributed-{}", argv[0])).await;
+        let (lock, listener) = claimed(&home).await;
+        std::fs::write(home.serve_lock(), format!("{}\n", std::process::id() + 1)).unwrap();
+        let before = snapshot(home.dir());
+        let (status, stderr) = swoosh(&home, &argv).await;
+        let after = snapshot(home.dir());
+        drop((lock, listener));
+        assert_eq!(status, Some(1), "{argv:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "error: another process is answering swoosh serve's socket\n  Process {} answers at \
+                 {}.\n  Nothing was sent through it.\n",
+                std::process::id(),
+                home.control_socket().unwrap().display()
+            ),
+            "{argv:?}"
+        );
+        assert!(after == before, "{argv:?}: the home is as it was");
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
+}
+
 /// `join`, `revoke` and `root restore`, each with a reach flag, so each asks `serve` before its act.
 fn flagged_root_acts() -> [Vec<&'static str>; 3] {
     [

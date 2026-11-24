@@ -319,15 +319,31 @@ impl UidSocket {
                 Some(libc::ENOENT | libc::ECONNREFUSED) => ControlError::NoResident,
                 _ => ControlError::Io(error),
             })?;
-        let untrusted = || ControlError::Untrusted {
-            path: PathBuf::clone(&self.socket),
+        let path = || PathBuf::clone(&self.socket);
+        // The uid first: another user's listener is Untrusted whatever the record says.
+        let peer = checker(stream.as_raw_fd())
+            .ok()
+            .filter(|peer| peer.uid == euid())
+            .ok_or_else(|| ControlError::Untrusted { path: path() })?;
+        // This user's listener, but not the process `serve.lock` records, or no record to read: a cause
+        // of its own, naming the process that answered.
+        let unattributed = || ControlError::Unattributed {
+            path: path(),
+            pid: peer.pid,
         };
-        let peer = checker(stream.as_raw_fd()).map_err(|_| untrusted())?;
-        let recorded = crate::home::ServeLock::checked_pid(&self.home).map_err(|_| untrusted())?;
-        if peer.uid != euid() || recorded != peer.pid {
-            return Err(untrusted());
+        match crate::home::ServeLock::checked_pid(&self.home) {
+            Ok(recorded) if recorded == peer.pid => Ok((stream, peer.pid)),
+            Ok(_) => Err(unattributed()),
+            // Kept as Unattributed, but an I/O failure on a record that exists (EACCES, a refused
+            // symlink) is not what that line says, so the cause stays findable here.
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "serve.lock gave no pid to check the socket's listener against"
+                );
+                Err(unattributed())
+            }
         }
-        Ok((stream, peer.pid))
     }
 
     /// Ask the resident for one admitted stream to a peer, on a connection of its own.
