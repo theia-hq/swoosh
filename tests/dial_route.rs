@@ -225,14 +225,15 @@ async fn swoosh(home: &Home, argv: &[&str]) -> (Option<i32>, String) {
     (status, reader.join().unwrap())
 }
 
-/// The dialing verbs, each to `me/nas`: the bridge among them.
-fn dialing(file: &str) -> [Vec<&str>; 5] {
+/// The dialing verbs, each to `me/nas`: the bridge and the stop among them.
+fn dialing(file: &str) -> [Vec<&str>; 6] {
     [
         vec!["ping", "me/nas", "-c", "1"],
         vec!["speed", "me/nas", "-n", "1024"],
         vec!["status", "me/nas"],
         vec!["send", file, "me/nas"],
         vec!["forward", "me/nas", "ssh", "-"],
+        vec!["stop", "me/nas"],
     ]
 }
 
@@ -278,6 +279,7 @@ async fn crowded_hints_refuse_a_dialing_verb_first() {
                     "Usage: swoosh forward [OPTIONS] <machine> <service> <port | unix:<path> | ->"
                 }
                 "proxy" => "Usage: swoosh proxy [OPTIONS] <machine> <url>",
+                "stop" => "Usage: swoosh stop [OPTIONS] [me/<name>]",
                 other => panic!("{other}: not a dialing verb"),
             };
             assert!(stderr.contains(usage), "{} {serving}: {stderr}", verb[0]);
@@ -392,5 +394,27 @@ async fn a_reach_flag_refuses_a_dialing_verb_before_anything() {
         assert!(!stderr.contains(warning), "{verb}: {stderr}");
         assert!(seen.opens.lock().unwrap().is_empty(), "{verb}: no Open");
     }
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// Through `serve`, `stop me/nas` on a machine whose key is sealed asks no passphrase: its Open is the
+/// one `serve` answers, here refused busy, and its line is that refusal's. An own bind would ask for the
+/// key's passphrase on a closed stdin and fail on that instead.
+#[tokio::test]
+async fn stop_through_serve_asks_no_passphrase() {
+    let home = device("stop-sealed", 60).await;
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    let (status, stderr) = swoosh(&home, &["stop", "me/nas"]).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(*seen.opens.lock().unwrap(), ["control.stop"], "{stderr}");
+    assert!(!stderr.contains("passphrase"), "{stderr}");
+    assert!(
+        stderr.starts_with("error: too many connections open through swoosh serve on this machine"),
+        "{stderr}"
+    );
     let _ = std::fs::remove_dir_all(home.dir());
 }

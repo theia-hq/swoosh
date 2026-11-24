@@ -481,9 +481,9 @@ pub enum OpenRefusal {
     Peer(PeerRefusal),
     /// The peer answered with a refusal this build cannot read.
     PeerUnreadable(RefusalDetail),
-    /// The peer could not be dialed.
+    /// The peer could not be dialed, its deadline included.
     Unreachable(RefusalDetail),
-    /// The dial or the stream open ran out of time.
+    /// The stream open ran out of time on a connection that connected: its request may have left.
     Timeout,
     /// The session broke while the stream was opening.
     Broken(RefusalDetail),

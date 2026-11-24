@@ -17,7 +17,7 @@ use swoosh::testkit::{TestNode, TestRoot};
 
 use crate::commands::invite::invite_tests::{NAS, node};
 use crate::commands::through_serve::tests::{
-    Event, Heard, ROW_BOUND, Reply, Rig, Served, on_a_big_stack, routed,
+    Answer, Event, Heard, ROW_BOUND, Reply, Rig, Served, on_a_big_stack, routed, scripted,
 };
 use crate::{Cli, Verb};
 
@@ -74,14 +74,17 @@ async fn dialed_out(
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> Printed {
-    let Verb::Outward(outward) =
-        Cli::try_parse_from(core::iter::once("swoosh").chain(argv.iter().copied()))
-            .unwrap()
-            .command
-            .unwrap()
-            .split()
-    else {
-        panic!("{argv:?} is a reaching verb");
+    let outward = match Cli::try_parse_from(core::iter::once("swoosh").chain(argv.iter().copied()))
+        .unwrap()
+        .command
+        .unwrap()
+        .split()
+    {
+        Verb::Outward(outward) => outward,
+        // `stop` resolves its machine against the list of your devices first, as the composition root
+        // does, and only another of your devices goes on.
+        Verb::Stop(cmd) => crate::Outward::Stop(cmd.run_local(home, None).await.unwrap().unwrap()),
+        _ => panic!("{argv:?} is a reaching verb"),
     };
     let contacts = ContactsStore::open(home).await.unwrap().contacts().clone();
     let machine = swoosh::reaching::Reaching::dialed(&outward)
@@ -1150,6 +1153,231 @@ fn a_refused_ping_through_serve_names_the_cause() {
                 .iter()
                 .any(|open| open.service == "control.services"),
             "no follow-up to a contact"
+        );
+    });
+}
+
+/// One row of a stop through `serve`: how the resident answers an Open, and the line the run ends with.
+type StopRow = (fn() -> Reply, &'static str);
+
+/// The stop's ack, as the device's one byte down the attached stream.
+fn ack() -> Reply {
+    Reply::Exchange(vec![swoosh::serve::STOP_ACK])
+}
+
+/// Every Open of `service` the resident heard.
+fn opens_of<'e>(events: &'e [Event], service: &str) -> Vec<&'e Heard> {
+    opens(events)
+        .into_iter()
+        .filter(|open| open.service == service)
+        .collect()
+}
+
+/// Through `serve`, `stop me/nas` is one Open of `control.stop` on a connection of its own, with no slip:
+/// attached, then the ack, gives the stopped lines, exit 0, and its upload ends. An own bind, Main or a
+/// slip would each show here.
+#[test]
+fn stop_rides_the_resident() {
+    on_a_big_stack(async || {
+        let mut served = a_device("stop-rides", false).await;
+        let rig = Rig::default();
+        let resident = routed(&mut served, |_| ack(), &rig);
+        let printed = dialed(&served.home, &["stop", "me/nas"]).await;
+        rig.stop.cancel();
+        let events = resident.await.unwrap();
+        let [stop] = opens(&events)[..] else {
+            panic!("one Open, the stop's: {printed:?}");
+        };
+        assert_eq!(stop.service, "control.stop");
+        assert_eq!(stop.peer, node(NAS));
+        assert_eq!(stop.lane, OpenLane::Isolated);
+        assert_eq!(stop.slip, None);
+        assert!(
+            stop.upload
+                .ends_with(&crate::commands::through_serve::tests::END)
+        );
+        assert!(printed.ok, "{printed:?}");
+        let short: String = node(NAS).to_string().chars().take(12).collect();
+        assert_eq!(
+            printed.err,
+            format!(
+                "Stopped me/nas ({short}\u{2026}).\nIt serves again when swoosh serve next runs on nas.\n"
+            )
+        );
+    });
+}
+
+/// Through `serve`, a stop whose Open came back `Broken` or `Timeout` may have reached the device, so it
+/// probes with `ping` on Main through the same `serve` once the stop has settled: a probe attached or
+/// refused by the device's gate says nothing was stopped, and one that does not reach it says the stop is
+/// unconfirmed. Neither ever sends a second stop. Real time, so each row waits out the settle.
+#[test]
+fn stop_probe_through_serve() {
+    on_a_big_stack(async || {
+        let refusals = [
+            OpenRefusal::Broken(bifrost::RefusalDetail::bounded("cut")),
+            OpenRefusal::Timeout,
+        ];
+        let probes: [StopRow; 3] = [
+            (
+                || Reply::Exchange(Vec::new()),
+                "could not stop me/nas\n  Nothing was stopped.",
+            ),
+            (unavailable, "could not stop me/nas\n  Nothing was stopped."),
+            (
+                || {
+                    Reply::Refuse(OpenRefusal::Unreachable(bifrost::RefusalDetail::bounded(
+                        "the machine could not be reached",
+                    )))
+                },
+                "could not confirm that me/nas stopped; it may still be serving",
+            ),
+        ];
+        for (at, refusal) in refusals.into_iter().enumerate() {
+            for (probe, line) in probes {
+                let mut served = a_device(&format!("stop-probe-{at}"), false).await;
+                let rig = Rig::default();
+                let stopped = refusal.clone();
+                let resident = routed(
+                    &mut served,
+                    move |service| match service {
+                        "control.stop" => Reply::Refuse(stopped.clone()),
+                        _ => probe(),
+                    },
+                    &rig,
+                );
+                let printed = dialed(&served.home, &["stop", "me/nas"]).await;
+                rig.stop.cancel();
+                let events = resident.await.unwrap();
+                assert_eq!(printed.error.as_deref(), Some(line), "{refusal:?}");
+                assert_eq!(opens_of(&events, "control.stop").len(), 1, "{refusal:?}");
+                let pings = opens_of(&events, "ping");
+                assert!(!pings.is_empty(), "{refusal:?}: the probe asked");
+                for ping in pings {
+                    assert_eq!((ping.lane, ping.slip.as_deref()), (OpenLane::Main, None));
+                }
+            }
+        }
+    });
+}
+
+/// Through `serve`, each row of the stop's open table: a dial that never connected, a dial timeout
+/// included, says nothing was stopped with no probe; the device's refusal is the refused line; and what
+/// `serve` says of itself is its own line, with no probe and never that nothing was stopped.
+#[test]
+fn one_open_table_for_stop_through_serve() {
+    on_a_big_stack(async || {
+        let unreachable = "could not reach me/nas: it is offline or not running swoosh serve\n  \
+                           Nothing was stopped.";
+        let rows: [StopRow; 6] = [
+            (
+                || {
+                    Reply::Refuse(OpenRefusal::Unreachable(bifrost::RefusalDetail::bounded(
+                        "timed out",
+                    )))
+                },
+                unreachable,
+            ),
+            (
+                || Reply::Refuse(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
+                "me/nas refused: only your own devices can stop it\n  If it has just started, try \
+                 again in a minute.",
+            ),
+            (
+                || Reply::Refuse(OpenRefusal::Busy),
+                "too many connections open through swoosh serve on this machine\n  Close one, or \
+                 wait for one to end, then try again.",
+            ),
+            // Its remedy names the key `serve` runs as, which follows.
+            (
+                || Reply::Refuse(OpenRefusal::StandingEnded),
+                "this device's membership badge has ended, so a family-gated peer will refuse this \
+                 dial; renew it where your root is kept: swoosh invite <name> ",
+            ),
+            (
+                || Reply::Version,
+                "swoosh serve on this machine is a different version\n  Restart it with this version.",
+            ),
+            (|| Reply::Hangup, "connection lost"),
+        ];
+        for (at, (reply, line)) in rows.into_iter().enumerate() {
+            let mut served = a_device(&format!("stop-table-{at}"), false).await;
+            let rig = Rig::default();
+            let resident = routed(
+                &mut served,
+                move |service| match service {
+                    "control.stop" => reply(),
+                    _ => unavailable(),
+                },
+                &rig,
+            );
+            let printed = dialed(&served.home, &["stop", "me/nas"]).await;
+            rig.stop.cancel();
+            let events = resident.await.unwrap();
+            let error = printed.error.unwrap_or_default();
+            assert!(error.starts_with(line), "row {at}: {error}");
+            assert_eq!(
+                at == 0,
+                error.contains("Nothing was stopped."),
+                "row {at}: {error}"
+            );
+            assert!(opens_of(&events, "ping").is_empty(), "row {at}: no probe");
+            assert_eq!(opens_of(&events, "control.stop").len(), 1, "row {at}");
+        }
+        // `serve` stopped under the stop's Open: its own line, which makes no claim about the device.
+        let mut served = a_device("stop-table-gone", false).await;
+        let rig = Rig::default();
+        let resident = scripted(&mut served, vec![Answer::Vanish], &rig);
+        let printed = dialed(&served.home, &["stop", "me/nas"]).await;
+        let heard = resident.await.unwrap();
+        assert_eq!(heard.len(), 1);
+        assert_eq!(
+            printed.error.as_deref(),
+            Some(
+                "swoosh serve stopped here and ended the connection to me/nas\n  Commands here \
+                 connect through it while it runs.\n  Run this command again to reconnect."
+            )
+        );
+        // The resident's own error comes before it reaches out, so no stop left and no probe runs: the
+        // route's line, the reason as the resident gave it.
+        let mut served = a_device("stop-table-error", false).await;
+        let rig = Rig::default();
+        let resident = scripted(&mut served, vec![Answer::Error("disk full")], &rig);
+        let printed = dialed(&served.home, &["stop", "me/nas"]).await;
+        let heard = resident.await.unwrap();
+        assert_eq!(heard.len(), 1, "no probe after the resident's error");
+        assert_eq!(heard[0].service, "control.stop");
+        assert_eq!(printed.error.as_deref(), Some("disk full"));
+    });
+}
+
+/// Through `serve`, a stop whose ack was read exits 0 with its stopped lines and no `serve` line, though
+/// the exchange beside it met `serve` of another version: the ack proves the stop, and a `serve` that
+/// went beside it is not that stop's failure.
+#[test]
+fn a_stop_exits_0_when_serve_went_beside() {
+    on_a_big_stack(async || {
+        let mut served = a_device("stop-beside", true).await;
+        let rig = Rig::default();
+        let resident = routed(
+            &mut served,
+            |service| match service {
+                "control.sync" => Reply::VersionAfterHeld,
+                _ => Reply::AfterVersion(Box::new(ack())),
+            },
+            &rig,
+        );
+        let printed = dialed(&served.home, &["stop", "me/nas"]).await;
+        rig.stop.cancel();
+        let events = resident.await.unwrap();
+        assert_eq!(opens_of(&events, "control.sync").len(), 1);
+        assert_eq!(printed.error, None, "{printed:?}");
+        let short: String = node(NAS).to_string().chars().take(12).collect();
+        assert_eq!(
+            printed.err,
+            format!(
+                "Stopped me/nas ({short}\u{2026}).\nIt serves again when swoosh serve next runs on nas.\n"
+            )
         );
     });
 }

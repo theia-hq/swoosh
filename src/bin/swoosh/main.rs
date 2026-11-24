@@ -808,7 +808,12 @@ async fn run() -> eyre::Result<()> {
         // `swoosh stop`: every shape the list of your devices refuses exits 2 here, before any transport
         // is composed, and this machine stops over its control socket. Only another of your devices binds.
         Verb::Stop(cmd) => match cmd.run_local(&home, typed_reach).await {
-            Ok(Some(device)) => Outward::Stop(device),
+            // Its `--peer` addresses are checked here as the other dialing verbs' are: what one Open could
+            // not carry is usage, `serve` running or not, before `serve` is asked.
+            Ok(Some(device)) => {
+                hints = hints_or_usage(&["stop"], device.reach_args());
+                Outward::Stop(device)
+            }
             Ok(None) => return Ok(()),
             Err(report) => match report.downcast_ref::<stop::Usage>() {
                 Some(usage) => usage_error(&["stop"], &usage.0),
@@ -987,7 +992,7 @@ async fn run() -> eyre::Result<()> {
         })
         .transpose()?;
 
-    // `speed`, `ping`, `status <machine>`, `send`, `forward` and `proxy` while `serve` runs here: each
+    // `speed`, `ping`, `status <machine>`, `send`, `forward`, `proxy` and `stop` while `serve` runs here: each
     // stream, the stale-list exchange beside it and the root question are each one Open there.
     if let Some(dialing) = Dialing::of(&reach)
         && let BindRole::Dialing(credential) = reach.bind_role()
@@ -1178,6 +1183,8 @@ enum Dialing<'a> {
     /// `forward` to a port or stdout: a `unix:` end is refused by its own bind's run.
     Forward(&'a commands::forward::ForwardCmd),
     Proxy(&'a commands::proxy::ProxyCmd),
+    /// `stop me/<name>`: its one stream rides a connection of its own on both paths.
+    Stop(&'a stop::StopDevice),
 }
 
 impl<'a> Dialing<'a> {
@@ -1197,9 +1204,9 @@ impl<'a> Dialing<'a> {
                 Some(Self::Forward(cmd))
             }
             Outward::Proxy(cmd) => Some(Self::Proxy(cmd)),
+            Outward::Stop(cmd) => Some(Self::Stop(cmd)),
             Outward::Serve(_)
             | Outward::Forward(_)
-            | Outward::Stop(_)
             | Outward::Sync(_)
             | Outward::Invite(_)
             | Outward::Join(_)
@@ -1217,17 +1224,19 @@ impl<'a> Dialing<'a> {
             Self::Send(cmd) => &cmd.reach,
             Self::Forward(cmd) => &cmd.reach,
             Self::Proxy(cmd) => &cmd.reach,
+            Self::Stop(cmd) => cmd.reach_args(),
         }
     }
 
     /// Whether a record of `serve` gone, met beside a run the verb ended clean, ends it with that line:
     /// for a verb that reports, the run's result says nothing of what came after. Never for `forward`
     /// or `proxy`: the bridge's exit 0 says the far side holds every byte, so a `serve` that went after
-    /// a clean session is not that session's failure, and a listener never ends clean.
+    /// a clean session is not that session's failure, and a listener never ends clean. Never for `stop`
+    /// either: the ack proves the stop, as the far side's end proves the bridge.
     fn reports_gone(&self) -> bool {
         match self {
             Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Send(_) => true,
-            Self::Forward(_) | Self::Proxy(_) => false,
+            Self::Forward(_) | Self::Proxy(_) | Self::Stop(_) => false,
         }
     }
 
@@ -1240,6 +1249,7 @@ impl<'a> Dialing<'a> {
             Self::Send(cmd) => nauthy::Service::clone(&cmd.service),
             Self::Forward(cmd) => nauthy::Service::clone(&cmd.service),
             Self::Proxy(cmd) => nauthy::Service::clone(&cmd.service),
+            Self::Stop(_) => swoosh::serve::CONTROL_STOP_SERVICE.parse()?,
         })
     }
 }
@@ -1332,9 +1342,10 @@ async fn dial_through_serve<O: commands::connect::Output>(
             cmd.through(source, route, machine, admitted, sent, out, err)
                 .await
         }
-        // Neither asks a root, so the signal goes unheard.
+        // None of these asks a root, so the signal goes unheard.
         Dialing::Forward(cmd) => cmd.forward(source, route, machine, contacts, stdio).await,
         Dialing::Proxy(cmd) => cmd.proxy(source, route, machine, contacts, out).await,
+        Dialing::Stop(cmd) => cmd.stop(source, route, machine, err).await,
     };
     let (ended, shown) = run_verb(beside, &swoosh::sync::SourceDial::new(source, home), verb).await;
     // Told once the run is done, as by own bind: a question at the terminal can wait on the person.

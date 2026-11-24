@@ -511,6 +511,38 @@ async fn a_refusal_through_serve_prints_the_own_binds_line() {
     assert!(!line.contains('\u{1b}'), "{line}");
 }
 
+/// A dial that timed out, which the resident reports as Unreachable with the words `timed out`, prints
+/// what a `Timeout` prints, on both paths: only `stop` tells the two apart.
+#[tokio::test]
+async fn a_dial_timeout_prints_as_a_timeout_on_both_paths() {
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let service = "ssh".parse().unwrap();
+    let pipe = Dial {
+        machine: &peer,
+        service: &service,
+        contacts: &contacts,
+    };
+    use swoosh::streams::Unopened::Refused;
+
+    let dial_timeout = || OpenRefusal::Unreachable(RefusalDetail::bounded("timed out"));
+    assert_eq!(
+        printed(&pipe.refused(dial_timeout(), &Serve(None)).await),
+        printed(&pipe.refused(OpenRefusal::Timeout, &Serve(None)).await)
+    );
+    let typed = Peer::Raw(nas());
+    let bound = crate::probe_route_tests::bound();
+    let own = crate::commands::route::Route::Own {
+        peer: &typed,
+        bound: &bound,
+        this: resident_key(),
+    };
+    assert_eq!(
+        printed(&own.line(Refused(dial_timeout()), &peer).await),
+        printed(&own.line(Refused(OpenRefusal::Timeout), &peer).await)
+    );
+}
+
 /// A home with this process recorded as its `serve` and the control socket bound, as `serve` binds it:
 /// a verb run here finds a resident, and the test answers as that resident.
 pub(crate) struct Served {

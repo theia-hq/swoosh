@@ -1367,10 +1367,21 @@ fn a_failed_open_carries_only_fixed_words() {
         panic!("a stream failure is broken");
     };
     assert_eq!(detail.as_str(), BROKEN);
-    assert_eq!(
-        failed(&OpenError::Unreachable(DialFailure::TimedOut)),
-        OpenRefusal::Timeout
-    );
+}
+
+/// A dial that ran out its deadline never connected, so no request reached the machine: it is
+/// Unreachable, its detail the words a `Timeout` prints, so no line changes. An open's own deadline,
+/// passed on a connection that did connect, stays `Timeout`, since its request may have left. Fold the
+/// two and a client that must know whether a request left reads an offline machine as one that may have
+/// taken it.
+#[test]
+fn a_dial_timeout_through_serve_is_unreachable() {
+    let OpenRefusal::Unreachable(detail) = failed(&OpenError::Unreachable(DialFailure::TimedOut))
+    else {
+        panic!("a dial that timed out is unreachable");
+    };
+    assert_eq!(detail.as_str(), "timed out");
+    assert_eq!(failed(&OpenError::Timeout), OpenRefusal::Timeout);
 }
 
 /// One `presents` on both paths: a proven-only route presents nothing, a slip presents itself, and any

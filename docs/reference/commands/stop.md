@@ -27,5 +27,7 @@ only your own devices, by name; a contact's machine, a key or a link is refused,
 [your devices can stop a machine](../services.md#control-stop). The stopped machine prints which device stopped it.
 Just after swoosh serve starts, a machine refuses a stop from another device until it has
 [synced your device list](sync.md); try again in a minute.
+If `swoosh stop` cannot confirm that the device stopped, it ends with
+`error: could not confirm that me/nas stopped; it may still be serving`. Run `swoosh status me/<name>` or the stop again.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
