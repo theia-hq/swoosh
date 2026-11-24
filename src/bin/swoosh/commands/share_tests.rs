@@ -897,7 +897,7 @@ fn detail(name: &str, target: &str, refused: bool) -> Vec<u8> {
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {
-    let mut bytes = b"SWC1\x09".to_vec();
+    let mut bytes = b"SWC2\x09".to_vec();
     bytes.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(payload);
     bytes
@@ -1185,7 +1185,7 @@ async fn missing_and_failed_live_detail_never_use_saved_targets_or_touch_keys() 
         frame(&[2, 1]),
         frame(&[2, 3]),
         frame(&[0, 0]),
-        b"SWC1\x09\x20\x01".to_vec(),
+        b"SWC2\x09\x20\x01".to_vec(),
         b"BAD1".to_vec(),
         detail("demo", "gopher:x", false),
     ] {

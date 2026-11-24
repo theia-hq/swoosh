@@ -174,10 +174,11 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
     let BindRole::Dialing(credential) = bind_role else {
         panic!("forward dials");
     };
-    let (slot1, slot2) = reaching::resolve(credential, node.node_id(), &desk.home)
-        .await
-        .unwrap()
-        .into_slots();
+    let (slot1, slot2) =
+        reaching::resolve_to(credential, node.node_id(), &desk.home, &mut Vec::new())
+            .await
+            .unwrap()
+            .into_slots();
     let peer = outward.dialed().expect("forward names its peer");
     let machine = peer.machine(&Contacts::default()).unwrap();
     let connector = swoosh::reach::gated(machine.key(), SERVICE.parse().unwrap(), slot1, slot2);

@@ -45,9 +45,14 @@ pub struct Dial<'a> {
 
 /// What the control socket showed: one answering, or why none did.
 pub(crate) enum Probed {
-    /// A `serve` answered, its listener checked; the connection that showed it carried nothing and is
-    /// closed, so each Open takes one of its own.
-    Answering(UidSocket),
+    /// A `serve` answered its one `Whoami`, its listener checked before the request was written: the
+    /// key it runs as. That connection is closed, so each Open takes one of its own.
+    Answering {
+        /// The socket it answered on.
+        socket: UidSocket,
+        /// The key it runs as: a claim from the process attribution checked, as its pid is.
+        this: NodeId,
+    },
     /// There is no runtime root to find a socket under.
     NoRoot(RuntimeRoot),
     /// Nothing answered at `at`: no leaf, no socket, or a connect refused.
@@ -55,37 +60,61 @@ pub(crate) enum Probed {
         /// The socket path the command tried.
         at: PathBuf,
     },
+    /// A connection was taken, then ended before a reply: a `serve` stopping as it was asked, or one
+    /// that could not answer.
+    Dropped,
+    /// What answered speaks another version of the control wire.
+    Skew,
+    /// A connection was taken and no reply came within the client's bounds: the phase that ran out.
+    Silent {
+        /// Which phase hit its deadline, as [`ControlError::Timeout`] names it.
+        phase: &'static str,
+    },
 }
 
 /// What a run may take from the probe: a `serve` to ride, or none here.
 pub(crate) enum Found {
     /// A `serve` answers on this socket.
-    Answering(UidSocket),
+    Answering {
+        /// The socket it answers on.
+        socket: UidSocket,
+        /// The key it runs as.
+        this: NodeId,
+    },
     /// No `serve` runs for this home: the run binds its own.
     Absent,
 }
 
 /// The `serve` at `home`'s control socket, probed once, or [`Found::Absent`] only when none runs for this
 /// home: no answer is not no `serve`, since one may run under another runtime root, be still starting,
-/// or (on macOS) refuse connects while its accept queue is full. So on no answer `serve.lock` is asked,
-/// and [`rule`] reads the two.
+/// or (on macOS) refuse connects while its accept queue is full. So on no answer, or no reply in time,
+/// `serve.lock` is asked, and [`rule`] reads the two.
 ///
 /// # Errors
 ///
 /// The control socket cannot be trusted, `serve.lock` could not be read within [`STOPPED_ASK`], or
-/// [`Unreached`]: never an own bind then.
+/// [`rule`]'s: never an own bind then.
 pub(crate) async fn serve(home: &Home) -> eyre::Result<Found> {
     let probed = probe(home).await?;
     let lock = match probed {
-        Probed::Answering(_) => None,
-        Probed::NoRoot(_) | Probed::Nothing { .. } => Some(lock(home).await?),
+        Probed::Answering { .. } | Probed::Skew => None,
+        Probed::NoRoot(_) | Probed::Nothing { .. } | Probed::Dropped | Probed::Silent { .. } => {
+            Some(lock(home).await?)
+        }
     };
-    Ok(rule(probed, lock)?)
+    rule(probed, lock)
 }
 
-/// Probe `home`'s control socket once: connect, check its listener, send nothing. The runtime root is
-/// read here, so why there is none is kept rather than read as no `serve`.
-async fn probe(home: &Home) -> Result<Probed, ControlError> {
+/// Probe `home`'s control socket once: connect, check its listener, then send one `Whoami`, within the
+/// client's own bounds. `Whoami` and not `Status`: its reply is one key, so a menu past the frame never
+/// fails the probe. The runtime root is read here, so why there is none is kept rather than read as no
+/// `serve`.
+///
+/// # Errors
+///
+/// The control socket cannot be trusted, or what answered sent a refusal, an error or a frame this build
+/// cannot read. The text `serve` sent comes back escaped, as an Open's does.
+async fn probe(home: &Home) -> eyre::Result<Probed> {
     let at = match home.control_socket() {
         Ok(at) => at,
         Err(root) => return Ok(Probed::NoRoot(root)),
@@ -93,12 +122,21 @@ async fn probe(home: &Home) -> Result<Probed, ControlError> {
     let socket = match UidSocket::resolve(home) {
         Ok(socket) => socket,
         Err(ControlError::NoResident) => return Ok(Probed::Nothing { at }),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
-    match socket.connected().await {
-        Ok(_probe) => Ok(Probed::Answering(socket)),
+    match socket.whoami_attributed().await {
+        Ok((this, _pid)) => Ok(Probed::Answering { socket, this }),
         Err(ControlError::NoResident) => Ok(Probed::Nothing { at }),
-        Err(error) => Err(error),
+        Err(ControlError::Io(error)) => {
+            tracing::debug!(%error, "serve's control connection ended before its reply");
+            Ok(Probed::Dropped)
+        }
+        Err(ControlError::Version { .. }) => Ok(Probed::Skew),
+        Err(ControlError::Timeout { phase }) => Ok(Probed::Silent { phase }),
+        Err(error @ (ControlError::Protocol(_) | ControlError::Refused(_))) => {
+            Err(escaped_report(error.into()))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -114,17 +152,29 @@ async fn lock(home: &Home) -> Result<ResidentPresence, LockError> {
     }
 }
 
-/// The path a run takes from what the probe showed and, on no answer only, what `serve.lock` said. Only
-/// a free lock is no `serve`: a held one with no answer is [`Unreached`], and an unanswered probe with no
-/// lock read is never taken as free.
-pub(crate) fn rule(probed: Probed, lock: Option<ResidentPresence>) -> Result<Found, Unreached> {
-    match (probed, lock) {
-        (Probed::Answering(socket), _) => Ok(Found::Answering(socket)),
-        (_, Some(ResidentPresence::Free)) => Ok(Found::Absent),
-        (_, Some(ResidentPresence::Replacing)) => Err(Unreached::Replacing),
-        (Probed::NoRoot(root), _) => Err(Unreached::NoRoot(root)),
-        (Probed::Nothing { at }, _) => Err(Unreached::Nothing { at }),
-    }
+/// The path a run takes from what the probe showed and, when nothing replied, what `serve.lock` said.
+/// Only a free lock is no `serve`: a held one with no answer is [`Unreached`], and one held behind a
+/// connection that never replied, or that ended before its reply, is [`Unresponsive`]. Another version is [`Skew`] whatever the lock says,
+/// and a probe with no lock read is never taken as free.
+///
+/// # Errors
+///
+/// [`Unreached`], [`Unresponsive`], [`Skew`], or the probe's own [`ControlError::Timeout`] when the lock
+/// is free, so no `serve` is shown stalled.
+pub(crate) fn rule(probed: Probed, lock: Option<ResidentPresence>) -> eyre::Result<Found> {
+    Ok(match (probed, lock) {
+        (Probed::Answering { socket, this }, _) => Found::Answering { socket, this },
+        (Probed::Skew, _) => return Err(Skew.into()),
+        (Probed::Silent { phase }, Some(ResidentPresence::Free)) => {
+            return Err(ControlError::Timeout { phase }.into());
+        }
+        (Probed::Silent { .. }, _) => return Err(Unresponsive.into()),
+        (_, Some(ResidentPresence::Free)) => Found::Absent,
+        (_, Some(ResidentPresence::Replacing)) => return Err(Unreached::Replacing.into()),
+        (Probed::Dropped, _) => return Err(Unresponsive.into()),
+        (Probed::NoRoot(root), _) => return Err(Unreached::NoRoot(root).into()),
+        (Probed::Nothing { at }, _) => return Err(Unreached::Nothing { at }.into()),
+    })
 }
 
 /// Refuse a reach flag `serve` makes moot before a verb's local act, when `serve` answers here: the
@@ -134,20 +184,27 @@ pub(crate) fn rule(probed: Probed, lock: Option<ResidentPresence>) -> Result<Fou
 ///
 /// # Errors
 ///
-/// The flag's line, [`Unchanged`], or the control socket cannot be trusted.
+/// The flag's line, the control socket cannot be trusted, or any other error finding `serve` as
+/// [`Unchanged`].
 pub async fn refuse_moot(home: &Home, reach: &ReachArgs) -> eyre::Result<()> {
     let Some(moot) = Moot::first(reach) else {
         return Ok(());
     };
     match serve(home).await {
-        Ok(Found::Answering(_)) => Err(moot.into()),
+        Ok(Found::Answering { .. }) => Err(moot.into()),
         Ok(Found::Absent) => Ok(()),
-        // A `serve` out of reach, or a lock that could not be read, stops the act before it ran; an
-        // untrusted socket keeps its own line.
-        Err(report) if report.is::<Unreached>() || report.is::<LockError>() => {
-            Err(Unchanged(report).into())
+        // An untrusted socket keeps its own line.
+        Err(report)
+            if matches!(
+                report.downcast_ref::<ControlError>(),
+                Some(ControlError::Untrusted { .. })
+            ) =>
+        {
+            Err(report)
         }
-        Err(report) => Err(report),
+        // Whatever else stopped the probe, out of reach, stalled, another version or a lock that could
+        // not be read, stopped the act before it ran.
+        Err(report) => Err(Unchanged(report).into()),
     }
 }
 
@@ -484,8 +541,8 @@ impl core::fmt::Display for Unreached {
 
 impl core::error::Error for Unreached {}
 
-/// [`Unreached`], or a [`LockError`] reading `serve.lock`, met before a root act, which then never ran:
-/// the line says so after its own. The whole chain renders inside this message, so the line ends it.
+/// Any error finding `serve` but an untrusted socket, met before a root act, which then never ran: the
+/// line says so after its own. The whole chain renders inside this message, so the line ends it.
 #[derive(Debug, thiserror::Error)]
 #[error("{0:#}\n  Nothing was changed.")]
 pub(crate) struct Unchanged(eyre::Report);

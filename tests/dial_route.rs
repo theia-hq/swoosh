@@ -17,7 +17,7 @@ use keystore::{KeyFile, Protection};
 use swoosh::home::Home;
 use swoosh::roster::{Epoch, RosterDoc};
 use swoosh::serve::control_codec::{
-    DisabledList, OpenRefusal, Request, Response, ServiceMenu, StatusReply,
+    DisabledList, MAX_FRAME, OpenRefusal, PeerEntry, Request, Response, ServiceMenu, StatusReply,
 };
 use swoosh::testkit::{TestNode, TestRoot};
 
@@ -103,8 +103,10 @@ fn a_file(home: &Home) -> String {
 struct Seen {
     /// Every connection it accepted.
     connects: AtomicUsize,
-    /// The connections that closed before a request: a run asking whether `serve` answers.
+    /// The statuses it answered before the first Open: a run asking whether `serve` answers, and as what.
     probes: AtomicUsize,
+    /// The connections that closed before a request.
+    bare: AtomicUsize,
     /// The services of the Opens it heard, in order.
     opens: Mutex<Vec<String>>,
     /// The addresses each Open carried, in order.
@@ -143,6 +145,23 @@ async fn resident(
     seen: Arc<Seen>,
     stop: tightbeam::tunnel::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    resident_of(
+        home,
+        status_of(TestNode::seeded(RESIDENT).node_id()),
+        seen,
+        stop,
+    )
+    .await
+}
+
+/// [`resident`], answering a status with `status`: one past the frame drops the connection with no
+/// reply, as a `serve` whose encoder refuses it does.
+async fn resident_of(
+    home: &Home,
+    status: StatusReply,
+    seen: Arc<Seen>,
+    stop: tightbeam::tunnel::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     let (lock, listener) = claimed(home).await;
     tokio::spawn(async move {
         loop {
@@ -152,10 +171,17 @@ async fn resident(
             };
             seen.connects.fetch_add(1, Ordering::SeqCst);
             match Request::read(&mut conn).await {
-                Ok(Request::Status) => {
-                    let _ = Response::Status(status_of(TestNode::seeded(RESIDENT).node_id()))
-                        .write(&mut conn)
-                        .await;
+                Ok(asked @ (Request::Status | Request::Whoami)) => {
+                    if seen.opens.lock().unwrap().is_empty() {
+                        seen.probes.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let answer = match asked {
+                        Request::Whoami => Response::Whoami {
+                            node_id: status.node_id,
+                        },
+                        _ => Response::Status(status.clone()),
+                    };
+                    let _ = answer.write(&mut conn).await;
                 }
                 Ok(Request::Open(open)) => {
                     seen.opens.lock().unwrap().push(open.service().to_string());
@@ -169,7 +195,7 @@ async fn resident(
                 }
                 Ok(_) => {}
                 Err(_) => {
-                    seen.probes.fetch_add(1, Ordering::SeqCst);
+                    seen.bare.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
@@ -454,8 +480,9 @@ async fn stop_through_serve_asks_no_passphrase() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// A run through `serve` asks it whether it answers once, whatever the verb: every dialing verb, every
-/// `forward` end, and an exchange verb.
+/// A run through `serve` asks it whether it answers once, with one `Whoami` before its first Open,
+/// whatever the verb: every dialing verb, every `forward` end, and an exchange verb. No connection it
+/// makes carries nothing.
 #[tokio::test]
 async fn a_run_through_serve_probes_it_once() {
     let home = device("probes-once", 60).await;
@@ -474,7 +501,49 @@ async fn a_run_through_serve_probes_it_once() {
         stop.cancel();
         resident.await.unwrap();
         assert_eq!(seen.probes.load(Ordering::SeqCst), 1, "{argv:?}: {stderr}");
+        assert_eq!(seen.bare.load(Ordering::SeqCst), 0, "{argv:?}: {stderr}");
     }
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A `serve` whose status is past the frame, its catalog and 64 warm peers filling it, still answers the
+/// probe with its key alone, so the verb rides it.
+#[tokio::test]
+async fn whoami_ignores_menu() {
+    let home = device("whoami-menu", 60).await;
+    let mut catalog = 32_u32.to_be_bytes().to_vec();
+    for index in 0..32_u8 {
+        catalog.extend_from_slice(&200_u16.to_be_bytes());
+        catalog.push(b'a' + index % 26);
+        catalog.extend_from_slice(&[b'x'; 199]);
+        catalog.push(0);
+    }
+    let mut status = status_of(TestNode::seeded(RESIDENT).node_id());
+    status.menu.catalog = tightbeam::tunnel::ServiceCatalog::decode(&catalog).unwrap();
+    status.warm = (0..64_u8)
+        .map(|seed| PeerEntry {
+            peer: TestNode::seeded(seed).node_id(),
+            idle_secs: 0,
+        })
+        .collect();
+    assert!(
+        status
+            .encode()
+            .is_ok_and(|payload| payload.len() > MAX_FRAME),
+        "the status is past the frame"
+    );
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident_of(&home, status, Arc::clone(&seen), stop.clone()).await;
+    let (_, stderr) = swoosh(&home, &["stop", "me/nas"]).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(seen.probes.load(Ordering::SeqCst), 1, "{stderr}");
+    assert_eq!(
+        seen.opens.lock().unwrap().len(),
+        1,
+        "it rode serve: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
@@ -580,10 +649,11 @@ async fn an_untrusted_socket_reads_no_key() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// `serve` answers the run's one probe, then stops before the first Open: the run ends on the line for
-/// `serve` stopped, exit 1, and never falls back to a bind of its own. A connect landing between the
-/// probe's close and the lock's release would read a freed lock instead; the run's file reads make that
-/// window microseconds against milliseconds, so the row runs several times to catch it should it widen.
+/// `serve` answers the run's one probe, its `Whoami`, then stops before the first Open: the run ends on
+/// the line for `serve` stopped, exit 1, and never falls back to a bind of its own. A connect landing
+/// between the probe's reply and the lock's release would read a freed lock instead; the run's file reads
+/// make that window microseconds against milliseconds, so the row runs several times to catch it should
+/// it widen.
 #[tokio::test]
 async fn serve_gone_after_the_probe_is_the_stopped_line() {
     let home = device("gone-after-probe", 60).await;
@@ -591,7 +661,14 @@ async fn serve_gone_after_the_probe_is_the_stopped_line() {
         let (lock, listener) = claimed(&home).await;
         let resident = tokio::spawn(async move {
             let (mut conn, _) = listener.accept().await.unwrap();
-            let probe = Request::read(&mut conn).await.is_err();
+            let probe = matches!(Request::read(&mut conn).await, Ok(Request::Whoami));
+            if probe {
+                let _ = Response::Whoami {
+                    node_id: TestNode::seeded(RESIDENT).node_id(),
+                }
+                .write(&mut conn)
+                .await;
+            }
             // The lock first: freeing it removes the socket, so no later connect finds a listener.
             drop(lock);
             drop(listener);
@@ -600,7 +677,7 @@ async fn serve_gone_after_the_probe_is_the_stopped_line() {
         let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
         assert!(
             resident.await.unwrap(),
-            "run {run}: the first connection was the probe"
+            "run {run}: the first connection carried the probe's Whoami"
         );
         assert_eq!(status, Some(1), "run {run}: {stderr}");
         assert!(
@@ -787,6 +864,199 @@ async fn a_home_lock_held_for_good_binds_nothing() {
     );
     assert!(!asked_the_passphrase(&stderr), "{stderr}");
     assert!(took < Duration::from_secs(20), "bounded: {took:?}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// How a [`probed`] resident answers a `Whoami`.
+#[derive(Clone, Copy)]
+enum Answers {
+    /// As a `serve` of another control version: its magic, and nothing more.
+    Skew,
+    /// Never: the connection is held open with no reply, as a stalled `serve` holds it.
+    Silent,
+}
+
+/// A resident on `home`'s control socket, `serve.lock` held and the socket bound before it returns, that
+/// answers a `Whoami` as `answers` says and counts each Open it hears in `opens`, until `stop`.
+async fn probed(
+    home: &Home,
+    answers: Answers,
+    opens: Arc<AtomicUsize>,
+    stop: tightbeam::tunnel::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let (lock, listener) = claimed(home).await;
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (mut conn, _) = tokio::select! {
+                accepted = listener.accept() => accepted.unwrap(),
+                () = stop.cancelled() => break,
+            };
+            match Request::read(&mut conn).await {
+                Ok(Request::Whoami) => match answers {
+                    Answers::Skew => {
+                        let _ = conn.write_all(b"SWC9").await;
+                    }
+                    Answers::Silent => held.push(conn),
+                },
+                Ok(Request::Open(_)) => {
+                    opens.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+        drop(held);
+        drop(lock);
+    })
+}
+
+/// A `serve` of another version at the probe: the skew line, exit 1, with no Open sent, no passphrase
+/// asked and nothing bound.
+#[tokio::test]
+async fn skew_at_the_probe_makes_no_bind() {
+    let home = device("skew-probe", 60).await;
+    let opens = Arc::new(AtomicUsize::new(0));
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = probed(&home, Answers::Skew, Arc::clone(&opens), stop.clone()).await;
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(
+        stderr,
+        "error: swoosh serve on this machine is a different version\n  Restart it with this version.\n"
+    );
+    assert_eq!(opens.load(Ordering::SeqCst), 0, "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A resident that takes the probe's connection and never replies to its `Whoami`, `serve.lock` held:
+/// the line for a stalled `serve`, exit 1, within the client's own bounds (2 s to connect, 5 s for the
+/// reply), never a hang and never an own bind.
+#[tokio::test]
+async fn a_stalled_probe_is_unresponsive() {
+    let home = device("stalled-probe", 60).await;
+    let opens = Arc::new(AtomicUsize::new(0));
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = probed(&home, Answers::Silent, Arc::clone(&opens), stop.clone()).await;
+    let started = std::time::Instant::now();
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    let took = started.elapsed();
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(1), "{stderr}");
+    assert_eq!(
+        stderr,
+        "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+    );
+    assert_eq!(opens.load(Ordering::SeqCst), 0, "{stderr}");
+    assert!(took < Duration::from_secs(15), "bounded: {took:?}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A dial to this machine prints its line, exit 2, on both paths, before anything is opened or bound.
+/// By own bind with no key file, the check finds no key and mints none: the run dials on, and the home has
+/// no key file after. Through `serve`, the key it runs as is this machine's: no Open, and no warning for a
+/// badge inside its window first.
+#[tokio::test]
+async fn the_self_dial_check_mints_no_key() {
+    let warning = "swoosh: this device's membership badge expires in";
+    let home = device("self-nokey", 3).await;
+    std::fs::remove_file(home.key()).unwrap();
+    // A port nothing answers on, so the own bind's dial fails here without asking the internet.
+    let hint = format!("{}=127.0.0.1:9", TestNode::seeded(NAS).node_id());
+    let argv = ["ping", "me/nas", "-c", "1", "--local", "--peer", &hint];
+    let (status, stderr) = swoosh(&home, &argv).await;
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(stderr.starts_with("error: could not reach "), "{stderr}");
+    assert!(!home.key().exists(), "no key minted: {stderr}");
+
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    let (status, stderr) = swoosh(&home, &["ping", "me/desk", "-c", "1"]).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(status, Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with("error: me/desk is this machine\n"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(warning), "{stderr}");
+    assert!(seen.opens.lock().unwrap().is_empty(), "{stderr}");
+    assert!(!home.key().exists(), "no key minted: {stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// By own bind, a sealed key file whose header names no key: the check's read surfaces the damaged-key
+/// line, exit 1, before any passphrase is asked or anything bound.
+#[tokio::test]
+async fn the_self_dial_check_surfaces_a_damaged_key() {
+    let home = device("self-damaged", 60).await;
+    let mut bytes = std::fs::read(home.key()).unwrap();
+    // Bytes 10 to 42 are the public key the header claims; all zeros is a small-order point.
+    bytes[10..42].fill(0);
+    std::fs::write(home.key(), &bytes).unwrap();
+    let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1"]).await;
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "error: this machine's key file at {} is damaged and holds no usable key",
+            home.key().display()
+        )),
+        "{stderr}"
+    );
+    assert!(!asked_the_passphrase(&stderr), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A link for this machine's own key that admits anyone takes no check: it dials under a throwaway key,
+/// which may reach this machine like any other, so it binds its own and never asks `serve`.
+#[tokio::test]
+async fn an_anyone_link_to_this_machine_binds_its_own() {
+    let this = TestRoot::seeded(DESK);
+    assert_eq!(this.node_id(), TestNode::seeded(DESK).node_id());
+    let link = this
+        .slip(
+            &swoosh::reach::PING_SERVICE.parse().unwrap(),
+            SystemTime::now() + Duration::from_secs(3600),
+        )
+        .unwrap()
+        .seal()
+        .unwrap()
+        .link()
+        .unwrap();
+    let link = swoosh::link::Link::from(link).to_string();
+    let hint = format!("{}=127.0.0.1:9", this.node_id());
+    let home = device("anyone-self", 60).await;
+    let seen = Arc::new(Seen::default());
+    let stop = tightbeam::tunnel::CancellationToken::new();
+    let resident = resident(&home, Arc::clone(&seen), stop.clone()).await;
+    let argv = ["ping", &link, "-c", "1", "--local", "--peer", &hint];
+    let (status, stderr) = swoosh(&home, &argv).await;
+    stop.cancel();
+    resident.await.unwrap();
+    assert_eq!(seen.connects.load(Ordering::SeqCst), 0, "{stderr}");
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(stderr.starts_with("error: could not reach "), "{stderr}");
+    assert!(!stderr.contains("this machine"), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// By own bind, with this machine's key sealed and no `serve`: a dial to this machine prints its line,
+/// exit 2, with no passphrase asked and nothing bound.
+#[tokio::test]
+async fn the_self_dial_check_asks_no_passphrase() {
+    let home = device("self-sealed", 60).await;
+    let (status, stderr) = swoosh(&home, &["ping", "me/desk", "-c", "1"]).await;
+    assert_eq!(status, Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with("error: me/desk is this machine\n"),
+        "{stderr}"
+    );
+    assert!(!asked_the_passphrase(&stderr), "{stderr}");
     let _ = std::fs::remove_dir_all(home.dir());
 }
 

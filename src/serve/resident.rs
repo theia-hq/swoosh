@@ -376,7 +376,15 @@ impl Resident {
             }
             Ok(Ok(Request::Stop)) => (Response::Ack, true, false),
             Ok(Ok(Request::Services)) => (Response::Catalog(self.menu()), false, false),
-            Ok(Ok(Request::Status)) => (Response::Status(self.status_reply()), false, false),
+            Ok(Ok(Request::Status)) => (Response::status(self.status_reply()), false, false),
+            // The key alone, never the status built to carry it, so a menu past the frame never fails it.
+            Ok(Ok(Request::Whoami)) => (
+                Response::Whoami {
+                    node_id: self.node_id,
+                },
+                false,
+                false,
+            ),
             Ok(Ok(Request::LocalServiceDetail)) => {
                 let Ok(response) = self.local_service_detail_reply() else {
                     return None;

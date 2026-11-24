@@ -11,7 +11,7 @@ use crate::serve::control_codec::MAX_FRAME;
 /// Header bytes for `tag` declaring `len`.
 fn header(tag: u8, len: u16) -> [u8; HEADER] {
     let [high, low] = len.to_be_bytes();
-    [b'S', b'W', b'C', b'1', tag, high, low]
+    [b'S', b'W', b'C', b'2', tag, high, low]
 }
 
 #[test]
@@ -19,15 +19,15 @@ fn the_three_frames_have_their_exact_bytes() {
     let one = DataLen::new(1).unwrap();
     assert_eq!(
         Frame::Data(one).header(),
-        [0x53, 0x57, 0x43, 0x31, 0x0a, 0x00, 0x01]
+        [0x53, 0x57, 0x43, 0x32, 0x0a, 0x00, 0x01]
     );
     assert_eq!(
         Frame::End.header(),
-        [0x53, 0x57, 0x43, 0x31, 0x0b, 0x00, 0x00]
+        [0x53, 0x57, 0x43, 0x32, 0x0b, 0x00, 0x00]
     );
     assert_eq!(
         Frame::Landed.header(),
-        [0x53, 0x57, 0x43, 0x31, 0x0c, 0x00, 0x00]
+        [0x53, 0x57, 0x43, 0x32, 0x0c, 0x00, 0x00]
     );
     let full = DataLen::new(MAX_FRAME).unwrap();
     assert_eq!(Frame::Data(full).header()[4..], [0x0a, 0x20, 0x00]);
@@ -74,7 +74,7 @@ fn a_malformed_header_is_refused_by_what_broke() {
         assert_eq!(refused(header(tag, 0), Toward::Client), MalformedFrame::Tag);
     }
     let mut foreign = header(10, 1);
-    foreign[3] = b'2';
+    foreign[3] = b'9';
     assert_eq!(refused(foreign, Toward::Peer), MalformedFrame::Magic);
     foreign = header(10, 1);
     foreign[0] = b'X';

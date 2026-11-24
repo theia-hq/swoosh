@@ -198,11 +198,22 @@ All notable changes to swoosh, newest first.
   and no longer starts a second node beside it. A lock file that cannot be read, is another user's, or does
   not answer in time stops it with `could not lock <home.lock>`.
 - **`revoke`, `root restore` and `join` with a reach flag refuse before the act** when `serve` holds the home
-  but cannot be reached, and print `Nothing was changed.`
+  but cannot be reached, is of another version or does not answer, and print `Nothing was changed.`
 - **A root act that lands and then cannot reach `serve` says so.** `root restore` and `join` print
   `The change is made and saved here. Your devices have not been told yet.` before the error. `revoke me/<name>`
   prints `me/<name> is blocked on this machine, not yet on your other devices` and
-  `to finish, run it again: swoosh revoke me/<name>`.
+  `to finish, run it again: swoosh revoke me/<name>`. The first line also comes before the errors for a
+  `swoosh serve` of another version or one that does not answer.
+- **A command that dials a machine checks it is not this machine first.** `ping me/<this machine>` and the other
+  commands that dial end with `<name> is this machine` (`that key is this machine's` for a key) and exit 2, with
+  or without `swoosh serve`, before anything is opened, minted or asked. A sealed key no longer asks for its
+  passphrase to say so.
+- **A `swoosh serve` of another version, or one that does not answer, ends a command before its own bind.**
+  The lines are `swoosh serve on this machine is a different version` and `swoosh serve on this machine did
+  not answer`. A `serve` that holds the home and drops the
+  connection counts as one that does not answer.
+- **A damaged key file is named before the passphrase is asked.** Without `swoosh serve`, a command that dials
+  any machine and finds a sealed key file whose header names no key prints the damaged-key line.
 - **Updated SSH and filesystem dependencies** following RUSTSEC-2026-0495 and RUSTSEC-2026-0486.
 - **Updated the QUIC transport dependencies** following RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538.
 - **Local badge expiry refusal uses the effective expiry bound.** Renewal expiry checks include the endpoint. Displayed dates and renewal warnings are unchanged.

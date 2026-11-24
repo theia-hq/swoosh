@@ -13,8 +13,8 @@ use swoosh::node_client::NodeClient;
 use swoosh::observation::{Observer, PathSource, Receipt};
 use swoosh::peer::{Machine as PeerMachine, Peer};
 use swoosh::serve::control_codec::{
-    ControlError, DisabledList, OpenRefusal, PathRef, PathReply, PathRequest, PeerRefusal,
-    ServiceMenu, StatusReply,
+    ControlError, DisabledList, OpenRefusal, PathRef, PathReply, PathRequest, PeerRefusal, Request,
+    Response, ServiceMenu, StatusReply,
 };
 use swoosh::transport::ReachArgs;
 
@@ -297,7 +297,7 @@ impl std::io::Write for Unwritable {
 async fn reference() -> PathRef {
     use swoosh::serve::control_codec::Response;
 
-    let mut frame = b"SWC1\x06\x00\x1c\x01".to_vec();
+    let mut frame = b"SWC2\x06\x00\x1c\x01".to_vec();
     frame.extend_from_slice(&[7; 16]);
     frame.extend_from_slice(&1_u64.to_be_bytes());
     frame.extend_from_slice(&[0, 0, 0]);
@@ -412,7 +412,7 @@ fn this_machine_prints_as_it_was_typed() {
 }
 
 /// The status a `serve` running as `node_id` answers.
-fn status_of(node_id: NodeId) -> StatusReply {
+pub(crate) fn status_of(node_id: NodeId) -> StatusReply {
     StatusReply {
         node_id,
         pid: 1,
@@ -423,6 +423,15 @@ fn status_of(node_id: NodeId) -> StatusReply {
             disabled: DisabledList::Known(Vec::new()),
         },
         warm: Vec::new(),
+    }
+}
+
+/// What a `serve` running as `node_id` answers `asked`, a `Whoami` (the probe) or a `Status` (an ask after
+/// an Open went unanswered): the same `serve` either way.
+pub(crate) fn answer_of(asked: &Request, node_id: NodeId) -> Response {
+    match asked {
+        Request::Whoami => Response::Whoami { node_id },
+        _ => Response::Status(status_of(node_id)),
     }
 }
 
@@ -589,8 +598,15 @@ impl Served {
 
 /// The socket of the `serve` the probe found answering at `home`.
 pub(crate) async fn answering(home: &swoosh::home::Home) -> swoosh::node_client::UidSocket {
+    answering_as(home).await.0
+}
+
+/// [`answering`], with the key the `serve` said it runs as.
+pub(crate) async fn answering_as(
+    home: &swoosh::home::Home,
+) -> (swoosh::node_client::UidSocket, NodeId) {
     match super::serve(home).await.unwrap() {
-        super::Found::Answering(socket) => socket,
+        super::Found::Answering { socket, this } => (socket, this),
         super::Found::Absent => panic!("serve answers"),
     }
 }
@@ -961,7 +977,7 @@ async fn asking_a_stalled_serve_whether_it_went_is_bounded_and_says_no() {
         service: &service,
         contacts: &contacts,
     };
-    let socket = answering(&served.home).await;
+    let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
     // Every connection is taken and held, and nothing is ever answered.
     tokio::spawn(async move {
         let mut held = Vec::new();
@@ -985,14 +1001,14 @@ async fn asking_a_stalled_serve_whether_it_went_is_bounded_and_says_no() {
 }
 
 /// An End frame as the resident reads one: the magic, tag 11 and an empty body (`serve/socket/splice.rs`).
-pub(crate) const END: [u8; 7] = *b"SWC1\x0b\x00\x00";
+pub(crate) const END: [u8; 7] = *b"SWC2\x0b\x00\x00";
 
 /// A Landed frame: tag 12, empty, toward the client only.
-const LANDED: [u8; 7] = *b"SWC1\x0c\x00\x00";
+const LANDED: [u8; 7] = *b"SWC2\x0c\x00\x00";
 
 /// `bytes` as one Data frame, tag 10 (at most a frame's 8 KiB).
 pub(crate) fn data(bytes: &[u8]) -> Vec<u8> {
-    let mut frame = b"SWC1\x0a".to_vec();
+    let mut frame = b"SWC2\x0a".to_vec();
     frame.extend_from_slice(&u16::try_from(bytes.len()).unwrap().to_be_bytes());
     frame.extend_from_slice(bytes);
     frame
@@ -1109,10 +1125,8 @@ pub(crate) fn scripted(
             };
             let open = match Request::read(&mut conn).await {
                 Ok(Request::Open(open)) => open,
-                Ok(Request::Status) => {
-                    let _ = Response::Status(status_of(resident_key()))
-                        .write(&mut conn)
-                        .await;
+                Ok(asked @ (Request::Status | Request::Whoami)) => {
+                    let _ = answer_of(&asked, resident_key()).write(&mut conn).await;
                     continue;
                 }
                 _ => continue,
@@ -1134,7 +1148,7 @@ pub(crate) fn scripted(
                 }
                 // Another control version's magic: the client reads no further.
                 Answer::Version => {
-                    let _ = conn.write_all(b"SWC2").await;
+                    let _ = conn.write_all(b"SWC9").await;
                 }
                 Answer::Hangup => drop(conn),
                 Answer::Stall => held.push((at, tokio::spawn(hold_silent(conn)))),
@@ -1288,12 +1302,12 @@ pub(crate) fn routed(
             };
             let open = match Request::read(&mut conn).await {
                 Ok(Request::Open(open)) => open,
-                Ok(Request::Status) => {
+                Ok(asked @ (Request::Status | Request::Whoami)) => {
                     events.push(Event::Status);
                     if wedged {
                         held.push((None, tokio::spawn(hold_silent(conn))));
                     } else {
-                        let _ = Response::Status(status_of(key)).write(&mut conn).await;
+                        let _ = answer_of(&asked, key).write(&mut conn).await;
                     }
                     continue;
                 }
@@ -1322,7 +1336,7 @@ pub(crate) fn routed(
                     let _ = Response::OpenRefusal(refusal).write(&mut conn).await;
                 }
                 Reply::Version => {
-                    let _ = conn.write_all(b"SWC2").await;
+                    let _ = conn.write_all(b"SWC9").await;
                 }
                 Reply::Stall => held.push((at, tokio::spawn(hold_silent(conn)))),
                 Reply::Hangup => drop(conn),
@@ -1362,7 +1376,7 @@ pub(crate) fn routed(
                                 () = heard.cancelled() => {}
                                 () = stop.cancelled() => return Vec::new(),
                             }
-                            let _ = conn.write_all(b"SWC2").await;
+                            let _ = conn.write_all(b"SWC9").await;
                             // The client hangs up once it has read the reply, and records it then.
                             let mut sent = Vec::new();
                             let _ = conn.read_to_end(&mut sent).await;
@@ -1988,27 +2002,73 @@ async fn the_probe_rule_is_one_table() {
     }
     for (probed, line) in unanswered() {
         let refused = rule(probed, Some(Lock::Serving)).err().unwrap();
-        assert_eq!(printed(&refused.into()), line);
+        assert_eq!(printed(&refused), line);
     }
     for (probed, line) in unanswered() {
         let refused = rule(probed, None).err().unwrap();
-        assert_eq!(printed(&refused.into()), line, "no lock read is never free");
+        assert_eq!(printed(&refused), line, "no lock read is never free");
     }
     for (probed, _) in unanswered() {
         let refused = rule(probed, Some(Lock::Replacing)).err().unwrap();
-        assert_eq!(printed(&refused.into()), REPLACING);
+        assert_eq!(printed(&refused), REPLACING);
     }
-    let served = Served::new("rule-answering").await;
-    for lock in [
+    let locks = [
         None,
         Some(Lock::Free),
         Some(Lock::Serving),
         Some(Lock::Replacing),
-    ] {
+    ];
+    // Another version is its line whatever the lock says, and never no `serve`.
+    for lock in locks {
+        let refused = rule(Probed::Skew, lock).err().unwrap();
+        assert_eq!(
+            printed(&refused),
+            "error: swoosh serve on this machine is a different version\n  Restart it with this \
+             version.\n"
+        );
+    }
+    // No reply in time: a held lock is a `serve` stalled, a free one only the timeout, never no `serve`.
+    let silent = || Probed::Silent {
+        phase: "response read",
+    };
+    for lock in [None, Some(Lock::Serving), Some(Lock::Replacing)] {
+        let refused = rule(silent(), lock).err().unwrap();
+        assert_eq!(
+            printed(&refused),
+            "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+        );
+    }
+    // A connection ended before its reply: a free lock is no `serve`, an emptied one the key
+    // replacement's line, and a held one, or no lock read, a `serve` that did not answer.
+    assert!(matches!(
+        rule(Probed::Dropped, Some(Lock::Free)),
+        Ok(Found::Absent)
+    ));
+    assert_eq!(
+        printed(&rule(Probed::Dropped, Some(Lock::Replacing)).err().unwrap()),
+        REPLACING
+    );
+    for lock in [None, Some(Lock::Serving)] {
+        let refused = rule(Probed::Dropped, lock).err().unwrap();
+        assert_eq!(
+            printed(&refused),
+            "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+        );
+    }
+    let refused = rule(silent(), Some(Lock::Free)).err().unwrap();
+    assert!(matches!(
+        refused.downcast_ref::<ControlError>(),
+        Some(ControlError::Timeout {
+            phase: "response read"
+        })
+    ));
+    let served = Served::new("rule-answering").await;
+    for lock in locks {
         let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
+        let this = resident_key();
         assert!(matches!(
-            rule(Probed::Answering(socket), lock),
-            Ok(Found::Answering(_))
+            rule(Probed::Answering { socket, this }, lock),
+            Ok(Found::Answering { this: found, .. }) if found == this
         ));
     }
 }
@@ -2044,4 +2104,121 @@ async fn a_home_lock_held_for_good_bounds_the_probe() {
     assert_eq!(lock.source.kind(), io::ErrorKind::TimedOut);
     drop(held);
     let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// The `serve` at `served`'s socket for one connection: it reads the request, runs `then` with the
+/// `serve.lock` it may let go, and ends the connection with no reply.
+async fn one_dropped(
+    served: &mut Served,
+    then: impl FnOnce(swoosh::serve::InstanceLock) + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    let listener = served.listener();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let lock = served.lock();
+    tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.unwrap();
+        let _ = Request::read(&mut conn).await;
+        then(lock);
+        drop(conn);
+    })
+}
+
+/// A `serve` that ends the probe's connection with no reply and has let its lock go, as one stopping
+/// does: no `serve` runs, so the run binds its own.
+#[tokio::test]
+async fn probe_eof_lock_free_is_absent() {
+    let mut served = Served::new("probe-eof-free").await;
+    let resident = one_dropped(&mut served, drop).await;
+    let found = super::serve(&served.home).await;
+    resident.await.unwrap();
+    assert!(
+        matches!(found, Ok(super::Found::Absent)),
+        "{:?}",
+        found.err()
+    );
+}
+
+/// A `serve` that ends the probe's connection with no reply and still holds its lock is a `serve` that
+/// did not answer, never no `serve` and never the raw read error.
+#[tokio::test]
+async fn probe_eof_lock_held_is_unresponsive() {
+    let mut served = Served::new("probe-eof-held").await;
+    let (keep, kept) = std::sync::mpsc::channel();
+    let resident = one_dropped(&mut served, move |lock| keep.send(lock).unwrap()).await;
+    let refused = super::serve(&served.home).await.err().unwrap();
+    resident.await.unwrap();
+    drop(kept);
+    assert_eq!(
+        printed(&refused),
+        "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+    );
+}
+
+/// A `serve.lock` held with its record emptied behind the dropped connection, as a `serve` stopping
+/// leaves it for a moment or a key replacement holds it: the replacement's line.
+#[tokio::test]
+async fn probe_eof_lock_replacing_is_unreached() {
+    let mut served = Served::new("probe-eof-replacing").await;
+    let record = served.home.serve_lock();
+    let (keep, kept) = std::sync::mpsc::channel();
+    let resident = one_dropped(&mut served, move |lock| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(record)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        keep.send(lock).unwrap();
+    })
+    .await;
+    let refused = super::serve(&served.home).await.err().unwrap();
+    resident.await.unwrap();
+    drop(kept);
+    assert_eq!(printed(&refused), REPLACING);
+}
+
+/// The `serve` at `served`'s socket for one connection: it reads the request and writes `reply`'s bytes.
+async fn one_reply(served: &mut Served, reply: Vec<u8>) -> tokio::task::JoinHandle<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let listener = served.listener();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.unwrap();
+        let _ = Request::read(&mut conn).await;
+        let _ = conn.write_all(&reply).await;
+    })
+}
+
+/// A `serve` of the build before the probe's `Whoami` answers in its own version: another version, never
+/// a frame read as this one's.
+#[tokio::test]
+async fn probe_version_skew() {
+    let mut served = Served::new("probe-skew").await;
+    let resident = one_reply(&mut served, b"SWC1\x05\x00\x00".to_vec()).await;
+    let refused = super::serve(&served.home).await.err().unwrap();
+    resident.await.unwrap();
+    assert!(refused.is::<Skew>(), "{refused:#}");
+}
+
+/// The text a `serve` answers the probe with, an error or a refusal, is printed escaped, as an Open's is:
+/// a control byte in it never reaches the terminal raw.
+#[tokio::test]
+async fn the_probe_escapes_what_serve_says() {
+    for (tag, reply) in [
+        ("error", Response::Error("\x1b[31mx".to_owned())),
+        ("refused", Response::Refused("\x1b[31mx".to_owned())),
+    ] {
+        let mut served = Served::new(&format!("probe-hostile-{tag}")).await;
+        let mut bytes = Vec::new();
+        reply.write(&mut bytes).await.unwrap();
+        let resident = one_reply(&mut served, bytes).await;
+        let refused = super::serve(&served.home).await.err().unwrap();
+        resident.await.unwrap();
+        let line = printed(&refused);
+        assert!(!line.contains('\x1b'), "{tag}: {line:?}");
+        assert!(line.contains("[31mx"), "{tag}: {line:?}");
+    }
 }

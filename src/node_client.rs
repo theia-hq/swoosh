@@ -272,6 +272,28 @@ impl UidSocket {
         }
     }
 
+    /// Read the key the resident runs as, on a connection attributed as [`status_attributed`]'s is,
+    /// with the listener PID checked. One fixed 32-byte reply, so the answer never depends on the menu or
+    /// the warm list fitting a frame.
+    ///
+    /// [`status_attributed`]: Self::status_attributed
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution fails, the request is refused or a complete valid reply cannot be
+    /// read.
+    pub async fn whoami_attributed(&self) -> Result<(bifrost::NodeId, ProcessId), ControlError> {
+        let (stream, pid) = self.connect().await?;
+        match Self::exchange_on(stream, &Request::Whoami).await? {
+            Response::Whoami { node_id } => Ok((node_id, pid)),
+            Response::Refused(reason) => Err(ControlError::Refused(reason)),
+            Response::Error(reason) => Err(ControlError::Protocol(reason)),
+            other => Err(ControlError::Protocol(format!(
+                "unexpected reply to the key request: {other:?}"
+            ))),
+        }
+    }
+
     /// Connect within the deadline, then check the kernel-reported peer UID and listener PID against
     /// this process's effective UID and the selected home's PID record read after connecting. Reject
     /// missing, invalid or mismatched attribution before writing request bytes.

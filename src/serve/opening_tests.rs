@@ -129,7 +129,7 @@ async fn an_unknown_observation_mode_is_an_error_before_any_dial() {
     fixture
         .run(async |socket| {
             let mut client = UnixStream::connect(socket).await.unwrap();
-            client.write_all(b"SWC1\x04").await.unwrap();
+            client.write_all(b"SWC2\x04").await.unwrap();
             client
                 .write_all(&u16::try_from(body.len()).unwrap().to_be_bytes())
                 .await
@@ -193,7 +193,7 @@ async fn an_unusable_hint_is_malformed_before_any_dial() {
     fixture
         .run(async |socket| {
             let mut client = UnixStream::connect(socket).await.unwrap();
-            client.write_all(b"SWC1\x04").await.unwrap();
+            client.write_all(b"SWC2\x04").await.unwrap();
             client
                 .write_all(&u16::try_from(body.len()).unwrap().to_be_bytes())
                 .await
@@ -253,7 +253,7 @@ async fn a_stop_tag_after_attached_ends_the_open_and_never_stops_the_run() {
             let mut client = open(socket, request(fixture.peer, OpenLane::Main, None)).await;
             attached(&mut client).await;
             // A Stop request's frame inside the splice is malformed there, never a request.
-            client.write_all(b"SWC1\x03\x00\x00").await.unwrap();
+            client.write_all(b"SWC2\x03\x00\x00").await.unwrap();
             released(&fixture.opener, HANG_GUARD).await;
             // The run still answers: a Stop would have ended `run`'s serving, failing the test.
             let mut asked = UnixStream::connect(socket).await.unwrap();
@@ -1008,12 +1008,12 @@ async fn a_malformed_frame_after_attached_resets_the_peer_and_ends_the_open() {
     // An empty Data, an unknown tag, a Stop request, Landed from the client, a declared 8193 bytes
     // and a foreign magic. The client stays connected, so only the frame ends the Open.
     for bad in [
-        *b"SWC1\x0a\x00\x00",
-        *b"SWC1\x0d\x00\x00",
-        *b"SWC1\x03\x00\x00",
-        *b"SWC1\x0c\x00\x00",
-        *b"SWC1\x0a\x20\x01",
-        *b"SWC2\x0a\x00\x01",
+        *b"SWC2\x0a\x00\x00",
+        *b"SWC2\x0d\x00\x00",
+        *b"SWC2\x03\x00\x00",
+        *b"SWC2\x0c\x00\x00",
+        *b"SWC2\x0a\x20\x01",
+        *b"SWC9\x0a\x00\x01",
     ] {
         let mut wire = framed(b"before");
         wire.extend(bad);
@@ -2232,9 +2232,9 @@ fn ended(data: &[u8]) -> Vec<u8> {
 }
 
 /// The End frame's bytes.
-const END: [u8; HEADER] = *b"SWC1\x0b\x00\x00";
+const END: [u8; HEADER] = *b"SWC2\x0b\x00\x00";
 /// The Landed frame's bytes.
-const LANDED: [u8; HEADER] = *b"SWC1\x0c\x00\x00";
+const LANDED: [u8; HEADER] = *b"SWC2\x0c\x00\x00";
 
 /// What a client read until the resident closed the connection: the download, whether its End came,
 /// and whether Landed came.
@@ -3050,7 +3050,7 @@ async fn a_malformed_path_is_the_fixed_error_and_finishes_nothing() {
             }
             // A body of 24 is refused without being read, with the same words.
             let mut raw = UnixStream::connect(socket).await.unwrap();
-            raw.write_all(b"SWC1\x05\x00\x18").await.unwrap();
+            raw.write_all(b"SWC2\x05\x00\x18").await.unwrap();
             assert_eq!(
                 Response::read_path(&mut raw).await.unwrap(),
                 Response::Error("invalid path request".to_owned())
@@ -3148,7 +3148,7 @@ async fn a_reference_answers_only_once_attached_is_written_whole() {
                 let _ = poll!(attaching.as_mut());
             }
         }
-        assert_eq!(&frame[..7], b"SWC1\x06\x00\x1c");
+        assert_eq!(&frame[..7], b"SWC2\x06\x00\x1c");
         assert_eq!(sample(reference), PathReply::Sample(ConnInfo::default()));
         drop(attaching);
     }

@@ -15,7 +15,9 @@ use std::time::SystemTime;
 use keystore::{KeyFile, Protection};
 use swoosh::home::Home;
 use swoosh::roster::{Epoch, RosterDoc};
-use swoosh::serve::control_codec::{OpenRefusal, Request, Response};
+use swoosh::serve::control_codec::{
+    DisabledList, OpenRefusal, Request, Response, ServiceMenu, StatusReply,
+};
 use swoosh::testkit::{STANDING_UNTIL, TestNode, TestRoot};
 
 /// The root this machine is a device of.
@@ -91,8 +93,8 @@ struct Heard {
 }
 
 /// A resident on `home`'s control socket, `serve.lock` held and the socket bound before it returns: it
-/// reads one request per connection, one connection at a time, and refuses each Open as busy, until
-/// `stop`. Resolves to the Opens it answered.
+/// reads one request per connection, one connection at a time, answers a status as this machine's key,
+/// as a real one runs, and refuses each Open as busy, until `stop`. Resolves to the Opens it answered.
 async fn resident(
     home: &Home,
     stop: tightbeam::tunnel::CancellationToken,
@@ -124,12 +126,21 @@ async fn resident(
                 accepted = listener.accept() => accepted.unwrap(),
                 () = stop.cancelled() => break,
             };
+            let open = match Request::read(&mut conn).await {
+                Ok(Request::Open(open)) => open,
+                Ok(asked @ (Request::Status | Request::Whoami)) => {
+                    let _ = answer_of(&asked, TestNode::seeded(DESK).node_id())
+                        .write(&mut conn)
+                        .await;
+                    continue;
+                }
+                Ok(_) | Err(_) => continue,
+            };
             // An Open counts only when its reply reaches the client still waiting on it.
-            if let Ok(Request::Open(open)) = Request::read(&mut conn).await
-                && Response::OpenRefusal(OpenRefusal::Busy)
-                    .write(&mut conn)
-                    .await
-                    .is_ok()
+            if Response::OpenRefusal(OpenRefusal::Busy)
+                .write(&mut conn)
+                .await
+                .is_ok()
             {
                 heard.push(Heard {
                     service: open.service().to_string(),
@@ -141,6 +152,30 @@ async fn resident(
         drop(lock);
         heard
     })
+}
+
+/// What a `serve` running as `node_id` answers `asked`, a `Whoami` (the probe) or a `Status` (an ask after
+/// an Open went unanswered): the same `serve` either way.
+fn answer_of(asked: &Request, node_id: bifrost::NodeId) -> Response {
+    match asked {
+        Request::Whoami => Response::Whoami { node_id },
+        _ => Response::Status(status_of(node_id)),
+    }
+}
+
+/// The status a resident running as `node_id` answers, serving nothing.
+fn status_of(node_id: bifrost::NodeId) -> StatusReply {
+    StatusReply {
+        node_id,
+        pid: 1,
+        addr: None,
+        uptime_secs: 0,
+        menu: ServiceMenu {
+            catalog: tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),
+            disabled: DisabledList::Known(Vec::new()),
+        },
+        warm: Vec::new(),
+    }
 }
 
 /// Run the compiled binary on `home` with `argv`, nothing on stdin and no reach setting from the
@@ -421,6 +456,98 @@ async fn a_flagged_root_act_refuses_a_held_unreachable_serve_first() {
         assert!(after == before, "{argv:?}: the home is as it was");
         let _ = std::fs::remove_dir_all(home.dir());
     }
+}
+
+/// With a reach flag, `join`, `revoke` and `root restore` ask before their act, and a `serve` that holds
+/// the lock but never answers, or answers in another version, refuses there: its line, then that nothing
+/// was changed, exit 1, the home as it was.
+#[tokio::test]
+async fn a_flagged_root_act_against_a_stalled_or_skewed_serve_changes_nothing() {
+    let stalled = "error: swoosh serve on this machine did not answer\n  Restart it.\n";
+    let skewed = "error: swoosh serve on this machine is a different version\n  Restart it with this version.\n";
+    for (wrong, line) in [(Wrong::Skewed, skewed), (Wrong::Stalled, stalled)] {
+        for argv in flagged_root_acts() {
+            let home = device(&format!("flagged-{wrong:?}-{}", argv[0])).await;
+            let stop = tightbeam::tunnel::CancellationToken::new();
+            let resident = answering_wrongly(&home, wrong, stop.clone()).await;
+            let before = snapshot(home.dir());
+            let (status, stderr) = swoosh(&home, &argv).await;
+            let after = snapshot(home.dir());
+            stop.cancel();
+            resident.await.unwrap();
+            assert_eq!(status, Some(1), "{wrong:?} {argv:?}: {stderr}");
+            assert_eq!(
+                stderr,
+                format!("{line}  Nothing was changed.\n"),
+                "{wrong:?} {argv:?}"
+            );
+            assert!(after == before, "{wrong:?} {argv:?}: the home is as it was");
+            let _ = std::fs::remove_dir_all(home.dir());
+        }
+    }
+}
+
+/// How [`answering_wrongly`]'s resident answers.
+#[derive(Debug, Clone, Copy)]
+enum Wrong {
+    /// It takes each connection and never replies.
+    Stalled,
+    /// It replies in another version of the control wire.
+    Skewed,
+}
+
+/// A resident on `home`'s control socket, `serve.lock` held, that answers every connection as `wrong`
+/// says, until `stop`.
+async fn answering_wrongly(
+    home: &Home,
+    wrong: Wrong,
+    stop: tightbeam::tunnel::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let (lock, listener) = claimed(home).await;
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (mut conn, _) = tokio::select! {
+                accepted = listener.accept() => accepted.unwrap(),
+                () = stop.cancelled() => break,
+            };
+            match wrong {
+                Wrong::Stalled => held.push(conn),
+                Wrong::Skewed => {
+                    let _ = Request::read(&mut conn).await;
+                    let _ = conn.write_all(b"SWC9").await;
+                }
+            }
+        }
+        drop(held);
+        drop(lock);
+    })
+}
+
+/// `home`'s `serve.lock` taken and its control socket bound, as `serve` takes them.
+async fn claimed(home: &Home) -> (swoosh::serve::InstanceLock, tokio::net::UnixListener) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = swoosh::home::runtime_root().unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A sibling test's fork holds the last lock's O_CLOEXEC flock copy until its exec: wait, bounded.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let (lock, listener) = loop {
+        match swoosh::serve::acquire_single(home, &root).await {
+            Err(
+                swoosh::serve::SingleError::KeyChanging
+                | swoosh::serve::SingleError::AlreadyResident { .. },
+            ) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            taken => break taken.unwrap(),
+        }
+    };
+    listener.set_nonblocking(true).unwrap();
+    (lock, tokio::net::UnixListener::from_std(listener).unwrap())
 }
 
 /// With a reach flag, `join`, `revoke` and `root restore` whose `serve.lock` cannot be read before their

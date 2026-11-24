@@ -149,24 +149,22 @@ impl Resolved {
     }
 }
 
-/// Resolve a declared [`Credential`] into the badges to present.
-///
-/// It presents by standing, and the choice never depends on the peer. On a `Device` or `HoldsRoot` home
-/// the stored badge is slot 1 of a plain dial, and the pin is this device's own fleet, so a link-as-peer
-/// slip naming that fleet carries the badge in slot 2. On any other standing (`Unpinned`,
-/// `InterruptedMint`, or a damaged home) there is no badge and no own fleet: a plain dial presents
-/// nothing, and a slip dials alone. A link typed as the peer is always slot 1. Reached only
-/// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
+/// The check a dialing verb's own bind makes before it binds, over the badges a declared [`Credential`]
+/// would present ([`resolve_to`]): a stored badge that is already dead REFUSES the dial here (see
+/// [`into_slot`]), and one inside [`badge::DEVICE_WARN_WINDOW`] warns on stderr and dials anyway. The
+/// slots themselves are read by each stream's open, as it opens.
 ///
 /// `node` is this machine's resolved or bound endpoint identity, never the target peer's. Resolution
 /// does not load the device key. Held-root classification still loads `root.key`; a plain root can
 /// materialize its seed, so this is not a root-secret-free operation.
 ///
-/// A stored badge that is already dead REFUSES the dial here (see [`into_slot`]), and one inside
-/// [`badge::DEVICE_WARN_WINDOW`] warns on stderr and dials anyway.
-pub async fn resolve(cred: Credential, node: NodeId, home: &Home) -> eyre::Result<Resolved> {
+/// # Errors
+///
+/// The stored badge has ended, or the home could not be read.
+pub async fn resolve(cred: Credential, node: NodeId, home: &Home) -> eyre::Result<()> {
     resolve_to(cred, node, home, &mut std::io::stderr())
         .await
+        .map(drop)
         .map_err(ResolveError::into_report)
 }
 
@@ -225,10 +223,22 @@ impl From<eyre::Report> for ResolveError {
     }
 }
 
-/// The body of [`resolve`], with the expiry warning routed to an injected `warn` sink so a test can
-/// drive it with its own writer and assert precisely when the line is (and is not) emitted, rather than
-/// trying to capture the process stderr. Mirrors [`SecretSource::resolve_to`](crate::secret::SecretSource).
-pub(crate) async fn resolve_to<W: std::io::Write>(
+/// Resolve a declared [`Credential`] into the badges to present, the expiry warning written to `warn`.
+///
+/// It presents by standing, and the choice never depends on the peer. On a `Device` or `HoldsRoot` home
+/// the stored badge is slot 1 of a plain dial, and the pin is this device's own fleet, so a link-as-peer
+/// slip naming that fleet carries the badge in slot 2. On any other standing (`Unpinned`,
+/// `InterruptedMint`, or a damaged home) there is no badge and no own fleet: a plain dial presents
+/// nothing, and a slip dials alone. A link typed as the peer is always slot 1. Reached only
+/// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
+///
+/// `node` is as [`resolve`] takes it.
+///
+/// # Errors
+///
+/// [`ResolveError::Ended`] for a stored badge already dead, and [`ResolveError::Unreadable`] when the
+/// home could not be read.
+pub async fn resolve_to<W: std::io::Write>(
     cred: Credential,
     node: NodeId,
     home: &Home,
@@ -404,12 +414,19 @@ mod tests {
         provisioned_home("unprovisioned")
     }
 
+    /// The slots a dial presents, resolved as the own bind's check resolves them, its warning on stderr.
+    async fn slots(cred: Credential, node: NodeId, home: &Home) -> eyre::Result<Resolved> {
+        resolve_to(cred, node, home, &mut std::io::stderr())
+            .await
+            .map_err(ResolveError::into_report)
+    }
+
     /// An `Unpinned` machine is no root's device, so a plain dial presents nothing in either slot: its
     /// own key never signs a badge for itself.
     #[tokio::test]
     async fn an_unpinned_dial_presents_no_member_badge() {
         let secret = Secret::ephemeral();
-        let (grant, membership) = resolve(
+        let (grant, membership) = slots(
             Credential::Family { present: None },
             secret.node_id(),
             &test_home(),
@@ -440,7 +457,7 @@ mod tests {
             .await
             .expect("load the key")
             .expect("the key is there");
-        let (grant, _) = resolve(
+        let (grant, _) = slots(
             Credential::Family { present: None },
             secret.node_id(),
             &home,
@@ -465,7 +482,7 @@ mod tests {
             )
             .expect("mint a stand-in plain slip");
         let slip_text = slip.to_string();
-        let resolved = resolve(
+        let resolved = slots(
             Credential::Family {
                 present: Some(slip),
             },
@@ -505,7 +522,7 @@ mod tests {
             )
             .expect("mint a signet-bound slip");
         let slip_text = slip.to_string();
-        let resolved = resolve(
+        let resolved = slots(
             Credential::Family {
                 present: Some(slip),
             },
@@ -545,7 +562,7 @@ mod tests {
             )
             .expect("mint a signet-bound slip");
         let slip_text = slip.to_string();
-        let (grant, membership) = resolve(
+        let (grant, membership) = slots(
             Credential::Family {
                 present: Some(slip),
             },
@@ -567,7 +584,7 @@ mod tests {
     }
 
     /// REGRESSION (defect #1): a signet-bound `swoosh:` link passed AS THE PEER folds through
-    /// `bind_role()` -> `resolve()` and attaches slot 2. A `Peer::Capability` self-presents its own link,
+    /// `bind_role()` -> `resolve_to()` and attaches slot 2. A `Peer::Capability` self-presents its own link,
     /// so a link peer resolves through the ONE path every slip takes. Before this consolidation a signet-bound link-as-peer dropped slot 2 (it dialed via
     /// `from_link`, which ignored the resolver).
     #[tokio::test]
@@ -594,7 +611,7 @@ mod tests {
         let cred = Credential::Family {
             present: peer.self_present(),
         };
-        let (grant, membership) = resolve(cred, secret.node_id(), &home)
+        let (grant, membership) = slots(cred, secret.node_id(), &home)
             .await
             .expect("family-with-link-peer resolves")
             .into_slots();
@@ -630,7 +647,7 @@ mod tests {
         let cred = Credential::Family {
             present: peer.self_present(),
         };
-        let (grant, membership) = resolve(cred, secret.node_id(), &test_home())
+        let (grant, membership) = slots(cred, secret.node_id(), &test_home())
             .await
             .expect("family-with-plain-link-peer resolves")
             .into_slots();
@@ -705,7 +722,7 @@ mod tests {
             .expect("a badge");
         forbid_device_read(&home).await;
 
-        let public = resolve(Credential::Family { present: None }, own, &home)
+        let public = slots(Credential::Family { present: None }, own, &home)
             .await
             .expect("the public resolver needs no device key");
         assert_eq!(
@@ -735,7 +752,7 @@ mod tests {
                 SystemTime::now() + DAY,
             )
             .expect("a slip for this machine's fleet");
-        let presented = resolve(
+        let presented = slots(
             Credential::Family {
                 present: Some(slip.clone()),
             },
@@ -781,6 +798,7 @@ mod tests {
                 &mut warned,
             )
             .await
+            .map(drop)
             .map_err(ResolveError::into_report),
         ] {
             let Err(error) = result else {
@@ -839,12 +857,12 @@ mod tests {
             Standing::read_for_node(&home, own).await,
             Err(StandingError::Damaged(Disagreement::StandingFromAnotherRoot { pin, .. })) if pin == other
         ));
-        let damaged = resolve(Credential::Family { present: None }, own, &home)
+        let damaged = slots(Credential::Family { present: None }, own, &home)
             .await
             .expect("a wrong badge root remains damaged");
         assert!(damaged.grant.is_none() && damaged.membership.is_none());
         std::fs::remove_file(home.root_pub()).expect("remove the pin");
-        let missing_pin = resolve(Credential::Family { present: None }, own, &home)
+        let missing_pin = slots(Credential::Family { present: None }, own, &home)
             .await
             .expect("a badge with no pin remains damaged");
         assert!(missing_pin.grant.is_none() && missing_pin.membership.is_none());
@@ -885,7 +903,7 @@ mod tests {
                 Standing::read_for_node(&home, own).await,
                 Ok(Standing::HoldsRoot { pin, .. }) if pin == root.node_id()
             ));
-            let resolved = resolve(Credential::Family { present: None }, own, &home)
+            let resolved = slots(Credential::Family { present: None }, own, &home)
                 .await
                 .expect("a held root still resolves its device badge");
             assert_eq!(
@@ -909,7 +927,7 @@ mod tests {
         );
         let mut warned = Vec::new();
         for result in [
-            resolve(Credential::Family { present: None }, own, &home).await,
+            slots(Credential::Family { present: None }, own, &home).await,
             resolve_to(
                 Credential::Family { present: None },
                 own,
@@ -953,6 +971,7 @@ mod tests {
                 &mut warned,
             )
             .await
+            .map(drop)
             .map_err(ResolveError::into_report),
         ] {
             let Err(error) = result else {

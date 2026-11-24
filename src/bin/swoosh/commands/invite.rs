@@ -490,9 +490,9 @@ async fn warn_lapsed(
 }
 
 /// Before a root is made or finished here, refuse what its records would once it is, so the refusal
-/// costs no prompt and writes nothing: this machine's own key, which becomes its first device; and for a
-/// root whose making or restore was interrupted, whatever its records refuse, or, for a new root, a
-/// renewal, since it has no device yet.
+/// costs no prompt and writes nothing: this machine's own key, which becomes its first device, read with
+/// no mint, since a home with no key has no key to match; and for a root whose making or restore was
+/// interrupted, whatever its records refuse, or, for a new root, a renewal, since it has no device yet.
 fn refuse_before_the_first_root(
     home: &Home,
     standing: &Standing,
@@ -506,7 +506,7 @@ fn refuse_before_the_first_root(
         return Err(RootError::NoDeviceToRenew { name: name.clone() }.into());
     }
     if let Ask::Add(key) = ask
-        && own_key(home)?.verify_key().ok() == Some(key)
+        && swoosh::identity::peek(home)?.and_then(|own| own.verify_key().ok()) == Some(key)
     {
         let own = swoosh::names::suggest().as_str().parse()?;
         return Err(RootError::OwnKey { name: own }.into());

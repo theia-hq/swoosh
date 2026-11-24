@@ -909,32 +909,35 @@ async fn run() -> eyre::Result<()> {
     let own_peer = reach.dialed().is_some();
     let beside = Beside::of(&reach, &home, machine.as_ref());
 
-    // The run's path, decided once, here: after the machine resolves and before the key is read, so a run
-    // through `serve` never unlocks or mints one.
-    let decided = decision::decide(reach.split(), &home)
+    // The run's path, decided once, here: after the machine resolves and before the key is unlocked, so a
+    // run through `serve` never unlocks or mints one. A dial to this machine ends here as usage, on both
+    // paths, before anything is opened or bound.
+    let verb = verb_word.as_deref().unwrap_or_default();
+    let decided = decision::decide(reach.split(), &home, machine.as_ref())
         .await
-        .map_err(|report| landed_then(report, &mut std::io::stderr()));
+        .map_err(
+            |report| match report.downcast_ref::<commands::through_serve::ThisMachine>() {
+                Some(this) => usage_error(&[verb], &this.to_string()),
+                None => landed_then(report, &mut std::io::stderr()),
+            },
+        );
     let run = match decided? {
         decision::Decision::Own(run) => run,
         // `speed`, `ping`, `status <machine>`, `send`, `forward`, `proxy` and `stop` while `serve` runs
         // here: each stream, the stale-list exchange beside it and the root question are each one Open
-        // there. Every one of them names a machine, resolved above; were it missing, the run ends on the
-        // verb's own internal line, never on a key read and a bind beside the `serve` that just answered.
+        // there.
         decision::Decision::Dials {
             dialing,
+            machine,
             slip,
             socket,
+            this,
         } => {
-            let verb = verb_word.as_deref().unwrap_or_default();
-            let Some(machine) = machine.as_ref() else {
-                eyre::bail!(
-                    "internal: `{verb}` ran without its machine resolved (root-dispatch bug)"
-                );
-            };
             let through = ThroughServe {
                 machine,
                 slip,
                 socket,
+                this,
                 hints,
                 contacts: store.contacts(),
             };
@@ -948,6 +951,8 @@ async fn run() -> eyre::Result<()> {
                 &mut std::io::stderr(),
             )
             .await
+            // `serve` refuses a dial to the key it runs as at the first Open, should the decision's
+            // check have missed it: the same usage line.
             .map_err(|report| {
                 match report.downcast_ref::<commands::through_serve::ThisMachine>() {
                     Some(this) => usage_error(&[verb], &this.to_string()),
@@ -1060,7 +1065,6 @@ async fn run() -> eyre::Result<()> {
     let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
     let node = Node::new(endpoint, composed.discovery);
     let run = run.attach_bound_reach(&bound.reach);
-    let verb = verb_word.as_deref().unwrap_or_default();
     run_and_close(
         run.attach_mdns(composed.mdns),
         &node,
@@ -1470,6 +1474,8 @@ struct ThroughServe<'a> {
     machine: &'a Machine,
     slip: Option<nauthy::Link>,
     socket: swoosh::node_client::UidSocket,
+    /// The key `serve` runs as, read by the decision's probe.
+    this: bifrost::NodeId,
     hints: std::collections::HashMap<bifrost::NodeId, swoosh::peers::Hints>,
     /// This home's book, to name the machine.
     contacts: &'a Contacts,
@@ -1481,7 +1487,8 @@ struct ThroughServe<'a> {
 ///
 /// A `unix:` local end refuses first, on its own line, then a reach flag `serve` makes moot, both before
 /// anything is opened. The expiring-badge warning the own
-/// bind prints before its bind prints here before the first Open, keyed to the key `serve` runs as. What
+/// bind prints before its bind prints here before the first Open, keyed to `through.this`, the key the
+/// decision's probe read `serve` running as, so no second ask precedes the first Open. What
 /// runs beside the verb ends with it and prints nothing of its own; a beside Open dropped unanswered is
 /// never asked about, so a slow machine never reads as `serve` stalled. One that met `serve` gone or of
 /// another version ends a run the verb ended clean with that line, once, unless the verb is the bridge
@@ -1499,7 +1506,6 @@ async fn dial_through_serve<O: commands::connect::Output>(
 ) -> eyre::Result<()> {
     use commands::route::Route;
     use commands::through_serve::{Dial, Moot, Skew, Unresponsive};
-    use swoosh::node_client::NodeClient as _;
     use swoosh::streams::GoneWhy;
 
     // A local end not built yet is the line for it, before a reach flag's: the flag is not why it ends.
@@ -1513,6 +1519,7 @@ async fn dial_through_serve<O: commands::connect::Output>(
         machine,
         slip,
         socket,
+        this,
         hints,
         contacts,
     } = through;
@@ -1522,15 +1529,7 @@ async fn dial_through_serve<O: commands::connect::Output>(
         swoosh::streams::Resident::new(std::rc::Rc::clone(&socket)),
         hints,
     );
-    // Bounded as the asks after a failure are, so a stalled `serve` holds the run no longer here than
-    // there; a warning missed on a slow `serve` is said on the next run.
-    match tokio::time::timeout(swoosh::node_client::STOPPED_ASK, socket.status()).await {
-        Ok(Ok(status)) => {
-            reaching::warn_expiring(home, status.node_id, Option::clone(&slip), err).await;
-        }
-        Ok(Err(error)) => tracing::debug!(%error, "serve's status for the badge's warning failed"),
-        Err(_elapsed) => tracing::debug!("serve's status for the badge's warning took too long"),
-    }
+    reaching::warn_expiring(home, this, Option::clone(&slip), err).await;
     let service = dialing.service(machine)?;
     let dial = Dial {
         machine,

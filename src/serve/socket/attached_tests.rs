@@ -10,12 +10,12 @@ use tokio::net::UnixStream;
 use super::{OpenRead, OpenWrite};
 use crate::serve::control_codec::MAX_FRAME;
 
-const END: [u8; 7] = *b"SWC1\x0b\x00\x00";
-const LANDED: [u8; 7] = *b"SWC1\x0c\x00\x00";
+const END: [u8; 7] = *b"SWC2\x0b\x00\x00";
+const LANDED: [u8; 7] = *b"SWC2\x0c\x00\x00";
 
 /// A Data frame holding `body`.
 fn data(body: &[u8]) -> Vec<u8> {
-    let mut frame = b"SWC1\x0a".to_vec();
+    let mut frame = b"SWC2\x0a".to_vec();
     frame.extend(u16::try_from(body.len()).unwrap().to_be_bytes());
     frame.extend(body);
     frame
@@ -64,9 +64,9 @@ async fn the_client_read_half_returns_reset_on_eof_before_end() {
 #[tokio::test]
 async fn an_unknown_tag_from_the_resident_is_an_error_never_data() {
     for bad in [
-        *b"SWC1\x03\x00\x00",
-        *b"SWC1\x0d\x00\x00",
-        *b"SWC1\x0a\x00\x00",
+        *b"SWC2\x03\x00\x00",
+        *b"SWC2\x0d\x00\x00",
+        *b"SWC2\x0a\x00\x00",
     ] {
         let mut wire = data(b"before");
         wire.extend(bad);
@@ -81,7 +81,7 @@ async fn an_unknown_tag_from_the_resident_is_an_error_never_data() {
 #[tokio::test]
 async fn a_declared_frame_length_never_sizes_a_buffer() {
     // 8193 declared with no body behind it: refused at the header, never read toward.
-    let mut read = reading(b"SWC1\x0a\x20\x01").await;
+    let mut read = reading(b"SWC2\x0a\x20\x01").await;
     let mut got = Vec::new();
     let ended = read.read_to_end(&mut got).await.unwrap_err();
     assert_eq!(ended.kind(), ErrorKind::InvalidData);

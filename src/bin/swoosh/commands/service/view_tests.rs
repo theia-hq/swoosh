@@ -96,7 +96,7 @@ impl Drop for Fixture {
 }
 
 fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
-    let mut bytes = b"SWC1".to_vec();
+    let mut bytes = b"SWC2".to_vec();
     bytes.push(tag);
     bytes.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(body);

@@ -1,4 +1,4 @@
-//! What crosses an Open's control connection after Attached: SWC1 frames both ways.
+//! What crosses an Open's control connection after Attached: SWC2 frames both ways.
 //!
 //! A unix socket carries no reset, so an end of file says nothing about whether the writer finished or
 //! died. Each direction therefore says it finished: Data frames carry the bytes, and one End frame
@@ -12,8 +12,8 @@
 //! | 11 | End | empty | both |
 //! | 12 | Landed | empty | toward the client only |
 //!
-//! The tags sit above every request (1 to 6) and reply (1 to 9) tag, so a frame read in the wrong phase
-//! is never taken for an operation. There is no abort frame: closing without End already says it.
+//! The tags differ from every request (1 to 7) and reply (1 to 9, and 13) tag, so a frame read in the
+//! wrong phase is never taken for an operation. There is no abort frame: closing without End already says it.
 
 use tokio::io::{
     self, AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite,
@@ -82,7 +82,7 @@ pub(crate) enum Toward {
 /// a diagnostic's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum MalformedFrame {
-    /// The header does not open with `SWC1`.
+    /// The header does not open with `SWC2`.
     #[error("splice frame magic is wrong")]
     Magic,
     /// A tag this direction does not carry.

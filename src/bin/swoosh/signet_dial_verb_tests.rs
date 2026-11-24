@@ -108,16 +108,21 @@ impl Device {
     }
 
     /// Drive the verb's declared credential through the ONE resolver and read the two wire slots, the
-    /// exact path the composition root runs before dialing. Takes any reaching verb, so `forward` is proven
+    /// resolver every stream's open presents through. Takes any reaching verb, so `forward` is proven
     /// through the same chain as `ping`.
     async fn slots_for(&self, cmd: &impl Reaching) -> (Option<Link>, Option<Link>) {
         let BindRole::Dialing(credential) = cmd.bind_role() else {
             panic!("a reaching verb that dials states the credential it dials with");
         };
-        reaching::resolve(credential, self.secret.node_id(), &self.home)
-            .await
-            .expect("resolve the verb's credential into wire slots")
-            .into_slots()
+        reaching::resolve_to(
+            credential,
+            self.secret.node_id(),
+            &self.home,
+            &mut Vec::new(),
+        )
+        .await
+        .expect("resolve the verb's credential into wire slots")
+        .into_slots()
     }
 }
 

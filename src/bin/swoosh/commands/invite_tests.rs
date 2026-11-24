@@ -742,6 +742,42 @@ async fn invite_refuses_this_machines_key() {
     );
 }
 
+/// The check before a first root reads this machine's key with no mint: its own key is refused as
+/// [`invite_refuses_this_machines_key`] shows, and on a home with no key file another key passes with no
+/// key file made by the check.
+#[test]
+fn an_own_key_add_reads_by_peek() {
+    use swoosh::standing::Standing;
+
+    let own = node(OWN).verify_key().unwrap();
+    let home = scratch("own-key-peek");
+    let refused = super::refuse_before_the_first_root(
+        &home,
+        &Standing::Unpinned,
+        &name("tv"),
+        super::Ask::Add(own),
+    )
+    .expect_err("this machine's own key");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "that is this machine's key; it is already your device me/{}",
+            swoosh::names::suggest()
+        )
+    );
+    std::fs::remove_file(home.key()).unwrap();
+    let tv = node(TV).verify_key().unwrap();
+    super::refuse_before_the_first_root(
+        &home,
+        &Standing::Unpinned,
+        &name("tv"),
+        super::Ask::Add(tv),
+    )
+    .unwrap();
+    assert!(!home.key().exists(), "no key minted by the check");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
 #[tokio::test]
 async fn invite_refuses_on_a_device_without_the_root() {
     let home = scratch("device");

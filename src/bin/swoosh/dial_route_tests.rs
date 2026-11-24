@@ -11,7 +11,6 @@ use std::time::SystemTime;
 use clap::Parser as _;
 use swoosh::contacts::ContactsStore;
 use swoosh::home::Home;
-use swoosh::node_client::UidSocket;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
 use swoosh::testkit::{TestNode, TestRoot};
 
@@ -94,7 +93,8 @@ async fn dialed_out(
     let hints =
         crate::commands::through_serve::hints(swoosh::reaching::Reaching::reach_args(&outward))
             .unwrap();
-    let socket = UidSocket::resolve(home).unwrap();
+    // The decision's one probe, as the composition root makes it.
+    let (socket, this) = crate::commands::through_serve::tests::answering_as(home).await;
     let mut down = Vec::new();
     let (stdin, input) = tokio::sync::mpsc::channel(1);
     stdin.try_send(Ok(UP.to_vec())).unwrap();
@@ -116,6 +116,7 @@ async fn dialed_out(
                 machine: &machine,
                 slip: None,
                 socket,
+                this,
                 hints,
                 contacts: &contacts,
             },
@@ -663,7 +664,7 @@ fn beside_opens_print_nothing_of_their_own() {
             let printed = dialed(&served.home, &["ping", "me/nas", "-c", "1"]).await;
             rig.stop.cancel();
             let events = resident.await.unwrap();
-            assert_eq!(statuses(&events), 1, "{exchange}: the warning's ask alone");
+            assert_eq!(statuses(&events), 1, "{exchange}: the probe alone");
             assert_eq!(
                 opens(&events)
                     .iter()
@@ -722,7 +723,7 @@ fn beside_opens_print_nothing_of_their_own() {
         }
 
         // The exchange cut before its reply: the cut is asked about once, as any cut is (`serve` may have
-        // gone), so a second status ask follows the warning's; the ping's lines are still its own.
+        // gone), so a second status ask follows the probe's; the ping's lines are still its own.
         let mut served = a_device("beside-hangup", true).await;
         let rig = Rig::default();
         let resident = routed(
@@ -736,7 +737,7 @@ fn beside_opens_print_nothing_of_their_own() {
         let printed = dialed(&served.home, &["ping", "me/nas", "-c", "1"]).await;
         rig.stop.cancel();
         let events = resident.await.unwrap();
-        assert_eq!(statuses(&events), 2, "the warning's ask and the cut's");
+        assert_eq!(statuses(&events), 2, "the probe and the cut's ask");
         let mut fresh = a_device("beside-hangup-fresh", false).await;
         let rig = Rig::default();
         let resident = routed(&mut fresh, |_| unavailable(), &rig);
@@ -833,7 +834,7 @@ fn beside_opens_print_nothing_of_their_own() {
             rig.stop.cancel();
             let events = resident.await.unwrap();
             assert_eq!(printed.ok, lookup != "version", "{lookup}: {printed:?}");
-            assert_eq!(statuses(&events), 1, "{lookup}: the warning's ask alone");
+            assert_eq!(statuses(&events), 1, "{lookup}: the probe alone");
             assert!(
                 opens(&events)
                     .iter()
@@ -981,7 +982,7 @@ fn the_warning_prints_before_the_first_open() {
 /// More files than run at once, to a `serve` that takes every Open and answers nothing more, a status
 /// included: the run ends on the first stall it confirms, with the stall's line once and no `skip`, and no
 /// file's Open follows the asks that confirmed it. A file sent before the stall stays sent. The run is
-/// bounded by the Open's own wait and the bounded asks: the warning's ask adds no more than theirs.
+/// bounded by the Open's own wait and the bounded asks.
 #[test]
 fn a_stalled_serve_ends_a_send_of_many_files_once() {
     on_a_big_stack(async || {
@@ -995,11 +996,8 @@ fn a_stalled_serve_ends_a_send_of_many_files_once() {
         }
         for sends_first in [false, true] {
             let mut served = bobs_contact(&format!("many-{sends_first}")).await;
-            // Wedged from the start, the warning's status ask too, unless a file is sent first.
-            let rig = Rig {
-                wedged: !sends_first,
-                ..Rig::default()
-            };
+            // Wedged by the first Open, unless a file is sent first.
+            let rig = Rig::default();
             let mut acked = !sends_first;
             let resident = routed(
                 &mut served,
