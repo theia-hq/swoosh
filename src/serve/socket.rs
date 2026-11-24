@@ -1,4 +1,4 @@
-//! The SWC1 local control codec.
+//! The SWC2 local control codec.
 //!
 //! Each connection carries one request and one response, except an Open, which splices once attached.
 //! Reads expose status, service membership or local startup targets; Path samples an observed Open's
@@ -36,8 +36,8 @@ pub use path::{
 const IDENTITY: [u8; 3] = *b"SWC";
 
 /// The frame grammar THIS build speaks, written after [`IDENTITY`] and parsed (never compared whole)
-/// on read: together they are the four magic bytes `SWC1`.
-const VERSION: WireVersion = WireVersion(*b"1");
+/// on read: together they are the four magic bytes `SWC2`.
+const VERSION: WireVersion = WireVersion(*b"2");
 
 /// The magic splits by RULE, not by a remembered offset: the identity is the leading run of capitals,
 /// the version is the digits after it, four bytes in all. Held at build time so a magic that breaks the
@@ -94,7 +94,7 @@ impl WireVersion {
 }
 
 impl core::fmt::Display for WireVersion {
-    /// Renders the WHOLE four-byte tag (`SWC1`), because that is the form the source and the changelog
+    /// Renders the WHOLE four-byte tag (`SWC2`), because that is the form the source and the changelog
     /// use, so a peer handed one in an error can match it against what it reads. A peer's version byte
     /// is arbitrary and need not be printable, so it is escaped rather than trusted: this string
     /// reaches a terminal.
@@ -148,6 +148,9 @@ pub const MAX_DISABLED_NAMES: usize = 1024;
 /// produce a frame the client refuses.
 pub const MAX_WARM_ENTRIES: usize = 64;
 
+/// The [`Response::Error`] a status too large for one frame answers with: fixed text, far under any cap.
+const STATUS_TOO_LARGE: &str = "status too large for the control socket";
+
 /// Requests accepted by the local control socket.
 ///
 /// Service edits change the saved configuration, not the resident through this protocol. Not `Clone`:
@@ -158,6 +161,9 @@ pub enum Request {
     Services,
     /// Read the node status (the public-shape reply).
     Status,
+    /// Read the key the resident runs as and nothing else, so the answer fits the frame whatever the
+    /// menu or the warm list hold.
+    Whoami,
     /// Request a graceful stop (the socket twin of a SIGTERM the local user already holds).
     Stop,
     /// Read startup service targets and refusal bits over the local socket only.
@@ -174,6 +180,7 @@ impl Request {
         match self {
             Self::Services => RequestKind::Services,
             Self::Status => RequestKind::Status,
+            Self::Whoami => RequestKind::Whoami,
             Self::Stop => RequestKind::Stop,
             Self::LocalServiceDetail => RequestKind::LocalServiceDetail,
             Self::Open(_) => RequestKind::Open,
@@ -189,7 +196,11 @@ impl Request {
                 .encode()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
             Self::Path(path) => path.encode(),
-            Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail => Vec::new(),
+            Self::Services
+            | Self::Status
+            | Self::Whoami
+            | Self::Stop
+            | Self::LocalServiceDetail => Vec::new(),
         };
         let len = u16::try_from(body.len())
             .ok()
@@ -233,6 +244,7 @@ impl Request {
             RequestKind::Path => return PathRequest::read(reader, len).await.map(Self::Path),
             RequestKind::Services => Self::Services,
             RequestKind::Status => Self::Status,
+            RequestKind::Whoami => Self::Whoami,
             RequestKind::Stop => Self::Stop,
             RequestKind::LocalServiceDetail => Self::LocalServiceDetail,
         };
@@ -280,6 +292,8 @@ pub(super) enum RequestKind {
     Services,
     /// Read the node status (the public-shape reply).
     Status,
+    /// Read the key the resident runs as.
+    Whoami,
     /// Request a graceful stop (the socket twin of a SIGTERM the local user already holds).
     Stop,
     /// Read startup service targets and refusal bits over the local socket only.
@@ -300,6 +314,7 @@ impl RequestKind {
             Self::Open => 4,
             Self::Path => 5,
             Self::LocalServiceDetail => 6,
+            Self::Whoami => 7,
         }
     }
 
@@ -312,6 +327,7 @@ impl RequestKind {
             4 => Ok(Self::Open),
             5 => Ok(Self::Path),
             6 => Ok(Self::LocalServiceDetail),
+            7 => Ok(Self::Whoami),
             other => {
                 // Keep the existing hex diagnostic without an infallible formatting allocation.
                 let mut reason = *b"unknown request tag 0x00";
@@ -333,9 +349,12 @@ impl RequestKind {
         match self {
             // A Path declares exactly 25, checked before its body is read; up to here it keeps the
             // ceiling every other request does, so 8193 still reads as too large.
-            Self::Services | Self::Status | Self::Stop | Self::LocalServiceDetail | Self::Path => {
-                MAX_FRAME
-            }
+            Self::Services
+            | Self::Status
+            | Self::Whoami
+            | Self::Stop
+            | Self::LocalServiceDetail
+            | Self::Path => MAX_FRAME,
             // The one body that carries a whole link.
             Self::Open => MAX_OPEN_REQUEST,
         }
@@ -446,7 +465,7 @@ pub struct PeerEntry {
 /// The wire form (all ints big-endian), self-delimiting so a reader needs no out-of-band length:
 ///
 /// ```text
-///   node_id       32 bytes        ed25519 public key (CryptoKind implicit Ed25519 in SWC1)
+///   node_id       32 bytes        ed25519 public key (CryptoKind implicit Ed25519 in SWC2)
 ///   pid           u32
 ///   addr_present  u8              (0 or 1)
 ///   addr_len      u16             present iff addr_present == 1
@@ -575,6 +594,11 @@ pub enum Response {
     Catalog(ServiceMenu),
     /// The node status (answers [`Request::Status`]).
     Status(StatusReply),
+    /// The key the resident runs as (answers [`Request::Whoami`]): 32 bytes, whatever the menu holds.
+    Whoami {
+        /// This node's id.
+        node_id: NodeId,
+    },
     /// The stop confirm (answers [`Request::Stop`], the socket twin of `STOP_ACK`).
     Ack,
     /// A gate/dial refusal, in the same reason vocabulary as the wire path.
@@ -592,6 +616,21 @@ pub enum Response {
 }
 
 impl Response {
+    /// The reply to a [`Request::Status`]: the status, or an [`Error`](Self::Error) saying it is too
+    /// large when it would not encode within [`MAX_FRAME`]. The catalog and the disabled list each hold
+    /// to their own cap and can still sum past the frame, and then the client reads an answer that names
+    /// the cause, never a dropped connection.
+    pub(super) fn status(status: StatusReply) -> Self {
+        if status
+            .encode()
+            .is_ok_and(|payload| payload.len() <= MAX_FRAME)
+        {
+            Self::Status(status)
+        } else {
+            Self::Error(STATUS_TOO_LARGE.to_owned())
+        }
+    }
+
     pub(super) fn detail_unavailable() -> Result<Self, LocalDetailError> {
         Ok(Self::Error(local_detail::diagnostic(
             "local service detail resources are unavailable",
@@ -628,6 +667,8 @@ impl Response {
             Self::OpenRefusal(_) => 7,
             Self::Path(_) => 8,
             Self::LocalServiceDetail(_) => 9,
+            // Past 10 to 12, the splice frames' tags, so no reply reads as one.
+            Self::Whoami { .. } => 13,
         }
     }
 
@@ -637,6 +678,7 @@ impl Response {
             Self::LocalServiceDetail(reply) => return local_detail::write(reply, writer).await,
             Self::Catalog(menu) => menu.encode()?,
             Self::Status(status) => status.encode()?,
+            Self::Whoami { node_id } => node_id.key().to_vec(),
             Self::Attached(attached) => open::encode_attached(attached)?,
             Self::Path(reply) => reply.encode()?,
             Self::OpenRefusal(refusal) => refusal.encode(),
@@ -811,6 +853,20 @@ impl Response {
         match tag[0] {
             1 => Ok(Self::Catalog(ServiceMenu::decode(&payload)?)),
             2 => Ok(Self::Status(StatusReply::decode(&payload)?)),
+            13 => {
+                let key = <[u8; 32]>::try_from(payload.as_slice()).map_err(|_| {
+                    ControlError::Protocol(
+                        "swoosh serve sent a key that is not 32 bytes".to_owned(),
+                    )
+                })?;
+                let node_id =
+                    NodeId::try_new(bifrost::CryptoKind::Ed25519, key).map_err(|error| {
+                        ControlError::Protocol(format!(
+                            "swoosh serve sent a key that cannot be used: {error}"
+                        ))
+                    })?;
+                Ok(Self::Whoami { node_id })
+            }
             3 => {
                 if payload.is_empty() {
                     Ok(Self::Ack)

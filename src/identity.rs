@@ -160,6 +160,21 @@ pub fn inspect(home: &Home) -> eyre::Result<Inspected> {
     }
 }
 
+/// Which key the home's key file is, WITHOUT unlocking it and WITHOUT minting one: `None` only when the
+/// home has no key file. For a check that asks whether a key is this machine's, where a key made by the
+/// check would be a lasting identity nobody asked for, and a passphrase asked would stop on a prompt.
+///
+/// # Errors
+///
+/// The key file could not be read, or is a sealed file whose header names no key ([`UnusableKey`]).
+pub fn peek(home: &Home) -> eyre::Result<Option<NodeId>> {
+    let file = key_file(home);
+    match file.load()? {
+        Some(stored) => Ok(Some(key_of(&file, &stored)?)),
+        None => Ok(None),
+    }
+}
+
 /// The home's key as [`inspect`] read it: already there, or made by this read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Inspected {

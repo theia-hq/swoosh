@@ -19,7 +19,7 @@ use swoosh::serve::control_codec::{OpenRefusal, Request, Response};
 use swoosh::testkit::{TestNode, TestRoot};
 
 use super::{Decision, Rides, decide};
-use crate::commands::through_serve::tests::Served;
+use crate::commands::through_serve::tests::{Served, book, resident_key};
 use crate::exchange_tests::{Asked, a_device, bare, restoring, revoking};
 use crate::{Cli, Dialing, Outward, Run, Verb};
 
@@ -197,6 +197,12 @@ async fn every_verb(scratch: &[Home; 4]) -> Vec<(&'static str, Outward, Option<b
     verbs
 }
 
+/// The machine `outward` dials, resolved from [`book`] as the composition root resolves it, if it dials
+/// one.
+fn machine_of(outward: &Outward) -> Option<Machine> {
+    swoosh::reaching::Reaching::dialed(outward).map(|peer| peer.machine(&book()).unwrap())
+}
+
 /// The homes [`every_verb`] builds its verbs from, for `tag`.
 fn scratch(tag: &str) -> [Home; 4] {
     ["device", "root", "restored", "flagged"].map(|name| bare(&format!("decision-{tag}-{name}")))
@@ -210,17 +216,17 @@ async fn rides_names_every_verb() {
     let scratch = scratch("rides");
     for (name, verb, arm) in every_verb(&scratch).await {
         match (verb.split().rides(), arm) {
-            (Rides::Never, None) | (Rides::Exchanges, Some(false)) => {}
-            (Rides::Dials { slip }, Some(true)) => {
+            (Rides::Never(_), None) | (Rides::Exchanges(_), Some(false)) => {}
+            (Rides::Dials(_, slip), Some(true)) => {
                 // Only the link typed as the machine travels as the slip.
                 assert_eq!(slip.is_some(), name.contains("link"), "{name}");
             }
             (rides, arm) => panic!(
                 "{name}: rides {}, expected {arm:?}",
                 match rides {
-                    Rides::Never => "never",
-                    Rides::Dials { .. } => "dials",
-                    Rides::Exchanges => "exchanges",
+                    Rides::Never(_) => "never",
+                    Rides::Dials(..) => "dials",
+                    Rides::Exchanges(_) => "exchanges",
                 }
             ),
         }
@@ -230,9 +236,20 @@ async fn rides_names_every_verb() {
     }
 }
 
-/// A resident on `served`'s socket that tells, for each connection in the order it took them, whether it
-/// closed before a request: a probe. Each request is refused as busy.
-fn counting(served: &mut Served) -> tokio::sync::mpsc::UnboundedReceiver<bool> {
+/// What one connection to [`counting`]'s resident carried.
+#[derive(Debug, PartialEq, Eq)]
+enum Carried {
+    /// A `Status`, answered as [`resident_key`]: a probe.
+    Status,
+    /// An Open, refused as busy.
+    Open,
+    /// Nothing: the connection closed before a request.
+    Nothing,
+}
+
+/// A resident on `served`'s socket that tells, for each connection in the order it took them, what it
+/// carried. A status is answered as [`resident_key`], and an Open is refused as busy.
+fn counting(served: &mut Served) -> tokio::sync::mpsc::UnboundedReceiver<Carried> {
     let listener = served.listener();
     listener.set_nonblocking(true).unwrap();
     let listener = tokio::net::UnixListener::from_std(listener).unwrap();
@@ -240,13 +257,22 @@ fn counting(served: &mut Served) -> tokio::sync::mpsc::UnboundedReceiver<bool> {
     tokio::spawn(async move {
         loop {
             let (mut conn, _) = listener.accept().await.unwrap();
-            let probe = Request::read(&mut conn).await.is_err();
-            if !probe {
-                let _ = Response::OpenRefusal(OpenRefusal::Busy)
-                    .write(&mut conn)
-                    .await;
-            }
-            if tell.send(probe).is_err() {
+            let carried = match Request::read(&mut conn).await {
+                Ok(asked @ (Request::Status | Request::Whoami)) => {
+                    let answer =
+                        crate::commands::through_serve::tests::answer_of(&asked, resident_key());
+                    let _ = answer.write(&mut conn).await;
+                    Carried::Status
+                }
+                Ok(_) => {
+                    let _ = Response::OpenRefusal(OpenRefusal::Busy)
+                        .write(&mut conn)
+                        .await;
+                    Carried::Open
+                }
+                Err(_) => Carried::Nothing,
+            };
+            if tell.send(carried).is_err() {
                 break;
             }
         }
@@ -254,36 +280,44 @@ fn counting(served: &mut Served) -> tokio::sync::mpsc::UnboundedReceiver<bool> {
     told
 }
 
-/// The probes `home`'s resident took since the last ask: a status sent behind them marks the end, since
-/// one resident takes its connections in the order they were made.
-async fn probes(home: &Home, told: &mut tokio::sync::mpsc::UnboundedReceiver<bool>) -> usize {
-    use swoosh::node_client::NodeClient as _;
-
-    let _refused = swoosh::node_client::UidSocket::resolve(home)
-        .unwrap()
-        .status()
-        .await;
+/// The probes `home`'s resident took since the last ask, each a `Whoami`: a connection closed with no
+/// request, made here, marks the end, since one resident takes its connections in the order they were
+/// made. Anything else it took is no probe, and fails the row.
+async fn probes(home: &Home, told: &mut tokio::sync::mpsc::UnboundedReceiver<Carried>) -> usize {
+    drop(
+        swoosh::node_client::UidSocket::resolve(home)
+            .unwrap()
+            .connected()
+            .await
+            .unwrap(),
+    );
     let mut probes = 0;
-    while tokio::time::timeout(Duration::from_secs(5), told.recv())
-        .await
-        .unwrap()
-        .unwrap()
-    {
-        probes += 1;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), told.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Carried::Status => probes += 1,
+            Carried::Nothing => return probes,
+            Carried::Open => panic!("the decision opened nothing"),
+        }
     }
-    probes
 }
 
-/// With `serve` answering, each riding verb's decision asks its socket once, with a connection that
-/// carries no request, and rides it. `serve`, a verb typed with an `anyone` link and a root act with a
-/// reach flag bind their own without asking at all.
+/// With `serve` answering, each riding verb's decision asks its socket once, with one `Whoami` and
+/// nothing else, and rides it. `serve`, a verb typed with an `anyone` link and a root act with a reach
+/// flag bind their own without asking at all.
 #[tokio::test]
 async fn the_decision_is_made_once() {
     let scratch = scratch("once");
     let mut served = Served::new("decision-once").await;
     let mut told = counting(&mut served);
     for (name, verb, arm) in every_verb(&scratch).await {
-        let decision = decide(verb.split(), &served.home).await.unwrap();
+        let machine = machine_of(&verb);
+        let decision = decide(verb.split(), &served.home, machine.as_ref())
+            .await
+            .unwrap();
         assert_eq!(
             probes(&served.home, &mut told).await,
             usize::from(arm.is_some()),
@@ -318,8 +352,11 @@ async fn a_stale_socket_binds_its_own() {
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     assert!(socket.exists(), "the socket file stays with no listener");
     let ping = outward(&["ping", "me/nas"]);
+    let machine = machine_of(&ping);
     assert!(matches!(
-        decide(ping.split(), &served.home).await.unwrap(),
+        decide(ping.split(), &served.home, machine.as_ref())
+            .await
+            .unwrap(),
         Decision::Own(_)
     ));
     let _ = std::fs::remove_file(&socket);
@@ -337,7 +374,8 @@ async fn a_held_unreachable_serve_after_a_landed_act_says_it_landed() {
     drop(served.listener());
     for (name, verb, arm) in every_verb(&scratch).await {
         let Some(_) = arm else { continue };
-        let Err(report) = decide(verb.split(), &served.home).await else {
+        let machine = machine_of(&verb);
+        let Err(report) = decide(verb.split(), &served.home, machine.as_ref()).await else {
             panic!("{name}: a held lock with no answer is no own bind");
         };
         let landed = ["revoke", "root restore", "join"].contains(&name);

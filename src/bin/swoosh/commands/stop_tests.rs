@@ -403,10 +403,10 @@ async fn local_stop_truncated_frames_never_return_a_stopped_line() {
     let client = ControlClient::resolve_socket(&home, path).unwrap();
     let mut cases = 0;
     for (name, frame) in [
-        ("ack", b"SWC1\x03\0\0".as_slice()),
-        ("refusal", b"SWC1\x04\0\x07\0\x05gated"),
-        ("error", b"SWC1\x05\0\x07\0\x05gated"),
-        ("ack-body", b"SWC1\x03\0\x01x"),
+        ("ack", b"SWC2\x03\0\0".as_slice()),
+        ("refusal", b"SWC2\x04\0\x07\0\x05gated"),
+        ("error", b"SWC2\x05\0\x07\0\x05gated"),
+        ("ack-body", b"SWC2\x03\0\x01x"),
     ] {
         for end in 1..frame.len() {
             let server = async {

@@ -240,7 +240,7 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
     let peer = typed(&contacts, "me/nas");
 
     // As the dialing route runs it: the warning, the exchange and the lookup beside it read the home too.
-    let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
+    let (socket, this) = crate::commands::through_serve::tests::answering_as(&served.home).await;
     let outward = crate::Outward::Send(cmd);
     let beside = crate::Beside::of(&outward, &served.home, Some(&peer));
     let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -253,6 +253,7 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
                 machine: &peer,
                 slip: None,
                 socket,
+                this,
                 hints: std::collections::HashMap::new(),
                 contacts: &contacts,
             },
@@ -475,7 +476,7 @@ async fn send_ends_on_a_refusal_every_file_would_repeat() {
 
     // `serve` gone before the first Open: its lock free and its socket unlinked.
     let mut served = Served::new("send-ends-gone").await;
-    let socket = through_serve::tests::answering(&served.home).await;
+    let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
     drop(served.listener());
     drop(served.lock());
     let ran = through_socket(&cmd, Rc::new(socket), &peer, None, &contacts).await;

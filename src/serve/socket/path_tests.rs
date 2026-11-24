@@ -22,7 +22,7 @@ fn reference(epoch: [u8; 16], ticket: u64) -> PathRef {
 }
 
 fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
-    let mut out = b"SWC1".to_vec();
+    let mut out = b"SWC2".to_vec();
     out.push(tag);
     out.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
     out.extend_from_slice(body);
@@ -70,7 +70,7 @@ async fn sample_and_finish_are_the_published_bytes() {
             action,
         });
         let bytes = written_request(&request).await;
-        assert_eq!(&bytes[..7], b"SWC1\x05\x00\x19");
+        assert_eq!(&bytes[..7], b"SWC2\x05\x00\x19");
         assert_eq!(&bytes[7..], body(e1(), 1, byte).as_slice());
         let (read, kind, left) = read_request(&bytes).await;
         assert_eq!(read.unwrap(), request);
@@ -88,9 +88,9 @@ async fn the_three_replies_are_the_published_bytes() {
     }));
     let unavailable = Response::Path(PathReply::Unavailable);
     for (response, bytes) in [
-        (&unknown, b"SWC1\x08\x00\x04\x00\x00\x00\x00".as_slice()),
-        (&direct, b"SWC1\x08\x00\x04\x00\x01\x00\x00"),
-        (&unavailable, b"SWC1\x08\x00\x01\x01"),
+        (&unknown, b"SWC2\x08\x00\x04\x00\x00\x00\x00".as_slice()),
+        (&direct, b"SWC2\x08\x00\x04\x00\x01\x00\x00"),
+        (&unavailable, b"SWC2\x08\x00\x01\x01"),
     ] {
         assert_eq!(written(response).await, bytes);
         assert_eq!(&read_path(bytes).await.unwrap(), response);

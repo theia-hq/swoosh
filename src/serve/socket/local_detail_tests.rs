@@ -88,7 +88,7 @@ fn body(pairs: &[(&[u8], &[u8], u8)]) -> Vec<u8> {
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {
-    let mut out = b"SWC1\x09".to_vec();
+    let mut out = b"SWC2\x09".to_vec();
     out.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
     out.extend_from_slice(payload);
     out
@@ -352,7 +352,7 @@ async fn response_io_owns_one_payload_and_writes_it_by_borrow() {
     // A header-only input proves refusal precedes any payload read or allocation.
     ALLOCS.set(0);
     TRACK.set(true);
-    let too_large = Response::read(&mut b"SWC1\x09\x20\x01".as_slice()).await;
+    let too_large = Response::read(&mut b"SWC2\x09\x20\x01".as_slice()).await;
     TRACK.set(false);
     assert!(matches!(too_large, Err(ControlError::TooLarge(8193))));
     assert_eq!(ALLOCS.get(), 0);
@@ -483,31 +483,32 @@ async fn detail_diagnostics_are_fallible_bounded_and_borrowed() {
 async fn local_detail_request_six_has_exact_empty_framing() {
     ALLOCS.set(0);
     TRACK.set(true);
-    let oversized = Request::read(&mut b"SWC1\x06\x20\x01".as_slice()).await;
+    let oversized = Request::read(&mut b"SWC2\x06\x20\x01".as_slice()).await;
     TRACK.set(false);
     assert!(matches!(oversized, Err(ControlError::TooLarge(8193))));
     assert_eq!(ALLOCS.get(), 0);
     assert!(
-        matches!(Request::read(&mut b"SWC1\xff\0\0".as_slice()).await, Err(ControlError::Protocol(reason)) if reason == "unknown request tag 0xff")
+        matches!(Request::read(&mut b"SWC2\xff\0\0".as_slice()).await, Err(ControlError::Protocol(reason)) if reason == "unknown request tag 0xff")
     );
     for (request, tag) in [
         (Request::Services, 1),
         (Request::Status, 2),
         (Request::Stop, 3),
         (Request::LocalServiceDetail, 6),
+        (Request::Whoami, 7),
     ] {
         let mut encoded = Vec::new();
         request.write(&mut encoded).await.unwrap();
-        assert_eq!(encoded, [b'S', b'W', b'C', b'1', tag, 0, 0]);
+        assert_eq!(encoded, [b'S', b'W', b'C', b'2', tag, 0, 0]);
         assert_eq!(
             Request::read(&mut encoded.as_slice()).await.unwrap(),
             request
         );
     }
     for mut frame in [
-        b"SWC1\x06\0\x01x".as_slice(),
-        b"SWC1\xff\0\0",
-        b"SWC1\x05\0\0",
+        b"SWC2\x06\0\x01x".as_slice(),
+        b"SWC2\xff\0\0",
+        b"SWC2\x05\0\0",
     ] {
         assert!(matches!(
             Request::read(&mut frame).await,
@@ -516,13 +517,13 @@ async fn local_detail_request_six_has_exact_empty_framing() {
     }
     for end in 0..7 {
         assert!(
-            Request::read(&mut b"SWC1\x06\0\0"[..end].as_ref())
+            Request::read(&mut b"SWC2\x06\0\0"[..end].as_ref())
                 .await
                 .is_err()
         );
     }
     assert!(matches!(
-        Request::read(&mut b"SWC1\x06\x20\x01".as_slice()).await,
+        Request::read(&mut b"SWC2\x06\x20\x01".as_slice()).await,
         Err(ControlError::TooLarge(8193))
     ));
 }
@@ -542,7 +543,7 @@ async fn local_detail_client_owns_one_payload_and_bounded_fallible_diagnostics()
     assert!(snapshot.payload.capacity() <= 8192);
 
     for tag in [4, 5] {
-        let mut encoded = b"SWC1".to_vec();
+        let mut encoded = b"SWC2".to_vec();
         encoded.extend_from_slice(&[tag, 1, 2, 1, 0]);
         encoded.extend_from_slice(&[b'x'; 256]);
         ALLOCS.set(0);
@@ -561,7 +562,7 @@ async fn local_detail_client_owns_one_payload_and_bounded_fallible_diagnostics()
         assert_eq!(reason.as_ptr() as usize, POINTER.get());
         assert_eq!(reason.len(), 256);
         assert!(reason.capacity() <= 256);
-        let header = [b'S', b'W', b'C', b'1', tag, 1, 3];
+        let header = [b'S', b'W', b'C', b'2', tag, 1, 3];
         fail_sizes([259, 0]);
         let result = Response::read_local_detail(&mut header.as_slice()).await;
         fail_sizes([0, 0]);
@@ -571,9 +572,9 @@ async fn local_detail_client_owns_one_payload_and_bounded_fallible_diagnostics()
     }
     for bytes in [
         encoded,
-        b"SWC1\x05\0\x05\0\x03abc".to_vec(),
-        b"SWC1\x04\0\x05\0\x03abc".to_vec(),
-        b"SWC1\x03\0\0".to_vec(),
+        b"SWC2\x05\0\x05\0\x03abc".to_vec(),
+        b"SWC2\x04\0\x05\0\x03abc".to_vec(),
+        b"SWC2\x03\0\0".to_vec(),
     ] {
         FAIL.set(true);
         let result = Response::read_local_detail(&mut bytes.as_slice()).await;

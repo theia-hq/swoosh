@@ -4,7 +4,7 @@
 //! Every check that can refuse without reaching out runs first: the peer is not this machine, the slip
 //! is not one anyone may hold, the run has a reach slot for the lane, and the peer's lane has room. Only
 //! then is the control slot released, the standing renewed when due, and the peer dialed. Once attached,
-//! the two streams are spliced in SWC1 frames, one direction at a time, until both are settled or the
+//! the two streams are spliced in SWC2 frames, one direction at a time, until both are settled or the
 //! local client is gone; a finished upload is answered with Landed once the peer holds it.
 //!
 //! An observed Open also takes a reference to its connection before it reaches out, hands it over in
@@ -480,7 +480,7 @@ async fn attach<R, W, PR, PW, S>(
     .await;
 }
 
-/// Move a stream both ways in SWC1 frames, each direction on its own, until both are settled.
+/// Move a stream both ways in SWC2 frames, each direction on its own, until both are settled.
 ///
 /// Toward the peer, the client's Data bodies go to the peer's stream, and only the client's End shuts
 /// it down cleanly. An end of the client's writing without End (an end of file, a half-close, a failed

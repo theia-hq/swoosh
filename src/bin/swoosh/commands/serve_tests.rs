@@ -1884,6 +1884,7 @@ fn the_control_socket_adds_no_service() {
     for request in [
         Request::Services,
         Request::Status,
+        Request::Whoami,
         Request::Stop,
         Request::LocalServiceDetail,
     ] {
@@ -1892,6 +1893,7 @@ fn the_control_socket_adds_no_service() {
             // one here on or off.
             Request::Services
             | Request::Status
+            | Request::Whoami
             | Request::Stop
             | Request::LocalServiceDetail
             | Request::Open(_)
@@ -3726,7 +3728,7 @@ async fn catalog_connected_exchange_never_reconnects_or_repeats_requests() {
     }
 }
 
-/// One SWC1 request/response over the resident control socket, bounded by the caller's timeout.
+/// One SWC2 request/response over the resident control socket, bounded by the caller's timeout.
 async fn control_round_trip(socket: &Path, request: Request) -> Result<Response, ControlError> {
     let mut stream = tokio::net::UnixStream::connect(socket)
         .await

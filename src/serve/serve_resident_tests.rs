@@ -20,7 +20,7 @@ use crate::serve::socket::ControlError;
 
 /// The four magic bytes a well-formed control frame opens with, spelled out rather than imported, so
 /// a test cannot agree with the codec by sharing its constant.
-const MAGIC: [u8; 4] = *b"SWC1";
+const MAGIC: [u8; 4] = *b"SWC2";
 
 /// Serializes scratch dir names within this test process; the pid keeps two concurrent runs of the
 /// binary apart. Names stay short on purpose: the control socket path must fit `sun_path` (104
@@ -111,7 +111,7 @@ async fn detail_capture_failures_never_write_a_success_header() {
             .await;
         let mut bytes = Vec::new();
         client.read_to_end(&mut bytes).await.unwrap();
-        let mut expected = b"SWC1\x09".to_vec();
+        let mut expected = b"SWC2\x09".to_vec();
         expected.extend_from_slice(&(outcome.len() as u16).to_be_bytes());
         expected.extend_from_slice(&outcome);
         assert_eq!(bytes, expected);
@@ -166,10 +166,10 @@ fn detail_resident() -> Resident {
 
 #[tokio::test]
 async fn detail_is_one_shot_without_halfclose_or_stop_splicing() {
-    for second in [b"".as_slice(), b"SWC1\x03\0\0", b"SWC1\x06\0\0"] {
+    for second in [b"".as_slice(), b"SWC2\x03\0\0", b"SWC2\x06\0\0"] {
         let resident = detail_resident();
         let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
-        client.write_all(b"SWC1\x06\0\0").await.unwrap();
+        client.write_all(b"SWC2\x06\0\0").await.unwrap();
         client.write_all(second).await.unwrap();
         tokio::time::timeout(
             READ_TIMEOUT,
@@ -274,15 +274,15 @@ async fn detail_capture_releases_guard_before_a_stalled_writer() {
 async fn malformed_detail_requests_get_only_bounded_fixed_errors() {
     for (request, expected) in [
         (
-            b"SWC1\x06\0\x01x".as_slice(),
+            b"SWC2\x06\0\x01x".as_slice(),
             "invalid local service detail request",
         ),
         (
-            b"SWC1\x02\0\x01x",
+            b"SWC2\x02\0\x01x",
             "control protocol error: unexpected request payload",
         ),
         (
-            b"SWC1\xff\0\0",
+            b"SWC2\xff\0\0",
             "control protocol error: unknown request tag 0xff",
         ),
         (b"XXXX\x06\0\0", "not a control stream"),
@@ -308,7 +308,7 @@ async fn requests_round_trip() {
     for request in [Request::Services, Request::Status, Request::Stop] {
         let mut buf = Vec::new();
         request.write(&mut buf).await.expect("request writes");
-        assert_eq!(&buf[..4], &MAGIC, "frames carry the SWC1 magic");
+        assert_eq!(&buf[..4], &MAGIC, "frames carry the SWC2 magic");
         let back = Request::read(&mut &buf[..]).await.expect("request reads");
         assert_eq!(back, request, "a request round-trips");
     }
@@ -349,12 +349,12 @@ async fn a_foreign_identity_is_not_a_version_mismatch() {
 /// red at the first assertion.
 #[tokio::test]
 async fn a_version_mismatch_is_not_a_foreign_control_stream() {
-    // `SWC2`: one byte of the version changed, and nothing else.
-    let buf = request_frame_with(3, b'2').await;
+    // `SWC9`: one byte of the version changed, and nothing else.
+    let buf = request_frame_with(3, b'9').await;
 
     let error = Request::read(&mut &buf[..])
         .await
-        .expect_err("SWC2 is not this build's grammar");
+        .expect_err("SWC9 is not this build's grammar");
     assert!(
         !matches!(error, ControlError::Foreign),
         "a control peer on another build is not a foreign stream: {error}"
@@ -379,7 +379,7 @@ async fn a_version_skewed_request_is_answered_naming_both_versions() {
     });
 
     client
-        .write_all(&request_frame_with(3, b'2').await)
+        .write_all(&request_frame_with(3, b'9').await)
         .await
         .expect("the skewed frame writes");
     let reply = tokio::time::timeout(READ_TIMEOUT, Response::read(&mut client))
@@ -390,8 +390,8 @@ async fn a_version_skewed_request_is_answered_naming_both_versions() {
     let Response::Error(message) = reply else {
         panic!("a version mismatch is answered on the wire: {reply:?}")
     };
+    assert!(message.contains("SWC9"), "{message}");
     assert!(message.contains("SWC2"), "{message}");
-    assert!(message.contains("SWC1"), "{message}");
     task.await.expect("the serve task joins");
 }
 
@@ -1226,7 +1226,7 @@ async fn dropping_the_outer_serve_drops_controls_without_firing_its_token() {
             let (mut client, server, observed) = observed_pair(WriteMode::Stalled);
             if index == 0 {
                 if matches!(wait, ControlWait::Permit) {
-                    client.write_all(b"SWC1\x03").await.unwrap();
+                    client.write_all(b"SWC2\x03").await.unwrap();
                 } else {
                     Request::Stop.write(&mut client).await.unwrap();
                 }
@@ -1559,4 +1559,68 @@ fn an_unreadable_serve_toml_reports_the_services_off_as_unknown() {
         DisabledList::Known(vec!["speed".to_owned()])
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A catalog that fits the frame alone, 32 names of 252 bytes, and leaves no room for the rest of a
+/// status.
+fn big_catalog() -> ServiceCatalog {
+    let mut bytes = 32_u32.to_be_bytes().to_vec();
+    for index in 0..32_u8 {
+        bytes.extend_from_slice(&252_u16.to_be_bytes());
+        bytes.push(b'a' + index % 26);
+        bytes.extend_from_slice(&[b'x'; 251]);
+        bytes.push(0);
+    }
+    assert!(bytes.len() <= MAX_FRAME);
+    ServiceCatalog::decode(&bytes).unwrap()
+}
+
+/// `request` asked of `resident` on a connection of its own, and its reply.
+async fn asked(resident: &Arc<Resident>, request: Request) -> Response {
+    let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn({
+        let this = Arc::clone(resident);
+        async move {
+            this.serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+                .await;
+        }
+    });
+    request.write(&mut client).await.unwrap();
+    let reply = Response::read(&mut client).await.unwrap();
+    task.await.unwrap();
+    reply
+}
+
+/// A `serve` whose status is past the frame answers a status with an `Error` that says so, the text a
+/// client shows, never a dropped connection; and still answers `Whoami` with its key.
+#[tokio::test]
+async fn status_past_frame_cap_is_error_frame() {
+    let dir = scratch_dir("past-cap");
+    let home = crate::home::Home::resolve(Some(dir)).unwrap();
+    let node_id = NodeId::from_ed25519_secret(&[9u8; 32]);
+    let resident = Arc::new(Resident::new(
+        node_id,
+        None,
+        big_catalog(),
+        crate::serve_toml::LiveServeToml::load(&home).unwrap(),
+        CancellationToken::new(),
+        Arc::default(),
+    ));
+    assert!(
+        resident
+            .status_reply()
+            .encode()
+            .is_ok_and(|payload| payload.len() > MAX_FRAME)
+    );
+    let Response::Error(reason) = asked(&resident, Request::Status).await else {
+        panic!("a status past the frame is an error reply");
+    };
+    assert_eq!(
+        ControlError::Protocol(reason).to_string(),
+        "control protocol error: status too large for the control socket"
+    );
+    assert_eq!(
+        asked(&resident, Request::Whoami).await,
+        Response::Whoami { node_id }
+    );
 }
