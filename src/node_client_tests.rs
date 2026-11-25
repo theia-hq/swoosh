@@ -274,30 +274,48 @@ async fn connect_refuses_a_foreign_uid_peer() {
         .await
         .expect_err("a foreign-uid peer must refuse");
     assert!(
-        matches!(error, ControlError::Untrusted { ref path } if path == &client.socket),
-        "a forged peer is Untrusted naming the socket: {error}"
+        matches!(error, ControlError::UntrustedPeer { ref path } if path == &client.socket),
+        "a forged peer is UntrustedPeer naming the socket: {error}"
     );
-    // Another user's listener is Untrusted whatever the record says, never the line naming a process.
+    assert_eq!(error.to_string(), answering_not_known(&client.socket));
+    // Another user's listener is UntrustedPeer whatever the record says, never the line naming a
+    // process.
     std::fs::remove_file(leaf.join("serve.lock")).unwrap();
     let error = client
         .connect_checked_with(tokio::net::UnixStream::connect(&client.socket), foreign_uid)
         .await
         .expect_err("a foreign-uid peer must refuse");
     assert!(
-        matches!(error, ControlError::Untrusted { .. }),
-        "a forged peer with no record is still Untrusted: {error}"
+        matches!(error, ControlError::UntrustedPeer { .. }),
+        "a forged peer with no record is still UntrustedPeer: {error}"
     );
 
     drop(listener);
     let _ = std::fs::remove_dir_all(&leaf);
 }
 
+/// The line for a process answering at `socket` that is not known to be this user's: the path is
+/// fine, so it names the process, never the path's owner or mode.
+fn answering_not_known(socket: &Path) -> String {
+    format!(
+        "swoosh serve's socket is not private to you\n  The process answering at {} is not known to \
+         be yours.\n  Nothing was sent through it.",
+        socket.display()
+    )
+}
+
 fn no_credentials(_: i32) -> std::io::Result<super::PeerCredentials> {
     Err(std::io::Error::other("the credential query failed"))
 }
 
-/// A credential query that fails is Untrusted, even with a record naming this process: with no pid
-/// from the kernel there is no process to name, so the line naming one never prints.
+/// This user's listener as the kernel reports one outside the reader's pid namespace: pid 0.
+fn zero_pid(_: i32) -> std::io::Result<super::PeerCredentials> {
+    super::PeerCredentials::from_kernel(super::euid(), 0)
+}
+
+/// A credential query that fails, or names pid 0, is UntrustedPeer, even with a record naming this
+/// process: with no pid from the kernel there is no process to name, so the line naming one never
+/// prints.
 #[tokio::test]
 async fn connect_refuses_a_peer_whose_credentials_cannot_be_read() {
     let leaf = scratch("nocred", 0o700);
@@ -306,17 +324,17 @@ async fn connect_refuses_a_peer_whose_credentials_cannot_be_read() {
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
     let client = resolve_socket(socket).expect("the bound socket resolves");
 
-    let error = client
-        .connect_checked_with(
-            tokio::net::UnixStream::connect(&client.socket),
-            no_credentials,
-        )
-        .await
-        .expect_err("a peer with no credentials must refuse");
-    assert!(
-        matches!(error, ControlError::Untrusted { ref path } if path == &client.socket),
-        "a peer with no credentials is Untrusted naming the socket: {error}"
-    );
+    for checker in [no_credentials, zero_pid] {
+        let error = client
+            .connect_checked_with(tokio::net::UnixStream::connect(&client.socket), checker)
+            .await
+            .expect_err("a peer with no credentials must refuse");
+        assert!(
+            matches!(error, ControlError::UntrustedPeer { ref path } if path == &client.socket),
+            "a peer with no credentials is UntrustedPeer naming the socket: {error}"
+        );
+        assert_eq!(error.to_string(), answering_not_known(&client.socket));
+    }
 
     drop(listener);
     let _ = std::fs::remove_dir_all(&leaf);
@@ -547,9 +565,9 @@ async fn stop_treats_a_clean_eof_as_success() {
 
 /// The verb-boundary rendering of the typed control errors: `NoResident` teaches the fix verbatim,
 /// a wire `Refused` renders the resident's reason verbatim (never doubled), a `Protocol`
-/// error names the skew fix, so a stale resident is never silently bypassed, and a socket that cannot
-/// be trusted, one another process answers, and a `serve` with no answer in time each print their own
-/// lines whole, the last with no phase.
+/// error names the skew fix, so a stale resident is never silently bypassed, and a socket path that
+/// cannot be trusted, a process answering that cannot, one another process answers, and a `serve` with
+/// no answer in time each print their own lines whole, the last with no phase.
 #[test]
 fn control_errors_render_through_their_taxonomy() {
     let socket = PathBuf::from("/run/user/1000/swoosh/home/control.sock");
@@ -563,6 +581,18 @@ fn control_errors_render_through_their_taxonomy() {
         untrusted,
         "swoosh serve's socket is not private to you\n  /run/user/1000/swoosh/home/control.sock is \
          not yours alone.\n  Nothing was sent through it."
+    );
+    let untrusted_peer = format!(
+        "{:#}",
+        super::control_error_report(ControlError::UntrustedPeer {
+            path: PathBuf::clone(&socket)
+        })
+    );
+    assert_eq!(
+        untrusted_peer,
+        "swoosh serve's socket is not private to you\n  The process answering at \
+         /run/user/1000/swoosh/home/control.sock is not known to be yours.\n  Nothing was sent through \
+         it."
     );
     let unattributed = format!(
         "{:#}",
@@ -1245,7 +1275,7 @@ async fn local_detail_credential_query_failure_and_symlinks_stay_untrusted() {
         client
             .connect_checked_with(tokio::net::UnixStream::connect(&path), failed_pid_query)
             .await,
-        Err(ControlError::Untrusted { .. })
+        Err(ControlError::UntrustedPeer { .. })
     ));
     let alias = leaf.join("alias.sock");
     std::os::unix::fs::symlink(&path, &alias).unwrap();

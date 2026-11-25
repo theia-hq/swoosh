@@ -211,7 +211,10 @@ async fn run_typing(
     };
     let cmd = parse(args).unwrap();
     let result = match cmd.block(home, stdin, &mut prompt, &dial, &mut err).await {
-        Ok(Some(publish)) => publish.run(home, &mut prompt, &dial, &mut err).await,
+        Ok(Some(publish)) => publish
+            .run(home, &mut prompt, &dial, &mut err)
+            .await
+            .map(drop),
         Ok(None) => Ok(()),
         Err(error) => Err(error),
     };

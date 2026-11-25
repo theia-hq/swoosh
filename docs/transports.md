@@ -31,8 +31,8 @@ $ swoosh serve --relay https://relay.example --resolver https://dns.example/pkar
 ```
 
 `serve` remembers each URL it was given under the node home, so every later command under that home
-reaches the same two servers with no flags to repeat. A flag on a dial overrides the remembered one for
-that run.
+reaches the same two servers with no flags to repeat. While `serve` runs, other commands under that home refuse `--local`, `--relay` and `--resolver`; set them on `serve`
+instead. Otherwise a flag on a command overrides the remembered one for that run.
 
 **A resolver is a fleet setting; a relay is a node setting.** Two peers find each other only if both
 resolve through the same resolver, so every node in a fleet names the same one. A relay travels in the

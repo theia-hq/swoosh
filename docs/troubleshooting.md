@@ -135,22 +135,34 @@ error: --relay or SWOOSH_RELAY does not apply while swoosh serve runs here
   Set it on swoosh serve, or stop swoosh serve and run this command again.
 ```
 
-While `swoosh serve` runs on this machine, `sync`, `invite`, `revoke`, `join`, and `root restore` go
-through it, so `--local`, `--relay` and `--resolver` (and their `SWOOSH_` variables) belong on `serve`.
+While `swoosh serve` runs on this machine, the commands that reach a machine go through it, so `--local`, `--relay` and `--resolver` (and their `SWOOSH_` variables) belong on `serve`.
 
-## "swoosh serve on this machine is a different version" / "did not answer"
+## "swoosh serve on this machine is a different version" / "swoosh serve did not answer here"
 
 <!-- manual: needs a serve of another build, or one that is stuck -->
 ```
 error: swoosh serve on this machine is a different version
   Restart it with this version.
-error: swoosh serve on this machine did not answer
+error: swoosh serve did not answer here
   Restart it.
 ```
 
-The command went through the `serve` running here and it could not take the request. A `revoke`, `invite` or
-`root restore` has already done its part on this machine when this prints; restarting `serve` finishes the rest,
-because `serve` asks your devices as it starts.
+The command went through the `serve` running here and it could not take the request. When `revoke` prints this,
+its change is already made on this machine; restarting `serve` tells your devices, because the sync `serve` runs as it
+starts does. When `root restore` prints it, the root is restored on this machine, and the error does not say a restart tells your devices.
+The same holds for a `revoke` a newer list held back: it was not published, so run `swoosh sync`, then `revoke` again.
+
+## "swoosh serve's socket is not private to you"
+
+```
+error: swoosh serve's socket is not private to you
+  <path> is not yours alone.
+  Nothing was sent through it.
+```
+
+The socket or its directory is owned by another user, is open to others, or is a symbolic link. Nothing was sent. Make the path
+yours alone, or stop whatever put it there. When the second line reads `The process answering at <path> is not known
+to be yours.`, the path is fine and the process answering is another user's or could not be identified; stop it.
 
 ## Next
 

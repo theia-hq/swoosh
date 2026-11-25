@@ -35,7 +35,7 @@ All notable changes to swoosh, newest first.
   only once the stream is open. A `ping` or `status <machine>` that gets no answer in time prints
   `me/nas: unreachable` either way; `speed` and `send` print an error whose words differ by path.
 - **A `swoosh serve` that stops answering is named, and the expiring-standing warning follows the run.** `ping`,
-  `speed`, `status <machine>`, `send`, `forward` and `proxy` end with `error: swoosh serve on this machine did not answer` and
+  `speed`, `status <machine>`, `send`, `forward` and `proxy` end with `error: swoosh serve did not answer here` and
   exit 1; `send` stops there instead of skipping each file, and a `forward <port>` or `proxy` connection that fails later
   keeps its warning. Through `serve`, `ping`, `speed`, `status` and `send` also warn when this machine's standing
   is about to expire, as they do without it.
@@ -45,17 +45,20 @@ All notable changes to swoosh, newest first.
   with `the machine did not answer the request to open a stream in time`.
 - **`send` ends on a socket to `swoosh serve` that cannot be trusted.** It exits 1 and prints one error
   instead of a `skip` line per remaining file: the two below.
-- **A socket that another process answers is named.** If the process answering `swoosh serve`'s socket is not
-  the one `serve` recorded, `ping`, `speed`, `send`, `forward`, `proxy` and `status <machine>` exit 1 (`ssh` exits 255)
-  and print `error: another process is answering swoosh serve's socket`, then the process number and path, and
-  `Nothing was sent through it.` A socket path that is not yours alone, or a socket another user holds, prints
-  `error: swoosh serve's socket is not private to you` in the same way. Bare `status` prints either text as a
-  notice on stderr and exits 0.
+- **A socket that another process answers is named.** If the process answering `swoosh serve`'s socket is not the one
+  `serve` recorded, or `serve.lock` records none, `ping`, `speed`, `send`, `forward`, `proxy`, `status <machine>`,
+  `stop`, `sync`, `invite` and bare `service` exit 1 (`ssh` exits 255) and print
+  `error: another process is answering swoosh serve's socket`, then the process number and path, and `Nothing was sent
+  through it.` A socket path that is not yours alone, or a process answering as another user or one that cannot be
+  identified, prints `error: swoosh serve's socket is not private to you` and the second line names the cause. `revoke`, `root restore` and
+  `join` do their change first, then print it too. Bare `status` prints either text as a notice on stderr and exits 0.
 - **`send` says what to rerun when `swoosh serve` stops after files were sent.** The ending asks to rerun without
   the files already marked `sent`, or says every file was marked `sent` when none are left.
 - **`forward <port>` and `proxy` run through `swoosh serve` too.** If `serve` stops, both end with
   `error: swoosh serve stopped here and ended the connection to me/nas`. A `proxy` request that fails gets a
   `502` whose body is one line, `proxy failed: <what went wrong>`, and `proxy` still prints its URL first.
+- **While `serve` runs, `ping`, `speed`, `status <machine>`, `send`, `forward`, `proxy` and `stop` refuse `--local`,
+  `--relay` and `--resolver`,** and the `SWOOSH_` variables that set them. Set them on `serve`.
 - **`speed` runs through `swoosh serve` too, and its title drops `via iroh`.** It reads
   `speed test to <machine> (<mode>)` on both paths. The `path:` line comes from a reading taken after the
   run; if that fails, there is no `path:` line, stderr says `warning: could not read the path of this run`,
@@ -203,20 +206,23 @@ All notable changes to swoosh, newest first.
   and no longer starts a second node beside it. A lock file that cannot be read, is another user's, or does
   not answer in time stops it with `could not lock <home.lock>`.
 - **`revoke`, `root restore` and `join` with a reach flag refuse before the act** when `serve` holds the home
-  but cannot be reached, is of another version or does not answer, and print `Nothing was changed.`
+  but cannot be reached, is of another version, does not answer, or has a socket another process answers or that is not yours alone, and print `Nothing was changed.`
 - **A root act that lands and then cannot reach `serve` says so.** `root restore` and `join` print
   `The change is made and saved here. Your devices have not been told yet.` before the error. `revoke me/<name>`
   prints `me/<name> is blocked on this machine, not yet on your other devices` and
   `to finish, run it again: swoosh revoke me/<name>`. The first line also comes before the errors for a
   `swoosh serve` of another version or one that does not answer.
+  If `serve` is another version, stops answering, or stops after the first exchange of a `revoke` that no newer list held back, the error
+  adds that the sync `serve` runs as it starts tells your devices. After `invite`, `root restore` or a `revoke` a
+  newer list held back, a stopped `serve` ends with `Start it again.` and no such clause.
 - **A command that dials a machine checks it is not this machine first.** `ping me/<this machine>` and the other
   commands that dial end with `<name> is this machine` (`that key is this machine's` for a key) and exit 2, with
   or without `swoosh serve`, before anything is opened, minted or asked. A sealed key no longer asks for its
   passphrase to say so.
-- **A `swoosh serve` of another version, or one that does not answer, ends a command before its own bind.**
-  The lines are `swoosh serve on this machine is a different version` and `swoosh serve on this machine did
-  not answer`. A `serve` that holds the home and drops the
-  connection counts as one that does not answer.
+- **A `swoosh serve` of another version, or one that does not answer, ends a command before its own bind.** The lines
+  are `swoosh serve on this machine is a different version` and `swoosh serve did not answer here`. A `serve` that
+  closes the connection without answering is checked against `serve.lock`: held, it counts as not answering; held while its key is
+  replaced, it reads `this machine's key is being replaced`; released, the command runs on its own.
 - **A damaged key file is named before the passphrase is asked.** Without `swoosh serve`, a command that dials
   any machine and finds a sealed key file whose header names no key prints the damaged-key line.
 - **Updated SSH and filesystem dependencies** following RUSTSEC-2026-0495 and RUSTSEC-2026-0486.

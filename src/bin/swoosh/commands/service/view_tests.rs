@@ -762,6 +762,7 @@ fn control_socket_lines_print_unescaped() {
     let path = PathBuf::from("/run/user/1000/swoosh/control.sock");
     for error in [
         ControlError::Untrusted { path: path.clone() },
+        ControlError::UntrustedPeer { path: path.clone() },
         ControlError::Unattributed {
             path: path.clone(),
             pid: 4242.try_into().unwrap(),

@@ -669,16 +669,26 @@ fn reach_line(name: &str) -> &'static str {
 
 /// With `serve` of another version, or one that stalled (it takes connects and replies to nothing),
 /// `revoke`, `invite` and `root restore` still make their cut and print their own lines, then end with
-/// the line that says why, exit 1.
+/// the line that says why, exit 1. Only `revoke`'s says the sync a restarted `serve` runs tells your
+/// devices, since only its change is sent by that sync; `sync` ends on the plain pair too.
 #[tokio::test]
 async fn a_root_act_against_a_skewed_or_wedged_resident_ends_with_its_line() {
-    for (name, wedged) in [
-        ("revoke", false),
-        ("invite", false),
-        ("restore", false),
-        ("revoke", true),
-        ("invite", true),
-        ("restore", true),
+    let skew =
+        "swoosh serve on this machine is a different version\n  Restart it with this version.";
+    let wedge = "swoosh serve did not answer here\n  Restart it.";
+    let skew_after_revoke = "swoosh serve on this machine is a different version\n  Restart it with \
+                             this version; the sync it runs as it starts tells your devices.";
+    let wedge_after_revoke = "swoosh serve did not answer here\n  Restart it; the sync it runs as it \
+                              starts tells your devices.";
+    for (name, wedged, line) in [
+        ("revoke", false, skew_after_revoke),
+        ("invite", false, skew),
+        ("restore", false, skew),
+        ("sync", false, skew),
+        ("revoke", true, wedge_after_revoke),
+        ("invite", true, wedge),
+        ("restore", true, wedge),
+        ("sync", true, wedge),
     ] {
         let answers = if wedged {
             vec![Answer::Wedge]
@@ -687,22 +697,14 @@ async fn a_root_act_against_a_skewed_or_wedged_resident_ends_with_its_line() {
         };
         let ran = ride_with(name, answers).await;
         let error = ran.result.expect_err("exit 1");
-        if wedged {
+        assert_eq!(format!("{error:#}"), line, "{name} {wedged}");
+        if name != "sync" {
             assert!(
-                error.is::<crate::commands::through_serve::Unresponsive>(),
-                "{name}: {error:#}"
-            );
-        } else {
-            assert!(
-                error.is::<crate::commands::through_serve::Skew>(),
-                "{name}: {error:#}"
+                ran.err.contains(reach_line(name)),
+                "{name}: its own lines came first: {}",
+                ran.err
             );
         }
-        assert!(
-            ran.err.contains(reach_line(name)),
-            "{name}: its own lines came first: {}",
-            ran.err
-        );
         assert!(ran.landed, "{name}: the route's own write landed");
     }
 }
@@ -727,6 +729,84 @@ async fn a_slow_device_through_a_healthy_serve_is_no_answer() {
     );
 }
 
+/// With `serve` stopping under its exchange, `revoke`, `invite` and `root restore` still make their cut
+/// and print their own lines, then end with the stopped line, exit 1, with no advice to run the act
+/// again. Only `revoke`'s says the sync a started `serve` runs tells your devices.
+#[tokio::test]
+async fn a_root_acts_stopped_serve_ends_with_its_line() {
+    let head = "swoosh serve stopped here and ended the connection to ";
+    let after_act = "\n  Commands here connect through it while it runs.\n  Start it again.";
+    let after_revoke = "\n  Commands here connect through it while it runs.\n  Start it again; the \
+                        sync it runs as it starts tells your devices.";
+    for (name, tail) in [
+        ("revoke", after_revoke),
+        ("invite", after_act),
+        ("restore", after_act),
+    ] {
+        let ran = ride_with(name, vec![Answer::Attach, Answer::Stop]).await;
+        let error = format!("{:#}", ran.result.expect_err("exit 1"));
+        assert!(
+            error.starts_with(head) && error.ends_with(tail),
+            "{name}: {error}"
+        );
+        assert!(
+            ran.err.contains(reach_line(name)),
+            "{name}: its own lines came first: {}",
+            ran.err
+        );
+        assert!(ran.landed, "{name}: the route's own write landed");
+    }
+}
+
+/// A `revoke` whose cut a newer list kept back published nothing, so no started `serve` sends it: it
+/// ends on the plain lines, as `invite` and `root restore` do. One that published, or that no device
+/// took, ends on the lines that say the sync a started `serve` runs tells your devices.
+#[test]
+fn a_revoke_kept_back_by_a_newer_list_ends_on_the_plain_lines() {
+    use swoosh::reach_report::Reach;
+    use swoosh::streams::GoneWhy;
+
+    let published = [
+        Reach::Complete,
+        Reach::Published {
+            took: vec!["me/nas".to_owned()],
+            missed: Vec::new(),
+            until: None,
+        },
+        Reach::Held {
+            missed: Vec::new(),
+            until: None,
+        },
+        Reach::LocalOnly { until: 0 },
+    ];
+    for reach in published {
+        let ending = crate::Exchanged::Revoked(reach.clone()).ending();
+        assert_eq!(ending, Some(crate::Ending::Revoke), "{reach:?}");
+    }
+    let behind = crate::Exchanged::Revoked(Reach::Behind)
+        .ending()
+        .expect("a revoke prints its end");
+    assert_eq!(behind, crate::Ending::Act);
+    for (why, line) in [
+        (
+            GoneWhy::Skew,
+            "swoosh serve on this machine is a different version\n  Restart it with this version.",
+        ),
+        (
+            GoneWhy::Unresponsive,
+            "swoosh serve did not answer here\n  Restart it.",
+        ),
+        (
+            GoneWhy::Stopped,
+            "swoosh serve stopped here and ended the connection to me/nas\n  Commands here connect \
+             through it while it runs.\n  Start it again.",
+        ),
+    ] {
+        let said = format!("{:#}", behind.line(why, "me/nas".to_owned()));
+        assert_eq!(said, line, "{why:?}");
+    }
+}
+
 /// A root act whose `serve` stops while its exchange with a device is attached ends, after its own lines,
 /// with the stopped line naming that device and no advice to run the act again, exit 1.
 #[tokio::test]
@@ -742,7 +822,7 @@ async fn a_root_acts_stopped_serve_names_the_device_it_cut() {
         error,
         format!(
             "swoosh serve stopped here and ended the connection to {cut}\n  Commands here connect \
-             through it while it runs.\n  Start it again; it asks your devices as it starts."
+             through it while it runs.\n  Start it again."
         )
     );
     assert!(ran.err.contains(reach_line("invite")), "{}", ran.err);
@@ -787,7 +867,7 @@ async fn peer_hints_ride_each_exchange_through_serve() {
     assert_eq!(
         error.to_string(),
         format!(
-            "--peer or SWOOSH_PEER gives more than 16 addresses for {}",
+            "--peer or SWOOSH_PEER gives more than 16 addresses for one key:\n  {}",
             node(NAS)
         )
     );

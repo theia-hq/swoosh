@@ -195,10 +195,9 @@ pub async fn refuse_moot(home: &Home, reach: &ReachArgs) -> eyre::Result<()> {
         Ok(Found::Absent) => Ok(()),
         // A socket that cannot be trusted keeps its own line, which already says nothing was sent.
         Err(report)
-            if matches!(
-                report.downcast_ref::<ControlError>(),
-                Some(ControlError::Untrusted { .. } | ControlError::Unattributed { .. })
-            ) =>
+            if report
+                .downcast_ref::<ControlError>()
+                .is_some_and(ControlError::distrusts_socket) =>
         {
             Err(report)
         }
@@ -262,9 +261,9 @@ impl Dial<'_> {
                 }
             }
             // A socket that cannot be trusted keeps its own error, never a cut's.
-            Unopened::Control(
-                error @ (ControlError::Untrusted { .. } | ControlError::Unattributed { .. }),
-            ) => Unattached::Failed(error.into()),
+            Unopened::Control(error) if error.distrusts_socket() => {
+                Unattached::Failed(error.into())
+            }
             Unopened::Control(error) => {
                 tracing::debug!(%error, "an open through serve failed before its reply");
                 Unattached::Failed(self.cut(socket).await)
@@ -593,7 +592,7 @@ pub struct Busy;
 
 /// `serve` is there and took no connection, or gave no reply in time.
 #[derive(Debug, thiserror::Error)]
-#[error("swoosh serve on this machine did not answer\n  Restart it.")]
+#[error("swoosh serve did not answer here\n  Restart it.")]
 pub struct Unresponsive;
 
 /// `serve` stopped under a live pipe, or before it answered.
@@ -604,14 +603,44 @@ pub struct Unresponsive;
 )]
 pub struct ServeStopped(String);
 
-/// `serve` stopped under a root act's exchange with `machine`, after the act landed: no rerun is
-/// advised, since the act is done and the started `serve` asks your devices itself.
+/// `serve` stopped under an `invite`'s or a `root restore`'s exchange with `machine`, after the act
+/// landed: no rerun is advised, since the act is done. A started `serve` is not shown to send that
+/// change, so the line promises nothing of your devices.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "swoosh serve stopped here and ended the connection to {0}\n  Commands here connect through it \
-     while it runs.\n  Start it again; it asks your devices as it starts."
+     while it runs.\n  Start it again."
 )]
 pub struct StoppedAfterAct(pub(crate) String);
+
+/// `serve` stopped under a published `revoke`'s exchange with `machine`, after the revoke landed: the
+/// first round of a started `serve` is the next sync the revoke's own line names, so starting it is the
+/// whole remedy.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "swoosh serve stopped here and ended the connection to {0}\n  Commands here connect through it \
+     while it runs.\n  Start it again; the sync it runs as it starts tells your devices."
+)]
+pub struct StoppedAfterRevoke(pub(crate) String);
+
+/// `serve` turned out another version under a published `revoke`'s exchange, after the revoke landed:
+/// as [`StoppedAfterRevoke`], the sync a restarted `serve` runs first offers the newer list to your
+/// devices, so restarting it is the whole remedy.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "swoosh serve on this machine is a different version\n  Restart it with this version; the sync it \
+     runs as it starts tells your devices."
+)]
+pub struct SkewAfterRevoke;
+
+/// `serve` stopped answering under a published `revoke`'s exchange, after the revoke landed: as
+/// [`SkewAfterRevoke`], a restart tells the devices, and a rerun of the landed act may refuse.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "swoosh serve did not answer here\n  Restart it; the sync it runs as it starts tells your \
+     devices."
+)]
+pub struct UnresponsiveAfterRevoke;
 
 /// `serve` stopped under a `send` after at least one file printed `sent`: a bare rerun would send those
 /// again, so the line says what is left.

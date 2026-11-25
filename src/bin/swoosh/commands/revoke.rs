@@ -799,14 +799,15 @@ impl Publish {
 
     /// Present the root, revoke the device, cut, and offer the cut; then say which of your devices took it,
     /// and that the device can never come back under its key. A root step that cannot finish says the
-    /// device is blocked on this machine only ([`partway`]).
+    /// device is blocked on this machine only ([`partway`]). Returns where the cut reached, so a line
+    /// after it can tell a published cut from one a newer list kept back.
     pub(crate) async fn run(
         self,
         home: &Home,
         prompt: &mut impl Prompt,
         dial: &impl Dial,
         err: &mut impl Write,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Reach> {
         let name = &self.name;
         let committed = async {
             let mut root =
@@ -834,7 +835,7 @@ impl Publish {
             err,
             "to add {name} again, first run this at its console: swoosh leave --new-key"
         )?;
-        Ok(())
+        Ok(reach)
     }
 }
 

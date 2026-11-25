@@ -25,10 +25,11 @@ A client on the laptop connects to `127.0.0.1:5432`. If `swoosh serve` is runnin
 if `serve` stops, `forward` ends with `error: swoosh serve stopped here and ended the connection to me/nas`. `swoosh forward me/nas logs - | less` puts the stream on
 stdout instead.
 
-When one connection to the port fails to open, `forward` keeps listening and prints one line on stderr:
-`warning: a connection to me/nas failed: <why>`. It prints no more until a connection works again. A
-connection that opened never warns. A listener stays up across a dropped connection. It ends when a new
-connection is refused: a revoke, a lapsed badge or link, or `swoosh serve` stopping. See [troubleshooting](../../troubleshooting.md#warning-a-connection-to-menas-failed).
+When one connection to the port fails to open, `forward` keeps listening and prints a warning on stderr:
+`warning: a connection to me/nas failed: <why>`, with `Still listening for new connections.` under it. It prints no
+more until a connection works again. A connection that opened never warns. A listener stays up across a dropped
+connection. It ends with an error when the machine refuses a new connection (the service was turned off there, or it
+no longer admits you) or when `swoosh serve` stops. See [troubleshooting](../../troubleshooting.md#warning-a-connection-to-menas-failed).
 
 **Things to know.** The local end is required: nothing defaults to the terminal or to the served port.
 `unix:<path>` is not built yet. A [link you were given](../../keys.md#using-a-grant-you-were-given) goes where

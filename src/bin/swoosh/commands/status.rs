@@ -1204,6 +1204,75 @@ mod tests {
         assert_eq!(log, ["Finish"]);
     }
 
+    /// `status <machine>`'s part of the no-transport rule, on both paths: the line reads `me/nas, path:
+    /// <path>, rtt <n> ms`, then what the machine serves, and nothing printed, the error included, names
+    /// the transport. A probe through `serve` that answered ends with no error, so the error's part is
+    /// read off one that broke, whose line and error print on stdout and stderr.
+    #[tokio::test(start_paused = true)]
+    async fn default_output_names_no_transport() {
+        use swoosh::serve::control_codec::PathReply;
+        use swoosh::testkit::{Script, ScriptedPeer};
+
+        use crate::commands::through_serve::tests::{Dialing, book, empty_home, machine, nas};
+
+        let answering = ServicesSession {
+            reply: Ok(catalog_of(&["web=echo:"])),
+        };
+        let direct = ConnInfo {
+            path: Path::Direct,
+            ..ConnInfo::default()
+        };
+        let (out, log, ended) = through_serve(&answering, [PathReply::Sample(direct)]).await;
+        ended.expect("a probe through serve that answered exits 0");
+        let serve = (out, log.join("\n"), Ok(()));
+        // Through `serve`, a probe whose stream broke prints its line and its error, exit 1.
+        let ((out, log, ended), _) = through_serve_as(&BrokenSession, Probe::Ping, [], None).await;
+        assert!(ended.is_err(), "a broken probe exits 1");
+        assert_eq!(
+            out,
+            "me/nas: reached, but the probe failed (stream: peer went away)\n"
+        );
+        assert_eq!(
+            log,
+            [
+                "stderr: error: me/nas: reached, but the probe failed",
+                "Finish"
+            ]
+        );
+        for printed in [&out, &log.join("\n")] {
+            for word in ["via", "iroh", "transport"] {
+                assert!(!printed.contains(word), "broken: {word}: {printed}");
+            }
+        }
+        let peer = ScriptedPeer::new(nas(), [Script::Lists(vec!["web"])]);
+        let node = bifrost::Node::new(peer, bifrost::NoDiscovery);
+        let peers = swoosh::peers::Peers::new(&node);
+        let home = empty_home("status-no-transport");
+        let ran = Dialing::of(&["status", "me/nas"])
+            .by_own_bind(&peers, &home, node.node_id(), &machine(&book(), "me/nas"))
+            .await;
+        let own = (ran.out, ran.err, ran.ended);
+        for (route, (out, err, ended), path) in
+            [("serve", serve, "direct"), ("own", own, "unknown")]
+        {
+            let error = ended
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_default();
+            let line = out.strip_prefix(&format!("me/nas, path: {path}, rtt "));
+            let rtt = line.and_then(|line| line.split_once(" ms; serving: web\n"));
+            assert!(
+                rtt.is_some_and(|(rtt, rest)| rtt.parse::<f64>().is_ok() && rest.is_empty()),
+                "{route}: {out}"
+            );
+            for printed in [&out, &err, &error] {
+                for word in ["via", "iroh", "transport"] {
+                    assert!(!printed.contains(word), "{route}: {word}: {printed}");
+                }
+            }
+        }
+    }
+
     /// When the reading after the probe fails, the line keeps the probe's own round trip and drops
     /// `path:`, stderr warns once, and the exit stays the probe's.
     #[tokio::test(start_paused = true)]

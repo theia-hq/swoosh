@@ -320,11 +320,27 @@ impl UidSocket {
                 _ => ControlError::Io(error),
             })?;
         let path = || PathBuf::clone(&self.socket);
-        // The uid first: another user's listener is Untrusted whatever the record says.
-        let peer = checker(stream.as_raw_fd())
-            .ok()
-            .filter(|peer| peer.uid == euid())
-            .ok_or_else(|| ControlError::Untrusted { path: path() })?;
+        // The uid first: another user's listener, or one the kernel names no process for, is
+        // UntrustedPeer whatever the record says. One line covers another user, a failed query and a
+        // pid 0 across pid namespaces, so the log keeps which it was.
+        let peer = match checker(stream.as_raw_fd()) {
+            Ok(peer) if peer.uid == euid() => peer,
+            Ok(peer) => {
+                tracing::debug!(
+                    uid = peer.uid,
+                    pid = %peer.pid,
+                    "another user's process answers the control socket"
+                );
+                return Err(ControlError::UntrustedPeer { path: path() });
+            }
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "the control socket's listener gave no uid and pid to check"
+                );
+                return Err(ControlError::UntrustedPeer { path: path() });
+            }
+        };
         // This user's listener, but not the process `serve.lock` records, or no record to read: a cause
         // of its own, naming the process that answered.
         let unattributed = || ControlError::Unattributed {
@@ -692,9 +708,17 @@ struct PeerCredentials {
 
 impl PeerCredentials {
     fn from_kernel(uid: u32, pid: libc::pid_t) -> io::Result<Self> {
+        // The uid and the raw pid ride the error, so the log of a refused peer still names them.
+        let unnamed = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("uid {uid}, pid {pid}: no process to check"),
+            )
+        };
         let pid = u32::try_from(pid)
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?
-            .try_into()?;
+            .ok()
+            .and_then(|pid| ProcessId::try_from(pid).ok())
+            .ok_or_else(unnamed)?;
         Ok(Self { uid, pid })
     }
 }
