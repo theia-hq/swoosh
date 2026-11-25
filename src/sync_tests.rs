@@ -1124,7 +1124,7 @@ async fn served_exchange(home: &Home, request: &[u8]) -> std::io::Result<Vec<u8>
     let exposer = Router::new(nauthy::Gate::rooted(root().verify_key(), store))
         .member_service(
             SYNC_SERVICE.parse().unwrap(),
-            crate::serve::Exchange::new(home.clone()),
+            crate::serve::control::Sync::new(home.clone()),
         )
         .unwrap()
         .expose()

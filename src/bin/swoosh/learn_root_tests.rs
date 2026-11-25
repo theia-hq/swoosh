@@ -520,7 +520,7 @@ async fn the_root_route_is_lookup_root() {
     )
     .await
     .unwrap();
-    let (router, _devices) = swoosh::serve::bind_lookup(Router::new(gate), &home)
+    let (router, _watched) = swoosh::serve::control::bind_exchanges(Router::new(gate), &home)
         .await
         .unwrap();
     assert!(

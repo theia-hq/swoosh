@@ -10,18 +10,18 @@ use crate::home::Home;
 /// and held update afresh on every exchange, so a pin or an update written while `serve` runs is the one
 /// it answers from next, with no restart. It never signs: an update it takes was signed by the root, and
 /// it folds one only on a device of that root.
-pub struct Exchange {
+pub struct Sync {
     home: Home,
 }
 
-impl Exchange {
+impl Sync {
     /// Build the `control.sync` handler over `home`.
     pub fn new(home: Home) -> Self {
         Self { home }
     }
 }
 
-impl Handler for Exchange {
+impl Handler for Sync {
     // GATED, because only a device of this root exchanges updates: no legitimate public use.
     type Exposure = Never;
 
