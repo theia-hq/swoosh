@@ -26,7 +26,8 @@ use bifrost_iroh::Endpoint;
 use nauthy::{Link, Request};
 use swoosh::credential::Credential;
 use swoosh::reaching::BindRole;
-use swoosh::serve::CONTROL_STOP_SERVICE;
+use swoosh::serve::CONTROL_SERVE_SERVICE;
+use swoosh::serve::control::{self, Answer};
 use swoosh::serve::control_codec::{self, ControlError, Response};
 use swoosh::testkit::TestRoot;
 use swoosh::transport::PeerHint;
@@ -614,9 +615,9 @@ async fn a_pin_written_under_serve_is_trusted_without_restart() {
     assert!(echoes(&mut write, &mut read).await, "and served");
 }
 
-/// One of your devices stops a `serve --quiet` over `control.stop`, and the stopped machine still says who
-/// did, on stderr: the one trail a stop leaves, so `--quiet` must not take it. The member reads the ack and
-/// closes, and the machine exits 0 having printed no banner.
+/// One of your devices stops a `serve --quiet` over `control.serve`, and the stopped machine still says who
+/// did, on stderr: the one trail a stop leaves, so `--quiet` must not take it. The member sends `Stop`,
+/// reads `Done` and closes, and the machine exits 0 having printed no banner.
 #[tokio::test]
 async fn a_quiet_serve_stopped_over_the_wire_says_who_stopped_it() {
     let scratch = Scratch::new("quiet-stop");
@@ -629,22 +630,37 @@ async fn a_quiet_serve_stopped_over_the_wire_says_who_stopped_it() {
         let badge = root.device_badge(dialer_id(0x4c), in_an_hour()).unwrap();
         let session = Connector::to_node(
             served.key,
-            CONTROL_STOP_SERVICE.parse().unwrap(),
+            CONTROL_SERVE_SERVICE.parse().unwrap(),
             Some(badge),
         )
         .open_service(&node)
         .await
         .expect("connect");
-        let (mut write, mut read) = open(&session)
-            .await
-            .expect("one of your devices is admitted at control.stop");
-        let mut ack = [0u8; 1];
-        tokio::time::timeout(Duration::from_secs(10), read.read_exact(&mut ack))
-            .await
-            .expect("the ack arrives within the deadline")
-            .expect("the node acks the stop over a real transport");
-        assert_eq!(ack[0], swoosh::serve::STOP_ACK);
-        write.shutdown().await.expect("the member closes its side");
+        // This machine is no device, so its first round has no one to ask and ends at once; a stop that
+        // races it is answered `NotYet` and asked again.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (mut write, mut read) = open(&session)
+                .await
+                .expect("one of your devices is admitted at control.serve");
+            write
+                .write_all(&[control::Request::Stop.encode()])
+                .await
+                .unwrap();
+            let mut answer = [0u8; 1];
+            tokio::time::timeout(Duration::from_secs(10), read.read_exact(&mut answer))
+                .await
+                .expect("the answer arrives within the deadline")
+                .expect("the node answers the stop over a real transport");
+            write.shutdown().await.expect("the member closes its side");
+            match Answer::decode(answer[0]) {
+                Some(Answer::Done) => break,
+                Some(Answer::NotYet) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => panic!("the stop was not answered Done: {other:?}"),
+            }
+        }
     }
 
     let status = served.exited().await;
@@ -659,6 +675,30 @@ async fn a_quiet_serve_stopped_over_the_wire_says_who_stopped_it() {
         !printed.lines().any(|line| line.starts_with("  key  ")),
         "--quiet prints no banner: {printed}"
     );
+}
+
+/// A running `serve` binds no `control.stop`: one of your devices asking for it gets the uniform
+/// refusal a name it does not serve gets, while the same device is admitted at `control.serve` on the same
+/// machine. A stop has one route, so it has one hold and one revocation check.
+#[tokio::test]
+async fn control_stop_is_not_bound() {
+    let scratch = Scratch::new("no-control-stop");
+    let root = TestRoot::seeded(0x55);
+    swoosh::config::write_signet(&swoosh::testkit::lock(), &scratch.home(), root.node_id())
+        .unwrap();
+    let served = serve(&scratch.0, &["demo=echo:"]);
+    let node = dialer(0x4d, &served).await;
+    let badge = root.device_badge(dialer_id(0x4d), in_an_hour()).unwrap();
+    let session = |service: &str| {
+        Connector::to_node(served.key, service.parse().unwrap(), Some(badge.clone()))
+            .open_service(&node)
+    };
+    let admitted = session(CONTROL_SERVE_SERVICE).await.expect("connect");
+    open(&admitted)
+        .await
+        .expect("the same device is admitted at control.serve");
+    let stop = session("control.stop").await.expect("connect");
+    assert_not_admitted(&stop, "control.stop is no route of a running serve").await;
 }
 
 /// A fault right after the link is printed (its stdout is a closed pipe) still leaves the row on disk,

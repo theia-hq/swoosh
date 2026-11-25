@@ -213,8 +213,8 @@ reaching_verbs! {
     /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Send(send::SendCmd),
-    /// `swoosh stop me/<name>` for another of your devices, once resolved locally: reach its member-only
-    /// `control.stop` and trigger a graceful stop. Presents this device's membership badge, so it rides the
+    /// `swoosh stop me/<name>` for another of your devices, once resolved locally: ask its member-only
+    /// `control.serve` for a graceful stop. Presents this device's membership badge, so it rides the
     /// reach path under the persisted identity when one exists.
     Stop(stop::StopDevice),
     /// `swoosh sync`: exchange with every live device of your root. Presents this machine's standing and
@@ -1301,7 +1301,7 @@ impl Dialing {
             Self::Send(cmd) => nauthy::Service::clone(&cmd.service),
             Self::Forward(cmd) => nauthy::Service::clone(&cmd.service),
             Self::Proxy(cmd) => nauthy::Service::clone(&cmd.service),
-            Self::Stop(_) => swoosh::serve::CONTROL_STOP_SERVICE.parse()?,
+            Self::Stop(_) => swoosh::serve::CONTROL_SERVE_SERVICE.parse()?,
         })
     }
 

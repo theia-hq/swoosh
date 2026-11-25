@@ -62,6 +62,35 @@ pub fn lock() -> HomeWrite {
     HomeWrite::wait(&home).expect("take the scratch home's lock")
 }
 
+/// A gate admitting the devices of `root` and the cut built beside it, as `serve --admit` builds them for
+/// this machine `own`, over a fresh empty home: what a test binds `control.serve` with, since its
+/// revocations come only from the cut. The home is returned for its `revoked` file; the caller removes it.
+///
+/// # Panics
+///
+/// When the scratch home or the gate cannot be made.
+#[expect(
+    clippy::expect_used,
+    reason = "a test fixture that cannot build the gate stops the test"
+)]
+pub async fn admitting(root: NodeId, own: NodeId) -> (nauthy::Gate, crate::gate::AnchorCut, Home) {
+    static SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("swoosh-admitting-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::config::create_store_dir(&dir).expect("the scratch store dir");
+    let home = Home::resolve(Some(dir)).expect("a scratch home for the gate");
+    let (gate, cut) = crate::gate::anchored_admitting(
+        &home,
+        own,
+        Some(root.verify_key().expect("a usable root key")),
+        crate::serve::BoundTargets::default(),
+    )
+    .await
+    .expect("the gate builds");
+    (gate, cut, home)
+}
+
 /// Whether the `serve` gate of `home`, built as `serve` builds it for this machine `own`, admits the device
 /// `peer` presenting `standing` to the service `demo`. The gate reads `revoked` and never the list, so this
 /// asks what a dial is answered.

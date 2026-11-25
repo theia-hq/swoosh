@@ -145,8 +145,8 @@ All notable changes to swoosh, newest first.
   repeat what you typed.
 - **The `serve` banner and `service` list share one row layout.** A row that would pass 80 columns is split
   onto separate lines.
-- **`serve` syncs your device list as it starts, then once an hour.** Until that first sync ends, it refuses a
-  stop from another device.
+- **`serve` syncs your device list as it starts, then once an hour.** Until that first sync ends, it asks a
+  stop from another device to wait.
 - **`forward` replaces `reach`, and `proxy` replaces `fetch`.** `swoosh forward <machine> <service> <port | ->`
   always names where the bytes go: a local port, or `-` for stdout; with neither it stops and says so.
   `swoosh proxy <machine> <url>` takes the machine first, in place of `--via`. A machine serves a proxy with

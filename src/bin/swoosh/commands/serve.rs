@@ -49,10 +49,9 @@ use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, InstanceLock,
-    ProxyScope, RecvService, Resident, ServiceList, SingleError, Started, Stop,
-    StopAfterFirstRound, StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv,
-    classify_stop, control, extract_recv_services, refuse_recv_into_home,
+    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, InstanceLock, ProxyScope, RecvService,
+    Resident, ServiceList, SingleError, Started, StopKind, StopSource, Stopped, acquire_single,
+    bind_entry, bind_recv, classify_stop, control, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -595,11 +594,11 @@ impl ServeCmd {
         // The served names in the order the person gave them, for the banner and the per-service lines:
         // read from every entry, before the proxy and receive services were pulled out.
         let names = started.names();
-        // Every node answers its own `control.stop` and member-only `control.services`, always, whatever
+        // Every node answers its own `control.serve` and member-only `control.services`, always, whatever
         // else it serves: the node-lifecycle control surface is part of being a node, not a service the
         // operator opts into. Both are MEMBER-only (`.member_service` below): the gate admits a family
         // badge or a service slip, and the route's access floor then refuses anything that is not a
-        // whole-node member BEFORE any `Response::Ok`, so a delegate holding a `control.stop` slip cannot
+        // whole-node member BEFORE any `Response::Ok`, so a delegate holding a `control.serve` slip cannot
         // stop the node.
         //
         // Pull each proxy service out of the requested set BEFORE the router binds it, and de-merge: every
@@ -608,12 +607,12 @@ impl ServeCmd {
         // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention.
         let proxy = ProxyScope::extract(&mut requested)?;
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
-        // `--expires` timer, the gated `control.stop` handler, and the local socket `Stop` each hold a
+        // `--expires` timer, the gated `control.serve` handler, and the local socket `Stop` each hold a
         // CLONE as the node-control capability: they may REQUEST the stop, never tear the node down
         // themselves.
         let cancel = CancellationToken::new();
         // How the node was asked to stop, noted by whichever path fires `cancel` first: the socket stop,
-        // a Ctrl-C, or `control.stop` with the key that asked. Read once more at teardown, to say who.
+        // a Ctrl-C, or `control.serve` with the key that asked. Read once more at teardown, to say who.
         let stop_source = std::sync::Arc::new(StopSource::new());
         // The node BASE gate is the one the composition root built, the same in every standing. Opening
         // individual services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
@@ -645,12 +644,6 @@ impl ServeCmd {
             let name: Service = service.name().parse()?;
             router = bind_recv(router, name, service.out().to_owned(), activity.as_ref())?;
         }
-        // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's
-        // access class after the gate admits and before any `Response::Ok`.
-        router = router.member_service(
-            CONTROL_STOP_SERVICE.parse()?,
-            Stop::new(cancel.clone(), std::sync::Arc::clone(&stop_source)),
-        )?;
         // Declare both open overlays from the operator's raw names. The proof runs at `.expose()` below,
         // before anything is recorded or a banner advertises a service it will not serve.
         router = router
@@ -665,13 +658,17 @@ impl ServeCmd {
             router,
             cancel.clone(),
             std::sync::Arc::clone(&stop_source),
-            cut.revocations(),
+            &cut,
         )?;
         let router = router.member_service(
             CONTROL_SERVICES_SERVICE.parse()?,
             ServiceList::new(catalog.clone()),
         )?;
-        let exposer = held_exposer(router, enabled.clone(), &first_round, cut)?;
+        // The live oracle as it is: a remote stop's hold is `control.serve`'s own, read per request.
+        let exposer = router
+            .expose()?
+            .with_enabled(enabled.clone())
+            .with_live_cuts(cut);
 
         let home_lock = HomeWrite::take(&home).await?;
         ServeToml::update(&home_lock, &home, |file| {
@@ -759,7 +756,7 @@ impl ServeCmd {
         }
 
         // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
-        // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. It is an
+        // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.serve` stop gives. It is an
         // arm of the run, never a spawned task, so a run that stops first takes the timer with it.
         let expiry = expire(self.expires, cancel.clone());
         // Run until a stop, distinguishing a GRACEFUL stop from an ERRORED teardown: a requested stop is
@@ -783,7 +780,7 @@ impl ServeCmd {
                 unreachable!("serve.toml is checked until the node stops")
             }
         };
-        // One of your devices stopped it over `control.stop`: say which, on stderr and under `--quiet` too,
+        // One of your devices stopped it over `control.serve`: say which, on stderr and under `--quiet` too,
         // since any of them may stop any other and this line is the trail. Named from the book as it reads
         // now, not as it read at start, so a device that joined since is named; a book that does not read
         // leaves the whole key, never a failed stop.
@@ -795,7 +792,7 @@ impl ServeCmd {
                     swoosh::contacts::Contacts::default()
                 }
             };
-            eprintln!("{}", swoosh::serve::stopped_by(&contacts, key));
+            eprintln!("{}", control::stopped_by(&contacts, key));
         }
         // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
         // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic. It is stdout, so
@@ -830,7 +827,7 @@ impl ServeCmd {
 /// token fires, then the teardown unlinks the socket and drops the lock. Because the socket `Stop` cancels
 /// the SAME token the exposer watches, every arm classifies its result from the recorded [`StopKind`]
 /// rather than from the arm that won the poll: a socket stop renders [`Stopped::Local`], a wire
-/// `control.stop` or a `--expires` deadline renders [`Stopped::Requested`], and a Ctrl-C records itself and
+/// `control.serve` stop or a `--expires` deadline renders [`Stopped::Requested`], and a Ctrl-C records itself and
 /// renders [`Stopped::Interrupted`], so the kinds never collapse into one.
 async fn run_until_stopped<T: Transport, D: Discovery>(
     exposer: Exposer,
@@ -1121,22 +1118,6 @@ fn under_brew() -> bool {
     std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .is_ok_and(|exe| exe.starts_with(prefix))
-}
-
-/// Expose `router` with the live enable/disable oracle `enabled` and the live `cut` beside the proven public
-/// overlay. The oracle refuses `control.stop` until `first_round` has ended, so a device revoked while this
-/// machine was down cannot stop it again before it learns of the revocation. One function `serve` and its
-/// row both call, so the hold on `control.stop` cannot drop out of the run unnoticed.
-fn held_exposer(
-    router: Router,
-    enabled: impl tightbeam::enabled::EnabledServices + Send + Sync + 'static,
-    first_round: &control::FirstRound,
-    cut: AnchorCut,
-) -> eyre::Result<Exposer> {
-    Ok(router
-        .expose()?
-        .with_enabled(StopAfterFirstRound::new(enabled, first_round.hold()))
-        .with_live_cuts(cut))
 }
 
 /// How often a `serve` exchanges with your devices after its first round, give or take a tenth.

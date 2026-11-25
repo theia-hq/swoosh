@@ -35,7 +35,6 @@ mod services;
 mod serving;
 mod single;
 mod socket;
-mod stop;
 pub mod control_codec {
     pub use super::socket::{
         Attached, ControlError, DisabledList, Epoch, EpochError, LocalDetailCaptureError,
@@ -66,23 +65,13 @@ pub(crate) use self::lookup::answer as lookup_answer;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
 pub use self::services::ServiceList;
 pub use self::serving::{Added, EditError, Mistyped, ServingError, Started};
-pub use self::stop::{ACK_GRACE, STOP_ACK, Stop, StopAfterFirstRound, stopped_by};
-
-/// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
-/// teardown (the remote twin of a local Ctrl-C or a `--expires` deadline). The client verb is `swoosh stop`.
-///
-/// One unified `control.*` family covers both the reads (`control.status`) and the mutations
-/// (`control.stop`); the dotted name is the verbatim wire name,
-/// gated exact-name, so a grant for one method can never open another. Public so the `swoosh stop` client
-/// verb requests the SAME name the served handler is keyed under, one source of truth for the wire string.
-pub const CONTROL_STOP_SERVICE: &str = "control.stop";
 
 /// The node-control service that LISTS what this node serves: an admitted caller reaching it reads back the
 /// node's served services, each with its NAME and reach posture (gated behind a member badge, or open to
 /// anyone). A pure READ of what the exposer was built with, no mutable state and no authority granted. The
 /// client verb is `swoosh service --at <peer>`.
 ///
-/// GATED (`type Exposure = Never`, like `control.stop`): the service menu is member-only, so a stranger never
+/// GATED (`type Exposure = Never`, like `control.serve`): the service menu is member-only, so a stranger never
 /// learns what a node serves: existence and shape are revealed only AFTER admission, and this is the
 /// teaching read the wrong-name path deliberately withholds. One unified `control.*` family, the dotted
 /// name is the verbatim wire name. Public so the `swoosh service` client requests the SAME name the
@@ -124,7 +113,7 @@ pub const PROVEN_ROUTES: [&str; 2] = [RENEWAL_SERVICE, LOOKUP_ROOT_SERVICE];
 /// on the success path. This is the distinction a CI action reads, a deliberate stop is green.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
-    /// An owner requested the stop: an admitted `control.stop` caller, or a `--expires` deadline. The exposer's
+    /// An owner requested the stop: an admitted `control.serve` stop, or a `--expires` deadline. The exposer's
     /// `run` returned `Ok` because its teardown token fired, the ordinary end of a node's life.
     Requested,
     /// The local operator pressed Ctrl-C: the same graceful stop, driven from the keyboard rather than the
@@ -151,7 +140,7 @@ impl Stopped {
 /// Classify a finished resident run from its recorded [`StopSource`], never from the select arm
 /// that happened to complete: the socket `Stop` records [`StopKind::Socket`] before it cancels the
 /// token, so the local stop stays [`Stopped::Local`] even when the exposer arm wins the poll. A
-/// wire `control.stop` records the key that asked and a `--expires` deadline records nothing, so both
+/// wire `control.serve` stop records the key that asked and a `--expires` deadline records nothing, so both
 /// render as [`Stopped::Requested`]; a Ctrl-C records itself and renders [`Stopped::Interrupted`].
 pub fn classify_stop(source: Option<StopKind>) -> Stopped {
     match source {
@@ -283,7 +272,7 @@ fn bind_speed(router: Router, name: Service, public: &[Service]) -> eyre::Result
 /// `public` is the SAME open overlay the caller wants, so the helper applies it here and the engine choice
 /// runs on the same input, through the same [`bind_ping`]/[`bind_speed`] edges the product `serve` path
 /// uses: the open decision and the bound profile cannot drift. The caller adds any extra member-only routes
-/// (e.g. `control.stop`) after.
+/// (e.g. `control.serve`) after.
 ///
 /// EXACTLY the diagnostics a bare `serve` binds, and nothing else. This helper is what the integration
 /// proofs assemble their nodes from, so a route here that the product's bare set does not carry makes

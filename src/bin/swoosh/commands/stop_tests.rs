@@ -1,7 +1,7 @@
 //! `stop`'s tests: the machine shapes it refuses before anything binds, read against a real device home;
-//! the local stop over the control socket; and the remote stop over the in-process transport, its
-//! teardown race included: a peer that admits the session then vanishes before answering the control
-//! stream is never reported stopped, only unconfirmed, and a live peer behind the same failure stays loud.
+//! the local stop over the control socket; and the remote stop over `control.serve`: only `Done` is a stop,
+//! an open that fails stopped nothing, and once the request may have left every other ending is
+//! unconfirmed.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -22,19 +22,19 @@ use swoosh::node_client::ControlClient;
 use swoosh::peer::{OwnDevice, Peer};
 use swoosh::peers::{DialFailure, Hints, OpenError, Peers};
 use swoosh::roster::{Epoch, RevokedDevice, RosterDoc};
+use swoosh::serve::control::{Answer, Request};
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
-use swoosh::serve::{CONTROL_STOP_SERVICE, Resident, Stop, StopAfterFirstRound, StopKind, control};
+use swoosh::serve::{CONTROL_SERVE_SERVICE, Resident, StopKind, StopSource, control};
 use swoosh::serve_toml::LiveServeToml;
 use swoosh::streams::{Ask, Opened, OwnBind, StreamSource, Unopened};
 use swoosh::testkit::{HostilePeer, STANDING_UNTIL, TestNode, TestRoot, TestWrite};
 use swoosh::transport::ReachArgs;
-use tightbeam::enabled::EnabledServices as _;
 use tightbeam::tunnel::{CancellationToken, Router, ServiceCatalog};
-use tokio::io::DuplexStream;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 
 use super::{
-    A_LINK_STOPS_NOTHING, Aim, STOP_SETTLE, StopCmd, StopDevice, Target, Usage, Yours, confirmed,
-    stop_line,
+    A_LINK_STOPS_NOTHING, ANSWER_DEADLINE, Aim, StopCmd, StopDevice, Target, Usage, Yours,
+    confirmed, stop_line,
 };
 use crate::commands::route::Route;
 
@@ -289,7 +289,7 @@ async fn stop_accepts_only_own_device_names() {
     let link = swoosh::link::Link::from(
         TestRoot::seeded(ROOT)
             .bound_slip(
-                &CONTROL_STOP_SERVICE.parse().expect("a service"),
+                &CONTROL_SERVE_SERVICE.parse().expect("a service"),
                 TestNode::seeded(NAS).verify_key(),
                 nauthy::Request::expires_in(Duration::from_secs(300)),
             )
@@ -599,17 +599,28 @@ fn services_off(leaf: &Path) -> LiveServeToml {
 
 /// Start a [`Running`] resident under `leaf`, reading the services off from `off`.
 fn resident_reading(leaf: PathBuf, off: LiveServeToml) -> Running {
+    resident_stopping(leaf, off, CancellationToken::new(), Arc::default())
+}
+
+/// Start a [`Running`] resident under `leaf`, reading the services off from `off`, stopping through
+/// `cancel` and noting the stop in `source`: the node's one teardown token and record, as `serve` shares
+/// them between the socket and `control.serve`.
+fn resident_stopping(
+    leaf: PathBuf,
+    off: LiveServeToml,
+    cancel: CancellationToken,
+    source: Arc<StopSource>,
+) -> Running {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    let cancel = CancellationToken::new();
     let resident = Arc::new(Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
         None,
         empty_catalog(),
         off,
         cancel.clone(),
-        Arc::default(),
+        source,
     ));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
@@ -664,40 +675,69 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
     let _ = std::fs::remove_dir_all(&leaf);
 }
 
-/// A bare `stop` on the machine stops its `serve` while the first sync round still holds `control.stop`
-/// shut: the hold wraps the oracle the gate asks, as `serve` wires it, and the socket never passes the
-/// gate. Hold the socket too and a machine that cannot reach its devices could not be stopped where it
-/// runs until its first round gave up.
+/// A bare `stop` stops the machine while its first sync round still holds a remote stop: the node and
+/// its socket share one teardown token, as `serve` wires them, and at the same moment one of your
+/// devices asking over `control.serve` is answered `NotYet`. Hold the socket stop too and a machine that
+/// cannot reach its devices could not be stopped where it runs until its first round gave up.
 #[tokio::test]
 async fn bare_stop_is_never_held() {
-    let leaf = scratch("held");
-    let off = services_off(&leaf);
-    let (_first_round, hold) = control::FirstRound::new();
-    let held = StopAfterFirstRound::new(off.clone(), hold);
-    let Running {
-        leaf,
-        client,
-        cancel,
-        resident,
-        serving,
-    } = resident_reading(leaf, off);
-    let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
-    assert!(
-        !held.is_enabled(&stop),
-        "the first round has not ended, so a remote stop is refused"
-    );
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = Node::new(MemTransport::bind(), NoDiscovery);
+            let host_id = host.node_id();
+            let cancel = CancellationToken::new();
+            let source = Arc::new(StopSource::new());
+            let (gate, cut, home) =
+                swoosh::testkit::admitting(TestRoot::seeded(ROOT).node_id(), host_id).await;
+            let (router, _catalog, _first_round) = control::bind_serve(
+                swoosh::serve::diagnostics(Router::new(gate), &[]).expect("the diagnostics bind"),
+                cancel.clone(),
+                Arc::clone(&source),
+                &cut,
+            )
+            .expect("control.serve binds");
+            let exposer = router.expose().expect("the exposer builds");
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+            let leaf = scratch("held");
+            let off = services_off(&leaf);
+            let Running {
+                leaf,
+                client,
+                resident,
+                serving,
+                ..
+            } = resident_stopping(leaf, off, cancel.clone(), Arc::clone(&source));
 
-    super::stop_resolved(&client)
-        .await
-        .expect("the bare stop is answered before the first round ends");
-    assert!(cancel.is_cancelled(), "and it stopped the node");
-    assert_eq!(resident.stop_source().first(), Some(StopKind::Socket));
-    serving
-        .await
-        .expect("the serve task joins")
-        .expect("serve ends Ok");
+            // The round holds a remote stop: your device is told `NotYet`.
+            let me = Node::new(MemTransport::bind(), NoDiscovery);
+            let (base, standing) = standing_home("held-remote", Some(ROOT), me.node_id()).await;
+            let error = stop_by_own_bind(&me, &standing, host_id)
+                .await
+                .expect_err("the first round holds a remote stop");
+            assert_eq!(error, NOT_YET);
+            assert!(!cancel.is_cancelled(), "and stops nothing");
 
-    let _ = std::fs::remove_dir_all(&leaf);
+            super::stop_resolved(&client)
+                .await
+                .expect("the bare stop is answered while the round holds a remote stop");
+            assert!(cancel.is_cancelled(), "and it stopped the node");
+            assert_eq!(resident.stop_source().first(), Some(StopKind::Socket));
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("the node's run ends on the socket stop")
+                .expect("the run task joins");
+            serving
+                .await
+                .expect("the serve task joins")
+                .expect("serve ends Ok");
+            for dir in [leaf, base, home.dir().to_path_buf()] {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        })
+        .await;
 }
 
 /// `stop me/<name>` for `node`, resolved, as the root would hand it to the reach path.
@@ -780,14 +820,14 @@ async fn stop_from(
         .map_err(|report| format!("{report:#}"))
 }
 
-/// `stop me/pi` stops pi over its member-only `control.stop`, with nothing else on pi: no ssh served and
+/// `stop me/pi` stops pi over its member-only `control.serve`, with nothing else on pi: no ssh served and
 /// no control socket. The stop lands (pi's run ends), and the line names pi by its name and short key.
 /// Route the stop through ssh and pi stays up.
 #[tokio::test]
-async fn stop_me_name_reaches_control_stop_with_no_ssh_or_socket_on_the_peer() {
+async fn stop_me_name_reaches_control_serve_with_no_ssh_or_socket_on_the_peer() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (pi, run) = pi_serving_only_control_stop();
+            let (pi, run) = pi_serving(Round::Over).await;
             let me = Node::new(MemTransport::bind(), NoDiscovery);
             let (base, home) = standing_home("reach", Some(ROOT), me.node_id()).await;
             let line = stop_by_own_bind(&me, &home, pi)
@@ -809,7 +849,7 @@ async fn stop_me_name_reaches_control_stop_with_no_ssh_or_socket_on_the_peer() {
 async fn stop_remote_line_names_name_and_key() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (pi, run) = pi_serving_only_control_stop();
+            let (pi, run) = pi_serving(Round::Over).await;
             let me = Node::new(MemTransport::bind(), NoDiscovery);
             let (base, home) = standing_home("line", Some(ROOT), me.node_id()).await;
             let line = stop_by_own_bind(&me, &home, pi).await.expect("pi stops");
@@ -827,24 +867,20 @@ async fn stop_remote_line_names_name_and_key() {
         .await;
 }
 
-/// A device that refuses the stop gets the rule, then what to try: a machine that has just started refuses
-/// a stop from another device until its first sync with your devices ends, and the wire says only "not
-/// admitted", so one line alone tells your own device it is not one of yours.
+/// A device that refuses the stop gets the rule alone: a machine that has just started answers `NotYet`,
+/// so a refusal is never that case. Add a "try again" detail and a machine of another root is told to wait
+/// for a stop it will never take.
 #[tokio::test]
-async fn a_refused_stop_says_to_try_again_if_the_machine_has_just_started() {
+async fn a_refused_stop_has_no_just_started_detail() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (pi, run) = pi_serving_only_control_stop();
+            let (pi, run) = pi_serving(Round::Over).await;
             let me = Node::new(MemTransport::bind(), NoDiscovery);
             let (base, home) = standing_home("refused", Some(BOB), me.node_id()).await;
             let error = stop_by_own_bind(&me, &home, pi)
                 .await
                 .expect_err("pi refuses a badge of another root");
-            assert_eq!(
-                error,
-                "me/pi refused: only your own devices can stop it\n  If it has just started, try again in \
-                 a minute."
-            );
+            assert_eq!(error, "me/pi refused: only your own devices can stop it");
             assert!(!run.is_finished(), "and pi keeps serving");
             run.abort();
             let _ = std::fs::remove_dir_all(base);
@@ -852,58 +888,73 @@ async fn a_refused_stop_says_to_try_again_if_the_machine_has_just_started() {
         .await;
 }
 
-/// pi, serving the member-only `control.stop` and the gated diagnostics behind a gate rooted at `ROOT`, and
-/// no ssh and no control socket, on its own task: its key, and its run. A second route is there because a
-/// node exposing exactly one service answers every name with it, which would let a dial to any service land
-/// on `control.stop`.
-fn pi_serving_only_control_stop() -> (NodeId, tokio::task::JoinHandle<()>) {
+/// A stop to a machine still in its first sync round is answered `NotYet`: the two lines that say so, an
+/// error (exit 1), and the machine still serving. Read `NotYet` as a stop or as an unknown reply and the
+/// person is told the wrong thing about a machine that will take the stop in a minute.
+#[tokio::test]
+async fn stop_in_the_first_round_prints_not_yet() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (pi, run) = pi_serving(Round::Running).await;
+            let me = Node::new(MemTransport::bind(), NoDiscovery);
+            let (base, home) = standing_home("not-yet", Some(ROOT), me.node_id()).await;
+            let error = stop_by_own_bind(&me, &home, pi)
+                .await
+                .expect_err("a machine in its first round is not stopped");
+            assert_eq!(error, NOT_YET);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!run.is_finished(), "and pi keeps serving");
+            run.abort();
+            let _ = std::fs::remove_dir_all(base);
+        })
+        .await;
+}
+
+/// The lines a `NotYet` ends `stop me/pi` with.
+const NOT_YET: &str = "me/pi has just started; it cannot be stopped from here yet\n  pi is still syncing \
+                       with your devices. Try again in a minute.";
+
+/// Whether pi's first sync round has ended, so it takes a remote stop.
+enum Round {
+    /// Ended: a stop is answered `Done`.
+    Over,
+    /// Still running, and never ends: a stop is answered `NotYet`.
+    Running,
+}
+
+/// pi, serving `control.serve` (bound through the same `bind_serve` `serve` calls) and the gated
+/// diagnostics behind a gate rooted at `ROOT`, with its first round as `round` says, and no ssh and no
+/// control socket, on its own task: its key, and its run. A second route is there because a node exposing
+/// exactly one service answers every name with it.
+async fn pi_serving(round: Round) -> (NodeId, tokio::task::JoinHandle<()>) {
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let pi = host.node_id();
     let cancel = CancellationToken::new();
-    let denylist = std::env::temp_dir().join(format!("swoosh-stop-pi-{}", std::process::id()));
-    let gate = tightbeam::tunnel::resolve_gate(
-        Some(TestRoot::seeded(ROOT).node_id()),
-        nauthy::Denylist::load(denylist).expect("an empty denylist"),
+    let (gate, cut, _home) = swoosh::testkit::admitting(TestRoot::seeded(ROOT).node_id(), pi).await;
+    let (router, _catalog, first_round) = control::bind_serve(
+        swoosh::serve::diagnostics(Router::new(gate), &[]).expect("the diagnostics bind"),
+        cancel.clone(),
+        Arc::new(StopSource::new()),
+        &cut,
     )
-    .expect("a gate");
-    let exposer = swoosh::serve::diagnostics(Router::new(gate), &[])
-        .expect("the diagnostics bind")
-        .member_service(
-            CONTROL_STOP_SERVICE.parse().expect("a service"),
-            Stop::new(cancel.clone(), Arc::default()),
-        )
-        .expect("control.stop binds")
-        .expose()
-        .expect("the exposer builds");
+    .expect("control.serve binds");
+    // A round dropped before it finished holds a stop for good, as a run whose round never ends does.
+    match round {
+        Round::Over => first_round.finished(),
+        Round::Running => drop(first_round),
+    }
+    let exposer = router.expose().expect("the exposer builds");
     let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
     (pi, run)
-}
-
-/// The teardown-race fixture over the in-process transport: the peer admits the client's connect and its
-/// first control stream, then drops both WITHOUT answering (the v0.8.0 failure), and unregisters the
-/// endpoint, so the client's probe finds the listener gone.
-async fn answer_with_a_vanishing_peer(peer: &MemTransport) {
-    let session = peer.accept().await.expect("the client connects");
-    let stream = session
-        .accept_bi()
-        .await
-        .expect("the client opens the control stream");
-    // The listener goes away between the stream open and its answer: the deterministic form of the
-    // observed race, where the node tears itself down right after the stop request lands.
-    peer.close().await;
-    drop(stream);
-    drop(session);
 }
 
 /// What a [`gate_by_service`] device does with a stream, by the service its request asks for.
 #[derive(Clone, Copy)]
 enum Gate {
-    /// Read the request and drop the stream unanswered: a request that left, then a path that dropped.
+    /// Read the request and drop the stream unanswered: an open that breaks after the dial.
     Drops,
     /// Admit it and hold the stream open.
     Admits,
-    /// Refuse it: a live gate saying no.
-    Refuses,
 }
 
 /// A device on `peer` that takes every connection and every stream on it, reads each stream's request,
@@ -932,12 +983,6 @@ fn gate_by_service(
                         .push(request.service.clone());
                     match gate(&request.service) {
                         Gate::Drops => drop((write, read)),
-                        Gate::Refuses => {
-                            let refusal = bifrost::Refusal::NotAdmitted;
-                            let _ = tightbeam::protocol::Response::Refused(refusal)
-                                .write(&mut write)
-                                .await;
-                        }
                         Gate::Admits => {
                             let _ = tightbeam::protocol::Response::Ok.write(&mut write).await;
                             tokio::spawn(async move {
@@ -953,91 +998,58 @@ fn gate_by_service(
     (heard, connections)
 }
 
-/// A peer gone behind a failed stream open is never reported stopped: the open never saw the admission, so
-/// the node tearing itself down for this request and a path that dropped it look the same. The line says
-/// the stop is unconfirmed and the verb fails. Report the race as a stop and a dropped path prints
-/// `Stopped` while the machine keeps serving.
+/// A stop whose open broke after the dial stopped nothing, and says so at once: the request rides only an
+/// opened stream, so it never left. Asked once and only once; no `ping`, no wait. Probe the device after a
+/// failed open and a live device costs seconds to say the same.
 #[tokio::test(start_paused = true)]
-async fn a_peer_gone_behind_a_failed_stream_open_is_unconfirmed() {
+async fn a_failed_stop_open_stopped_nothing() {
     let dialer = Node::new(MemTransport::bind(), NoDiscovery);
-    let (base, home) = standing_home("gone", None, dialer.node_id()).await;
-    let peer = MemTransport::bind();
-    let peer_id = peer.node_id();
-
-    let (result, ()) = tokio::join!(
-        stop_by_own_bind(&dialer, &home, peer_id),
-        answer_with_a_vanishing_peer(&peer),
-    );
-    let error = result.expect_err("nothing proves the stop");
-    assert_eq!(
-        error,
-        "could not confirm that me/pi stopped; it may still be serving"
-    );
-    let _ = std::fs::remove_dir_all(base);
-}
-
-/// Only the ack byte or a clean close proves an admitted stop. A wrong byte or a stream broken any other way
-/// proves nothing, and the line says the device may still be serving. Take any read error as the node going
-/// down and a reset path prints `Stopped`.
-#[test]
-fn only_the_ack_or_a_clean_close_confirms_the_stop() {
-    let Ok(Aim::Device(pi)) = Aim::parse("me/pi") else {
-        panic!("me/pi is a device shape");
-    };
-    let broken = |kind| Err(io::Error::from(kind));
-    assert!(confirmed(Ok(swoosh::serve::STOP_ACK), &pi).is_ok());
-    assert!(confirmed(broken(io::ErrorKind::UnexpectedEof), &pi).is_ok());
-    let line = |answer| format!("{:#}", confirmed(answer, &pi).expect_err("not confirmed"));
-    assert_eq!(
-        line(Ok(b'x')),
-        "me/pi sent an unknown reply to the stop; it may still be serving"
-    );
-    // `NotConnected` is what a lost QUIC connection reads as (iroh's): the node's teardown and a dropped
-    // path look the same there, so neither proves the stop.
-    for kind in [
-        io::ErrorKind::NotConnected,
-        io::ErrorKind::ConnectionReset,
-        io::ErrorKind::ConnectionAborted,
-        io::ErrorKind::Other,
-    ] {
-        assert_eq!(
-            line(broken(kind)),
-            "could not confirm that me/pi stopped; it may still be serving",
-            "{kind:?}"
-        );
-    }
-}
-
-/// A LIVE peer behind the same failed stream open is never masked: its gate still answers the probe's
-/// `ping`, if only to refuse it, so the stop fails, naming the machine, and says nothing was stopped. A
-/// connect alone is not live: a node mid-teardown can still accept one.
-#[tokio::test(start_paused = true)]
-async fn a_live_peer_behind_a_failed_stream_open_is_not_masked() {
-    let dialer = Node::new(MemTransport::bind(), NoDiscovery);
-    let (base, home) = standing_home("live", None, dialer.node_id()).await;
+    let (base, home) = standing_home("dropped", None, dialer.node_id()).await;
     let peer = MemTransport::bind();
     let peer_id = peer.node_id();
     let (heard, _) = gate_by_service(peer, |service| match service {
-        CONTROL_STOP_SERVICE => Gate::Drops,
-        _ => Gate::Refuses,
+        CONTROL_SERVE_SERVICE => Gate::Drops,
+        _ => Gate::Admits,
     });
 
     let error = stop_by_own_bind(&dialer, &home, peer_id)
         .await
-        .expect_err("a live peer behind the failed stream must stay an error");
-    assert_eq!(error, "could not stop me/pi\n  Nothing was stopped.");
-    // The probe asked the still-live gate after the failure, for `ping` and never a second stop.
+        .expect_err("a broken open is never a stop");
+    assert_eq!(error, NOTHING_STOPPED);
     assert_eq!(
         *heard.lock().expect("the record"),
-        [CONTROL_STOP_SERVICE, swoosh::reach::PING_SERVICE]
+        [CONTROL_SERVE_SERVICE],
+        "one open, never a probe"
     );
     let _ = std::fs::remove_dir_all(base);
+
+    // Each open that fails after the dial, on a source that answers at once: the line, with no time spent.
+    let failed: &[fn() -> Unopened] = &[
+        || Unopened::Own(OpenError::Timeout),
+        || Unopened::Own(OpenError::Open(bifrost::Error::Stream("reset".into()))),
+        || Unopened::Refused(OpenRefusal::Timeout),
+        || Unopened::Refused(OpenRefusal::Broken(bifrost::RefusalDetail::bounded("cut"))),
+        || {
+            Unopened::Refused(OpenRefusal::PeerUnreadable(
+                bifrost::RefusalDetail::bounded("garbled"),
+            ))
+        },
+    ];
+    for (at, stop) in failed.iter().enumerate() {
+        let started = tokio::time::Instant::now();
+        let (error, opened) = met(*stop).await;
+        assert_eq!(error, NOTHING_STOPPED, "row {at}");
+        assert_eq!(opened, [CONTROL_SERVE_SERVICE], "row {at}");
+        assert_eq!(started.elapsed(), Duration::ZERO, "row {at}: at once");
+    }
 }
 
+/// The lines an open that failed after the dial ends `stop me/pi` with.
+const NOTHING_STOPPED: &str = "could not stop me/pi\n  Nothing was stopped.";
+
 /// By own bind, with a held Main session to the device already open, the stop dials a connection of its
-/// own. A device that reads the request and drops the stream gets exactly one request, and the line is
-/// the probe's: the held session still answers, so nothing was stopped. Ride the held session and its
-/// failed open is retried on a fresh dial, which sends the stop a second time.
+/// own. A device that reads the open and drops the stream gets exactly one, and nothing was stopped. Ride
+/// the held session and its failed open is retried on a fresh dial, which asks a second time.
 #[tokio::test(start_paused = true)]
 async fn a_stop_never_rides_a_held_session() {
     let dialer = Node::new(MemTransport::bind(), NoDiscovery);
@@ -1045,7 +1057,7 @@ async fn a_stop_never_rides_a_held_session() {
     let peer = MemTransport::bind();
     let peer_id = peer.node_id();
     let (heard, connections) = gate_by_service(peer, |service| match service {
-        CONTROL_STOP_SERVICE => Gate::Drops,
+        CONTROL_SERVE_SERVICE => Gate::Drops,
         _ => Gate::Admits,
     });
     let peers = Peers::new(&dialer);
@@ -1071,14 +1083,14 @@ async fn a_stop_never_rides_a_held_session() {
     let error = stop_from(source, peer_id, dialer.node_id())
         .await
         .expect_err("nothing proves the stop");
-    assert_eq!(error, "could not stop me/pi\n  Nothing was stopped.");
+    assert_eq!(error, NOTHING_STOPPED);
     let stops = heard
         .lock()
         .expect("the record")
         .iter()
-        .filter(|service| *service == CONTROL_STOP_SERVICE)
+        .filter(|service| *service == CONTROL_SERVE_SERVICE)
         .count();
-    assert_eq!(stops, 1, "the stop's request went out once");
+    assert_eq!(stops, 1, "the stop's stream was asked for once");
     assert_eq!(
         connections.load(Ordering::SeqCst),
         2,
@@ -1088,12 +1100,10 @@ async fn a_stop_never_rides_a_held_session() {
     let _ = std::fs::remove_dir_all(base);
 }
 
-/// A source whose `control.stop` open meets what `stop` gives and whose every other open, the probe's,
-/// meets what `probe` gives, noting each open's service.
+/// A source whose every open meets what `stop` gives, noting each open's service.
 #[derive(Clone, Copy)]
 struct Meets<'a> {
     stop: fn() -> Unopened,
-    probe: fn() -> Unopened,
     opened: &'a RefCell<Vec<String>>,
 }
 
@@ -1102,34 +1112,21 @@ impl StreamSource for Meets<'_> {
     type Read = DuplexStream;
 
     async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
-        let service = ask.service.as_str().to_owned();
-        let meets = if service == CONTROL_STOP_SERVICE {
-            self.stop
-        } else {
-            self.probe
-        };
-        self.opened.borrow_mut().push(service);
-        Err(meets())
+        self.opened
+            .borrow_mut()
+            .push(ask.service.as_str().to_owned());
+        Err((self.stop)())
     }
 }
 
 /// One row of the stop's open table: what its open meets, and the line the run ends with.
 type Row = (fn() -> Unopened, &'static str);
 
-/// A probe the device's live gate refuses.
-fn live() -> Unopened {
-    Unopened::Refused(OpenRefusal::Peer(PeerRefusal::Unavailable(
-        bifrost::RefusalDetail::bounded("off"),
-    )))
-}
-
-/// `stop me/pi` by own bind over a source whose stop meets `stop` and whose probe meets `probe`: its
-/// error, and the services it opened.
-async fn met(stop: fn() -> Unopened, probe: fn() -> Unopened) -> (String, Vec<String>) {
+/// `stop me/pi` by own bind over a source whose open meets `stop`: its error, and the services it opened.
+async fn met(stop: fn() -> Unopened) -> (String, Vec<String>) {
     let opened = RefCell::new(Vec::new());
     let source = Meets {
         stop,
-        probe,
         opened: &opened,
     };
     let pi = TestNode::seeded(PI).node_id();
@@ -1139,21 +1136,14 @@ async fn met(stop: fn() -> Unopened, probe: fn() -> Unopened) -> (String, Vec<St
     (error, opened.into_inner())
 }
 
-/// Each row of the stop's open table by own bind, the table the resident's path reads too: a dial that
-/// never connected says nothing was stopped; a live gate's refusal is the refused line; an open that
-/// failed after the dial probes, and a gate still answering stopped nothing while one gone over the
-/// window is unconfirmed; and an outcome that says nothing of the device is the route's line, with no
-/// probe. Say nothing was stopped where a request may have left, and a stop that landed reads as
-/// failed.
+/// Each row of the stop's open table by own bind, the table the resident's path reads too: an unreached
+/// device and a refusing one keep their own lines, every other failed open says nothing was stopped, and
+/// an outcome that says nothing of the device is the route's line. One open each, never a second.
 #[tokio::test(start_paused = true)]
 async fn one_open_table_for_stop() {
     let unreachable =
         "could not reach me/pi: it is offline or not running swoosh serve\n  Nothing was stopped.";
-    let refused = "me/pi refused: only your own devices can stop it\n  If it has just started, try \
-                   again in a minute.";
-    let still_live = "could not stop me/pi\n  Nothing was stopped.";
-    let gone = "could not confirm that me/pi stopped; it may still be serving";
-    let stop_only = vec![CONTROL_STOP_SERVICE.to_owned()];
+    let serve_only = vec![CONTROL_SERVE_SERVICE.to_owned()];
     let named: &[Row] = &[
         (
             || {
@@ -1177,54 +1167,29 @@ async fn one_open_table_for_stop() {
         ),
         (
             || Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
-            refused,
+            "me/pi refused: only your own devices can stop it",
+        ),
+        (|| Unopened::Own(OpenError::Timeout), NOTHING_STOPPED),
+        (
+            || Unopened::Refused(OpenRefusal::Broken(bifrost::RefusalDetail::bounded("cut"))),
+            NOTHING_STOPPED,
         ),
     ];
     for (at, (stop, line)) in named.iter().enumerate() {
         assert_eq!(
-            met(*stop, live).await,
-            ((*line).to_owned(), stop_only.clone()),
+            met(*stop).await,
+            ((*line).to_owned(), serve_only.clone()),
             "row {at}"
         );
     }
-    // The request may have left: the probe asks the gate, and only a live one says nothing was stopped.
-    let probed: &[fn() -> Unopened] = &[
-        || Unopened::Own(OpenError::Timeout),
-        || Unopened::Own(OpenError::Open(bifrost::Error::Stream("reset".into()))),
-        || Unopened::Refused(OpenRefusal::Timeout),
-        || Unopened::Refused(OpenRefusal::Broken(bifrost::RefusalDetail::bounded("cut"))),
-        || {
-            Unopened::Refused(OpenRefusal::PeerUnreadable(
-                bifrost::RefusalDetail::bounded("garbled"),
-            ))
-        },
-    ];
-    for (at, stop) in probed.iter().enumerate() {
-        let (error, opened) = met(*stop, live).await;
-        assert_eq!(error, still_live, "row {at}");
-        assert_eq!(
-            opened,
-            [CONTROL_STOP_SERVICE, swoosh::reach::PING_SERVICE],
-            "row {at}"
-        );
-        let (error, opened) = met(*stop, || {
-            Unopened::Own(OpenError::Unreachable(DialFailure::TimedOut))
-        })
-        .await;
-        assert_eq!(error, gone, "row {at}");
-        // One probe decides, and it is never a second stop.
-        assert_eq!(
-            opened,
-            [CONTROL_STOP_SERVICE, swoosh::reach::PING_SERVICE],
-            "row {at}"
-        );
-    }
-    // No claim about the device: the route's own line, with no probe.
+    // No claim about the device: the route's own line.
     let routed: &[fn() -> Unopened] = &[
         || Unopened::Own(OpenError::Busy),
         || Unopened::Refused(OpenRefusal::Busy),
         || Unopened::Refused(OpenRefusal::StandingEnded),
         || Unopened::Home(eyre::eyre!("the badge could not be read")),
+        || Unopened::ServeGone,
+        || Unopened::Skew,
     ];
     let device = stop_device(TestNode::seeded(PI).node_id());
     let machine = device
@@ -1239,130 +1204,316 @@ async fn one_open_table_for_stop() {
     };
     for (at, stop) in routed.iter().enumerate() {
         let line = format!("{:#}", route.line(stop(), &machine).await);
-        assert_eq!(
-            met(*stop, live).await,
-            (line, stop_only.clone()),
-            "row {at}"
-        );
+        assert_eq!(met(*stop).await, (line, serve_only.clone()), "row {at}");
     }
 }
 
-/// A source whose `control.stop` open fails `Timeout` after the request may have left, and whose gate
-/// refuses the probe (live) until `closes` after `began`, then meets `after`; noting each open's service
-/// and when, after `began`, it ran. With no `closes` the gate never closes.
+/// How a [`Device`] double answers the stop on its opened stream.
 #[derive(Clone, Copy)]
-struct Settling<'a> {
-    began: tokio::time::Instant,
-    closes: Option<Duration>,
-    after: fn() -> Unopened,
-    opened: &'a RefCell<Vec<(String, Duration)>>,
+enum Answers {
+    /// This byte, then the end of its side.
+    Byte(u8),
+    /// The end of its side, with no answer: what no conforming node sends.
+    EndsClean,
+    /// Nothing, holding its side open: a stalled `serve` or a device that will not say.
+    Silent,
 }
 
-impl StreamSource for Settling<'_> {
-    type Write = TestWrite<DuplexStream>;
+/// What a [`Device`] saw on the stop's stream, in order.
+#[derive(Debug, PartialEq, Eq)]
+enum Saw {
+    /// The request's byte.
+    Request(u8),
+    /// The stop's side ended before any answer was sent.
+    EndedBeforeAnswer,
+    /// Its answer was sent.
+    Answered,
+    /// The stop's side ended.
+    Ended,
+}
+
+/// Where the stop's own write half stalls, as a transport waiting on a peer that grants nothing would.
+#[derive(Clone, Copy)]
+enum Stalls {
+    /// Nowhere: every write and the close go through.
+    Never,
+    /// On the request's write.
+    Write,
+    /// On the close.
+    Close,
+    /// Nowhere: the half is aborted as it opens, so the request's write fails.
+    Aborted,
+}
+
+/// The stop's write half over a [`Device`]: the pipe to it, stalling as `stalls` says.
+struct Pipe {
+    inner: TestWrite<DuplexStream>,
+    stalls: Stalls,
+}
+
+impl tokio::io::AsyncWrite for Pipe {
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> core::task::Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        match this.stalls {
+            Stalls::Write => core::task::Poll::Pending,
+            Stalls::Never | Stalls::Close | Stalls::Aborted => {
+                core::pin::Pin::new(&mut this.inner).poll_write(cx, buf)
+            }
+        }
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<io::Result<()>> {
+        core::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match this.stalls {
+            Stalls::Close => core::task::Poll::Pending,
+            Stalls::Never | Stalls::Write | Stalls::Aborted => {
+                core::pin::Pin::new(&mut this.inner).poll_shutdown(cx)
+            }
+        }
+    }
+}
+
+impl bifrost::WriteEnd for Pipe {
+    fn abort(&mut self) {
+        self.inner.abort();
+    }
+
+    fn delivered(self) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        self.inner.delivered()
+    }
+}
+
+/// A source whose open gives a stream to a device that answers as `answers` says, noting what it saw in
+/// `saw`, over a write half that stalls as `stalls` says.
+#[derive(Clone, Copy)]
+struct Device<'a> {
+    answers: Answers,
+    stalls: Stalls,
+    saw: &'a Arc<Mutex<Vec<Saw>>>,
+}
+
+impl StreamSource for Device<'_> {
+    type Write = Pipe;
     type Read = DuplexStream;
 
-    async fn open(&self, ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
-        let service = ask.service.as_str().to_owned();
-        let at = self.began.elapsed();
-        let stop = service == CONTROL_STOP_SERVICE;
-        self.opened.borrow_mut().push((service, at));
-        Err(if stop {
-            Unopened::Own(OpenError::Timeout)
-        } else if self.closes.is_some_and(|closes| at >= closes) {
-            (self.after)()
-        } else {
-            live()
+    async fn open(&self, _ask: &Ask) -> Result<Opened<Self::Write, Self::Read>, Unopened> {
+        let (up, mut from_stop) = tokio::io::duplex(64);
+        let (mut to_stop, down) = tokio::io::duplex(64);
+        let (answers, saw) = (self.answers, Arc::clone(self.saw));
+        tokio::spawn(async move {
+            let note = |seen| saw.lock().expect("the record").push(seen);
+            let mut request = [0u8; 1];
+            if from_stop.read_exact(&mut request).await.is_err() {
+                return;
+            }
+            note(Saw::Request(request[0]));
+            let mut rest = Vec::new();
+            match answers {
+                Answers::Byte(byte) => {
+                    // A stop that ends its side before it reads the answer lets the node's teardown drop
+                    // the answer in flight: watch for that end before answering.
+                    let mut more = [0u8; 1];
+                    let early =
+                        tokio::time::timeout(Duration::from_millis(50), from_stop.read(&mut more))
+                            .await;
+                    if matches!(early, Ok(Ok(0))) {
+                        note(Saw::EndedBeforeAnswer);
+                    }
+                    let _ = to_stop.write_all(&[byte]).await;
+                    note(Saw::Answered);
+                    let _ = to_stop.shutdown().await;
+                }
+                Answers::EndsClean => {
+                    let _ = to_stop.shutdown().await;
+                }
+                Answers::Silent => {}
+            }
+            let _ = from_stop.read_to_end(&mut rest).await;
+            note(Saw::Ended);
+            // Held, so a silent device never ends its side: only the stop's own bound ends the wait.
+            let _held = to_stop;
+            core::future::pending::<()>().await;
+        });
+        Ok(Opened {
+            info: bifrost::ConnInfo::default(),
+            write: {
+                let mut inner = TestWrite::from(up);
+                if matches!(self.stalls, Stalls::Aborted) {
+                    bifrost::WriteEnd::abort(&mut inner);
+                }
+                Pipe {
+                    inner,
+                    stalls: self.stalls,
+                }
+            },
+            read: down,
         })
     }
 }
 
-/// `stop me/pi` by own bind over a [`Settling`] gate that closes at `closes` and then meets `after`: its
-/// error, each open with when it ran, and how long the run took, on the paused clock.
-async fn settled(
-    closes: Option<Duration>,
-    after: fn() -> Unopened,
-) -> (String, Vec<(String, Duration)>, Duration) {
-    let opened = RefCell::new(Vec::new());
-    let began = tokio::time::Instant::now();
-    let source = Settling {
-        began,
-        closes,
-        after,
-        opened: &opened,
-    };
-    let error = stop_from(
-        source,
-        TestNode::seeded(PI).node_id(),
-        TestNode::seeded(DESK).node_id(),
+/// `stop me/pi` over a [`Device`] that answers as `answers` says: its line or error, what the device
+/// saw, and how long the run took on the paused clock.
+async fn answered(answers: Answers) -> (Result<String, String>, Vec<Saw>, Duration) {
+    stalled(answers, Stalls::Never).await
+}
+
+/// [`answered`], over a write half that stalls as `stalls` says.
+async fn stalled(answers: Answers, stalls: Stalls) -> (Result<String, String>, Vec<Saw>, Duration) {
+    let saw = Arc::new(Mutex::new(Vec::new()));
+    let started = tokio::time::Instant::now();
+    let ended = tokio::time::timeout(
+        ANSWER_DEADLINE * 2,
+        stop_from(
+            Device {
+                answers,
+                stalls,
+                saw: &saw,
+            },
+            TestNode::seeded(PI).node_id(),
+            TestNode::seeded(DESK).node_id(),
+        ),
     )
     .await
-    .expect_err("an open that gave no stream is the run's error");
-    (error, opened.into_inner(), began.elapsed())
+    .expect("the stop ends within its own bound");
+    let took = started.elapsed();
+    // The device notes the stop's end on its own task: give it the turn to.
+    tokio::task::yield_now().await;
+    let seen = core::mem::take(&mut *saw.lock().expect("the record"));
+    (ended, seen, took)
 }
 
-/// A stop whose open timed out after it landed: the node keeps its gate up through its ack grace, then
-/// closes it. The probe waits out the settle, so it meets the closed gate and the stop is unconfirmed.
-/// Probe at once and the gate still up inside the grace prints "Nothing was stopped" for a node that then
-/// stops.
+/// The stop writes its one request, reads the answer with its side still open, and only then ends its
+/// side: the node stops once it sees that end, so its teardown cannot drop `Done` in flight. End the side
+/// first and a stop that worked can read as unconfirmed.
 #[tokio::test(start_paused = true)]
-async fn stop_ambiguous_open_landed_gate_up_is_unconfirmed() {
-    let (error, opened, _) = settled(Some(swoosh::serve::ACK_GRACE), || {
-        Unopened::Own(OpenError::Unreachable(DialFailure::TimedOut))
-    })
-    .await;
+async fn stop_reads_the_answer_before_it_closes() {
+    let (ended, seen, _) = answered(Answers::Byte(Answer::Done.encode())).await;
+    assert!(ended.is_ok_and(|line| line.starts_with("Stopped me/pi (")));
     assert_eq!(
-        error,
-        "could not confirm that me/pi stopped; it may still be serving"
-    );
-    assert_eq!(
-        opened,
+        seen,
         [
-            (CONTROL_STOP_SERVICE.to_owned(), Duration::ZERO),
-            (swoosh::reach::PING_SERVICE.to_owned(), STOP_SETTLE),
-        ],
-        "one probe, none before the settle"
-    );
-}
-
-/// A gate still answering after the settle proves no stop landed: nothing was stopped, on one probe.
-/// Read the gate's refusal as gone and a live device that ignored the stop reads as maybe stopped.
-#[tokio::test(start_paused = true)]
-async fn stop_gate_live_past_the_settle_stopped_nothing() {
-    let (error, opened, _) = settled(None, live).await;
-    assert_eq!(error, "could not stop me/pi\n  Nothing was stopped.");
-    assert_eq!(
-        opened,
-        [
-            (CONTROL_STOP_SERVICE.to_owned(), Duration::ZERO),
-            (swoosh::reach::PING_SERVICE.to_owned(), STOP_SETTLE),
+            Saw::Request(Request::Stop.encode()),
+            Saw::Answered,
+            Saw::Ended
         ]
     );
 }
 
-/// A probe that meets `serve` gone or of another version says nothing of the device and every later open
-/// would repeat it: the route's line, at once, with no window spent after the settle. Read it as the
-/// device gone and the stop is unconfirmed after the whole window.
+/// A stream that ends cleanly with no answer is not a stop: no conforming node ends it before its answer,
+/// so only a broken or hostile one does, and the line says the stop is unconfirmed. Read that end as the
+/// node going down and a double or a broken node prints `Stopped` for a machine still serving.
 #[tokio::test(start_paused = true)]
-async fn stop_probe_meeting_serve_gone_ends_at_once() {
-    let device = stop_device(TestNode::seeded(PI).node_id());
-    let machine = device
-        .peer
-        .machine(&Contacts::default())
-        .expect("a key is one machine");
-    let bound = crate::probe_route_tests::bound();
-    let route = Route::Own {
-        peer: &device.peer,
-        bound: &bound,
-        this: TestNode::seeded(DESK).node_id(),
+async fn a_clean_end_with_no_answer_is_not_stopped() {
+    let (ended, seen, _) = answered(Answers::EndsClean).await;
+    assert_eq!(
+        ended,
+        Err("could not confirm that me/pi stopped; it may still be serving".to_owned())
+    );
+    assert_eq!(seen[0], Saw::Request(Request::Stop.encode()));
+}
+
+/// A device that takes the request and never answers holds `stop` for the answer bound and no longer,
+/// then the stop is unconfirmed: the request may have landed. Wait on with no bound and a stalled `serve`
+/// or a device that keeps the stream open holds a CI teardown forever.
+#[tokio::test(start_paused = true)]
+async fn a_silent_device_is_unconfirmed_at_the_answer_bound() {
+    let (ended, seen, took) = answered(Answers::Silent).await;
+    assert_eq!(
+        ended,
+        Err("could not confirm that me/pi stopped; it may still be serving".to_owned())
+    );
+    assert_eq!(took, ANSWER_DEADLINE);
+    assert_eq!(seen, [Saw::Request(Request::Stop.encode()), Saw::Ended]);
+}
+
+/// A close that never completes holds `stop` to the same bound and no longer, and the stop it read `Done`
+/// for is still reported: the answer is in hand. Await the close with no bound and a transport whose close
+/// waits on a peer granting nothing holds a CI teardown forever.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_close_ends_at_the_answer_bound() {
+    let (ended, _, took) = stalled(Answers::Byte(Answer::Done.encode()), Stalls::Close).await;
+    assert!(ended.is_ok_and(|line| line.starts_with("Stopped me/pi (")));
+    assert_eq!(took, ANSWER_DEADLINE);
+}
+
+/// A request whose write never completes, or fails, may still have left: the stop ends at the bound, or at
+/// once, unconfirmed. Read a failed write as nothing stopped and a byte that left before the break is a
+/// stop reported as none.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_or_failed_request_write_is_unconfirmed() {
+    let unconfirmed = "could not confirm that me/pi stopped; it may still be serving";
+    let (ended, seen, took) = stalled(Answers::Silent, Stalls::Write).await;
+    assert_eq!(ended, Err(unconfirmed.to_owned()));
+    assert_eq!(took, ANSWER_DEADLINE);
+    assert!(seen.is_empty(), "the request never arrived: {seen:?}");
+
+    // A failed write, over a source whose write half is aborted as it opens.
+    let (ended, seen, _) = stalled(Answers::Silent, Stalls::Aborted).await;
+    assert_eq!(ended, Err(unconfirmed.to_owned()));
+    assert!(seen.is_empty(), "the request never arrived: {seen:?}");
+}
+
+/// Each answer byte, over the double: `NotYet` is the first-round lines, and `BadRequest` or a byte no
+/// node sends is an unknown reply. Neither is a stop.
+#[tokio::test(start_paused = true)]
+async fn every_answer_but_done_is_no_stop() {
+    let unknown = "me/pi sent an unknown reply to the stop; it may still be serving";
+    for (byte, line) in [
+        (Answer::NotYet.encode(), NOT_YET),
+        (Answer::BadRequest.encode(), unknown),
+        (Request::Stop.encode(), unknown),
+        (0xff, unknown),
+    ] {
+        let (ended, _, _) = answered(Answers::Byte(byte)).await;
+        assert_eq!(ended, Err(line.to_owned()), "{byte}");
+    }
+}
+
+/// Only `Done` proves the stop. `NotYet` is a machine that took none yet; another byte, a clean end with no
+/// answer, a stream broken any other way, or no answer in time proves nothing, and the line says the device
+/// may still be serving.
+#[test]
+fn only_done_confirms_the_stop() {
+    let Ok(Aim::Device(pi)) = Aim::parse("me/pi") else {
+        panic!("me/pi is a device shape");
     };
-    let ended: &[fn() -> Unopened] = &[|| Unopened::ServeGone, || Unopened::Skew];
-    for (at, after) in ended.iter().enumerate() {
-        let line = format!("{:#}", route.line(after(), &machine).await);
-        let (error, opened, took) = settled(Some(Duration::ZERO), *after).await;
-        assert_eq!(error, line, "row {at}");
-        assert_eq!(opened.len(), 2, "row {at}: one probe: {opened:?}");
-        assert_eq!(took, STOP_SETTLE, "row {at}: ends at once after the settle");
+    let broken = |kind| Err(io::Error::from(kind));
+    assert!(confirmed(Ok(Answer::Done.encode()), &pi).is_ok());
+    let line = |answer| format!("{:#}", confirmed(answer, &pi).expect_err("not confirmed"));
+    assert_eq!(line(Ok(Answer::NotYet.encode())), NOT_YET);
+    assert_eq!(
+        line(Ok(b'x')),
+        "me/pi sent an unknown reply to the stop; it may still be serving"
+    );
+    // `NotConnected` is what a lost QUIC connection reads as (iroh's): the node's teardown and a dropped
+    // path look the same there, so neither proves the stop.
+    for kind in [
+        io::ErrorKind::UnexpectedEof,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::NotConnected,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+        io::ErrorKind::Other,
+    ] {
+        assert_eq!(
+            line(broken(kind)),
+            "could not confirm that me/pi stopped; it may still be serving",
+            "{kind:?}"
+        );
     }
 }
 
@@ -1374,7 +1525,7 @@ fn stop_refuses_a_link_or_a_path_without_echoing_it() {
     let link = swoosh::link::Link::from(
         TestRoot::seeded(ROOT)
             .bound_slip(
-                &CONTROL_STOP_SERVICE.parse().expect("a service"),
+                &CONTROL_SERVE_SERVICE.parse().expect("a service"),
                 TestNode::seeded(NAS).verify_key(),
                 nauthy::Request::expires_in(Duration::from_secs(300)),
             )
@@ -1416,7 +1567,7 @@ fn stop_refuses_a_link_beside_an_unknown_flag_without_echoing_it() {
     let link = swoosh::link::Link::from(
         TestRoot::seeded(ROOT)
             .bound_slip(
-                &CONTROL_STOP_SERVICE.parse().expect("a service"),
+                &CONTROL_SERVE_SERVICE.parse().expect("a service"),
                 TestNode::seeded(NAS).verify_key(),
                 nauthy::Request::expires_in(Duration::from_secs(300)),
             )

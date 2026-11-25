@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-use nauthy::Denylist;
 use tightbeam::tunnel::{CancellationToken, Router, ServiceCatalog};
 
 use super::{
     CONTROL_SERVE_SERVICE, LOOKUP_ROOT_SERVICE, RENEWAL_SERVICE, SYNC_SERVICE, StopSource, lookup,
 };
+use crate::gate::AnchorCut;
 use crate::home::Home;
 
 mod renewal;
@@ -19,7 +19,9 @@ mod serve;
 mod sync;
 
 pub use renewal::{Known, Renewal};
-pub use serve::{Answer, FirstRound, Hold, REQUEST_DEADLINE, Request, Serve};
+pub use serve::{
+    ACK_GRACE, Answer, FirstRound, Hold, REQUEST_DEADLINE, Request, Serve, stopped_by,
+};
 pub use sync::Sync;
 
 /// Bind `control.serve` ([`CONTROL_SERVE_SERVICE`]) member-only, over the catalog cut here, once, from the
@@ -29,18 +31,26 @@ pub use sync::Sync;
 ///
 /// Member-only (`member_service`), so the gate's badge and tightbeam's member floor both stand before any
 /// `Response::Ok`: a stranger and a delegate's slip are refused there and never reach the handler. A stop
-/// is stopped through `cancel` and noted in `stop_source`; `revoked` is the store the gate reads, asked
-/// again at a stop.
+/// is stopped through `cancel` and noted in `stop_source`. A stop is asked again of `cut`'s revocations:
+/// `cut` is the one [`anchored`](crate::gate::anchored) built beside `router`'s gate, and the store is read
+/// from it here, so the handler can only ever hold the gate's own instance. A store of its own would stat
+/// on its own debounce and answer a key revoked since the gate's last look.
 pub fn bind_serve(
     router: Router,
     cancel: CancellationToken,
     stop_source: Arc<StopSource>,
-    revoked: Arc<Denylist>,
+    cut: &AnchorCut,
 ) -> eyre::Result<(Router, ServiceCatalog, FirstRound)> {
     let name = CONTROL_SERVE_SERVICE.parse()?;
     let catalog = router.catalog(Some(CONTROL_SERVE_SERVICE.parse()?));
     let (first_round, hold) = FirstRound::new();
-    let handler = Serve::new(catalog.clone(), cancel, stop_source, hold, revoked);
+    let handler = Serve::new(
+        catalog.clone(),
+        cancel,
+        stop_source,
+        hold,
+        cut.revocations(),
+    );
     let router = router.member_service(name, handler)?;
     Ok((router, catalog, first_round))
 }

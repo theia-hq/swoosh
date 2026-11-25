@@ -1246,6 +1246,10 @@ pub(crate) enum Reply {
     Observed,
     /// Attach, send these bytes and End, and answer the client's End with Landed.
     Exchange(Vec<u8>),
+    /// Attach, read the client's one-frame request, then send these bytes and End and answer the client's
+    /// End with Landed, as [`Exchange`](Self::Exchange) does. A client that ends its upload before the
+    /// answer leaves gets no answer: the connection drops, as a node's teardown would drop it.
+    Answer(Vec<u8>),
     /// Reply as a `serve` of another control version.
     Version,
     /// Hear the Open and never reply, still serving every other connection.
@@ -1363,6 +1367,16 @@ pub(crate) fn routed(
                         held.push((at, tokio::spawn(hold(conn, Some(download), landed))));
                     }
                 }
+                Reply::Answer(download) => {
+                    if Response::Attached(Attached::from(direct()))
+                        .write(&mut conn)
+                        .await
+                        .is_ok()
+                    {
+                        let landed = std::sync::Arc::clone(&landed);
+                        held.push((at, tokio::spawn(answer_request(conn, download, landed))));
+                    }
+                }
                 // Spawned, so the resident hears the Open it waits on. Each wait also ends at `stop`, so a
                 // client that never sends the other Open fails its row rather than hanging it.
                 Reply::VersionAfterHeld => {
@@ -1455,6 +1469,60 @@ async fn hold(
             }
             upload.extend_from_slice(&body);
         }
+    }
+    let _ = conn.read_to_end(&mut upload).await;
+    upload
+}
+
+/// Hold one attached connection as the resident answering a request: read the client's first Data frame,
+/// then, unless the client's End follows within a moment, send `download` and End and answer the client's
+/// End with Landed, telling `landed`. An End before the answer drops the connection unanswered. Returns the
+/// upload's raw frames once the client hangs up.
+async fn answer_request(
+    mut conn: tokio::net::UnixStream,
+    download: Vec<u8>,
+    landed: std::sync::Arc<tokio::sync::Notify>,
+) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut upload = Vec::new();
+    let mut header = [0; 7];
+    if conn.read_exact(&mut header).await.is_err() {
+        return upload;
+    }
+    upload.extend_from_slice(&header);
+    let mut body = vec![0; usize::from(u16::from_be_bytes([header[5], header[6]]))];
+    if conn.read_exact(&mut body).await.is_err() {
+        return upload;
+    }
+    upload.extend_from_slice(&body);
+    // A client that waits for the answer sends nothing more until it has one.
+    if let Ok(Ok(_)) = tokio::time::timeout(
+        core::time::Duration::from_millis(50),
+        conn.read_exact(&mut header),
+    )
+    .await
+    {
+        upload.extend_from_slice(&header);
+        return upload;
+    }
+    let mut sent = data(&download);
+    sent.extend_from_slice(&END);
+    if conn.write_all(&sent).await.is_err() {
+        return upload;
+    }
+    while conn.read_exact(&mut header).await.is_ok() {
+        upload.extend_from_slice(&header);
+        if header == END {
+            let _ = conn.write_all(&LANDED).await;
+            landed.notify_one();
+            break;
+        }
+        let mut body = vec![0; usize::from(u16::from_be_bytes([header[5], header[6]]))];
+        if conn.read_exact(&mut body).await.is_err() {
+            break;
+        }
+        upload.extend_from_slice(&body);
     }
     let _ = conn.read_to_end(&mut upload).await;
     upload

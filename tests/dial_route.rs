@@ -471,7 +471,7 @@ async fn stop_through_serve_asks_no_passphrase() {
     stop.cancel();
     resident.await.unwrap();
     assert_eq!(status, Some(1), "{stderr}");
-    assert_eq!(*seen.opens.lock().unwrap(), ["control.stop"], "{stderr}");
+    assert_eq!(*seen.opens.lock().unwrap(), ["control.serve"], "{stderr}");
     assert!(!stderr.contains("passphrase"), "{stderr}");
     assert!(
         stderr.starts_with("error: too many connections open through swoosh serve on this machine"),

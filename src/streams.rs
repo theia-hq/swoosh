@@ -34,6 +34,11 @@ use crate::serve::control_codec::{
 /// One stream asked for: the peer, where to try it first, the service, the lane, and the link typed as
 /// the peer, if one was.
 ///
+/// It carries no bytes for the service: nothing rides with or ahead of the open, on either path, and a
+/// request is written only on the stream an open returns. So an open that fails delivered no request,
+/// which is what lets `stop` say nothing was stopped on every failed open. Keep it so: a field here that
+/// sent bytes early would make that line a lie.
+///
 /// No `Debug`: the slip is a credential, and no log line needs it.
 pub struct Ask {
     /// The machine to reach.

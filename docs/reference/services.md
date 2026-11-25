@@ -110,26 +110,25 @@ tightbeam's loopback reflector: it returns the caller's own bytes and opens no h
 How your devices keep one list of your devices. Every `swoosh serve` serves it, whatever else you name;
 no entry can name it. Your other devices reach it on their own, and with `swoosh sync`.
 
-- Posture: your devices only, like the rest of `control.*`: a `swoosh:` link naming it is refused at the
+- Posture: your devices only, like `control.serve`: a `swoosh:` link naming it is refused at the
   route. Unmetered: the handler sets no cap, and no public form can ever open it.
 - Limits: [sync](commands/sync.md).
 
-### <a id="control-stop"></a>`control.stop` and `control.services`
+### <a id="control-serve"></a>`control.serve`
 
-Node control: `control.stop` ends the node, `control.services` lists what it serves. Both are always
-served, whatever else you name.
+How your devices stop a machine. Every `swoosh serve` serves it, whatever else you
+name; no entry can name it.
 
-- Posture: member-only, stricter than gated. A stranger is refused at the gate, and a `swoosh:` grant
-  naming one is refused at the route, so only your own devices can stop or inspect a node.
-- Client: `swoosh stop me/<name>` and `swoosh status me/<name>`.
-- Limits: [stop](commands/stop.md) and [status](commands/status.md).
+- Posture: your devices only. Anyone else is refused, and a `swoosh:` link naming it is refused at the route.
+- Client: `swoosh stop me/<name>`.
+- Limits: [stop](commands/stop.md).
 
 ## Posture
 
 Family-gated is the default: your own devices and peers you granted a capability.
 
 - `--public <name>` opens a named service with a safe public form: `ping`, `speed`, an origin-scoped
-  fetch, a forward, `echo`. `sshd:` is refused by name, and `control.*` is refused as member-only.
+  fetch, a forward, `echo`. `sshd:` is refused by name, and `control.*` names are refused.
 - `--public-unsafe <name>` is the separate, louder opt-in for a raw source (`file:`, `fifo:`, `stdin:`).
   `--public` refuses those and points here; a handler or forward named here is pointed back at
   `--public`.

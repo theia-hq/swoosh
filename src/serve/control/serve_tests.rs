@@ -6,8 +6,8 @@ use nauthy::Denylist;
 use tightbeam::tunnel::{self, CancellationToken, Router};
 use tokio::io::{self, AsyncWrite};
 
-use super::{Answer, FirstRound, Hold, REQUEST_DEADLINE, Request, Serve};
-use crate::serve::{ACK_GRACE, StopKind, StopSource};
+use super::{ACK_GRACE, Answer, FirstRound, Hold, REQUEST_DEADLINE, Request, Serve};
+use crate::serve::{StopKind, StopSource};
 use crate::testkit::{TestNode, TestRoot};
 
 /// Each request and answer survives its byte, and every other byte is refused rather than read as one:
