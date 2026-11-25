@@ -49,10 +49,10 @@ use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FirstRound,
-    InstanceLock, ProxyScope, RecvService, Resident, ServiceList, SingleError, Started, Stop,
-    StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv, classify_stop, control,
-    extract_recv_services, refuse_recv_into_home,
+    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, InstanceLock,
+    ProxyScope, RecvService, Resident, ServiceList, SingleError, Started, Stop,
+    StopAfterFirstRound, StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv,
+    classify_stop, control, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -656,18 +656,22 @@ impl ServeCmd {
         router = router
             .public(public)
             .public_unsafe(self.public_unsafe.clone());
-        // Snapshot the served catalog ONCE, here, for the `control.services` read handler AND the control
-        // socket read to serve. `self_listing` renders the one row being built: `control.services` itself.
-        let catalog = router.catalog(Some(CONTROL_SERVICES_SERVICE.parse()?));
+        // `control.serve` cuts the served catalog ONCE, here, after every other route and both overlays,
+        // for its own list, the `control.services` read handler AND the control socket read to serve. It
+        // lists itself. A stop on it waits for the first sync round, and is refused to a key the gate's
+        // own revocations now hold, so a device revoked by that round cannot stop this machine on a stream
+        // it opened before the round ended.
+        let (router, catalog, first_round) = control::bind_serve(
+            router,
+            cancel.clone(),
+            std::sync::Arc::clone(&stop_source),
+            cut.revocations(),
+        )?;
         let router = router.member_service(
             CONTROL_SERVICES_SERVICE.parse()?,
             ServiceList::new(catalog.clone()),
         )?;
-        // Wire the live enable/disable oracle and the live cut beside the proven public overlay. The oracle
-        // refuses `control.stop` until this run's first sync round has ended, so a device revoked while
-        // this machine was down cannot stop it again before it learns of the revocation.
-        let (exposer, first_round) = FirstRound::hold(router.expose()?, enabled.clone());
-        let exposer = exposer.with_live_cuts(cut);
+        let exposer = held_exposer(router, enabled.clone(), &first_round, cut)?;
 
         let home_lock = HomeWrite::take(&home).await?;
         ServeToml::update(&home_lock, &home, |file| {
@@ -1119,18 +1123,34 @@ fn under_brew() -> bool {
         .is_ok_and(|exe| exe.starts_with(prefix))
 }
 
+/// Expose `router` with the live enable/disable oracle `enabled` and the live `cut` beside the proven public
+/// overlay. The oracle refuses `control.stop` until `first_round` has ended, so a device revoked while this
+/// machine was down cannot stop it again before it learns of the revocation. One function `serve` and its
+/// row both call, so the hold on `control.stop` cannot drop out of the run unnoticed.
+fn held_exposer(
+    router: Router,
+    enabled: impl tightbeam::enabled::EnabledServices + Send + Sync + 'static,
+    first_round: &control::FirstRound,
+    cut: AnchorCut,
+) -> eyre::Result<Exposer> {
+    Ok(router
+        .expose()?
+        .with_enabled(StopAfterFirstRound::new(enabled, first_round.hold()))
+        .with_live_cuts(cut))
+}
+
 /// How often a `serve` exchanges with your devices after its first round, give or take a tenth.
 const EVERY_ROUND: Duration = Duration::from_secs(60 * 60);
 
 /// Every `serve`'s own exchanges with your devices: one round at start, then hourly with a tenth of
 /// jitter either way. The first round runs at once so a machine that was down folds a revocation before a
 /// remote stop can reach it, and `first_round` hears when it has ended, whatever it found, which is what
-/// lets `control.stop` in. It never returns; it ends when the run beside it does.
+/// lets a remote stop in. It never returns; it ends when the run beside it does.
 async fn sync_rounds(
     home: &Home,
     dial: &impl swoosh::sync::Dial,
     fetch: &impl swoosh::renewal::Fetch,
-    first_round: FirstRound,
+    first_round: control::FirstRound,
 ) {
     use rand::Rng as _;
 

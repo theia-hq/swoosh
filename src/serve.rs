@@ -66,7 +66,7 @@ pub(crate) use self::lookup::answer as lookup_answer;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
 pub use self::services::ServiceList;
 pub use self::serving::{Added, EditError, Mistyped, ServingError, Started};
-pub use self::stop::{ACK_GRACE, FirstRound, STOP_ACK, Stop, StopAfterFirstRound, stopped_by};
+pub use self::stop::{ACK_GRACE, STOP_ACK, Stop, StopAfterFirstRound, stopped_by};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
 /// teardown (the remote twin of a local Ctrl-C or a `--expires` deadline). The client verb is `swoosh stop`.
@@ -88,6 +88,12 @@ pub const CONTROL_STOP_SERVICE: &str = "control.stop";
 /// name is the verbatim wire name. Public so the `swoosh service` client requests the SAME name the
 /// served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
+
+/// The node's own control route: every `serve` binds it, member-only, and answers one request per stream on
+/// it, a list of what it serves or a stop ([`control::Serve`]). Bound by the node, never named in a `serve`
+/// entry, and dotted, so no name a person types can be it. Public so every dialer requests the SAME name
+/// the served handler is keyed under.
+pub const CONTROL_SERVE_SERVICE: &str = "control.serve";
 
 /// The update route: every `serve` binds it, member-gated, and answers the exchange on it
 /// ([`crate::sync`]), whatever the standing. It is bound by the node, never named in a `serve` entry, and

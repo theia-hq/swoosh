@@ -38,8 +38,8 @@ use bifrost_mem::MemTransport;
 use nauthy::Denylist;
 use swoosh::contacts::Contacts;
 use swoosh::serve::{
-    ACK_GRACE, CONTROL_STOP_SERVICE, FirstRound, STOP_ACK, Stop, StopKind, StopSource, Stopped,
-    stopped_by,
+    ACK_GRACE, CONTROL_STOP_SERVICE, STOP_ACK, Stop, StopAfterFirstRound, StopKind, StopSource,
+    Stopped, control, stopped_by,
 };
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::enabled::AllEnabled;
@@ -299,10 +299,10 @@ async fn a_remote_stop_waits_for_the_first_round() {
             let host_id = host.node_id();
             let cancel = CancellationToken::new();
             let source = Arc::new(StopSource::new());
-            let (exposer, first_round) = FirstRound::hold(
-                build_exposer_noting(cancel.clone(), Arc::clone(&source)).await,
-                AllEnabled,
-            );
+            let (first_round, hold) = control::FirstRound::new();
+            let exposer = build_exposer_noting(cancel.clone(), Arc::clone(&source))
+                .await
+                .with_enabled(StopAfterFirstRound::new(AllEnabled, hold));
             let run = tokio::task::spawn_local({
                 let cancel = cancel.clone();
                 async move { exposer.run(&host, cancel).await }

@@ -23,7 +23,7 @@ use swoosh::peer::{OwnDevice, Peer};
 use swoosh::peers::{DialFailure, Hints, OpenError, Peers};
 use swoosh::roster::{Epoch, RevokedDevice, RosterDoc};
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
-use swoosh::serve::{CONTROL_STOP_SERVICE, FirstRound, Resident, Stop, StopKind};
+use swoosh::serve::{CONTROL_STOP_SERVICE, Resident, Stop, StopAfterFirstRound, StopKind, control};
 use swoosh::serve_toml::LiveServeToml;
 use swoosh::streams::{Ask, Opened, OwnBind, StreamSource, Unopened};
 use swoosh::testkit::{HostilePeer, STANDING_UNTIL, TestNode, TestRoot, TestWrite};
@@ -672,7 +672,8 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
 async fn bare_stop_is_never_held() {
     let leaf = scratch("held");
     let off = services_off(&leaf);
-    let (_first_round, held) = FirstRound::hold_stop(off.clone());
+    let (_first_round, hold) = control::FirstRound::new();
+    let held = StopAfterFirstRound::new(off.clone(), hold);
     let Running {
         leaf,
         client,
