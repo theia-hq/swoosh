@@ -2,6 +2,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use nauthy::{Denylist, VerifyKey};
+use tightbeam::identity::AsNodeId as _;
 use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{
     BoxRead, BoxWrite, CancellationToken, Handler, ServeError, Served, ServiceCatalog,
@@ -9,8 +10,9 @@ use tightbeam::tunnel::{
 use tokio::io::{self, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::watch;
 
-use crate::serve::StopSource;
-use crate::serve::stop::{StopOnDrop, caller_closed};
+use crate::contacts::Contacts;
+use crate::peer::OwnDevice;
+use crate::serve::{StopKind, StopSource};
 
 /// The `control.serve` handler: one request per stream, [`Request::List`] or [`Request::Stop`], answered
 /// with one [`Answer`] byte.
@@ -24,7 +26,7 @@ use crate::serve::stop::{StopOnDrop, caller_closed};
 /// and whatever follows it is never parsed. Every answer is bounded too, so a member that grants no credit
 /// cannot park the handler on it: a list, `NotYet` or `BadRequest` writes and shuts down under one
 /// [`REQUEST_DEADLINE`], and a stop's `Done` and its `shutdown` take one each, then at most
-/// [`ACK_GRACE`](crate::serve::ACK_GRACE) for the caller's close. A stream this handler does not
+/// [`ACK_GRACE`] for the caller's close. A stream this handler does not
 /// answer (silence, an end with no byte, a refused stop, an answer past the bound) is dropped unshut, which
 /// tightbeam turns into a reset: the caller can never read a clean end as an answer.
 ///
@@ -48,8 +50,9 @@ pub struct Serve {
 
 impl Serve {
     /// The handler over `catalog`, stopping the node through `cancel` and noting the caller in `source`,
-    /// with stops held by `hold` and refused to a key `revoked` holds.
-    pub fn new(
+    /// with stops held by `hold` and refused to a key `revoked` holds. Crate-only: `serve` builds it through
+    /// [`bind_serve`](super::bind_serve), which hands it the gate's own revocations.
+    pub(crate) fn new(
         catalog: ServiceCatalog,
         cancel: CancellationToken,
         source: Arc<StopSource>,
@@ -116,8 +119,8 @@ impl Serve {
         }
         // Armed only once the byte has left this handler, since from then the caller may hold `Done` and
         // print `Stopped`. A write past the bound returns before the guard exists, so a stalled `Done`
-        // stops nothing; a write that failed outright still arms, as `control.stop`'s ack does, because
-        // the byte may have left before the stream broke.
+        // stops nothing; a write that failed outright still arms, because the byte may have left before
+        // the stream broke.
         let written = bounded(writer.write_all(&[Answer::Done.encode()])).await;
         if written
             .as_ref()
@@ -159,6 +162,34 @@ impl Handler for Serve {
     }
 }
 
+/// The stop an answered `Done` owes, fired when dropped: on the handler's own return, or when the handler's
+/// future is dropped mid-wait (a live cut ending the session). Either way the caller's `Stopped` stays true.
+struct StopOnDrop<'a> {
+    /// The node's teardown token, cancelled on drop.
+    cancel: &'a CancellationToken,
+    /// Where the stop is noted, before the cancel.
+    source: &'a StopSource,
+    /// The key the connection proved, noted as the stop's source.
+    peer: VerifyKey,
+}
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        // Noted before the cancel, as the socket stop does, so the run reads a wire stop and its key. On a
+        // drop racing Ctrl-C this can note the wire stop first, which is true too: both asked.
+        self.source.note(StopKind::Wire(self.peer));
+        self.cancel.cancel();
+    }
+}
+
+/// Wait for the caller's side to end after `Done`: its close after reading the answer, a broken stream,
+/// or [`ACK_GRACE`], whichever is first. Read only to see it end; nothing read is kept, since the key is
+/// the connection's. The cap bounds what a caller can make the node read on its way down.
+async fn caller_closed(reader: &mut (impl AsyncRead + Unpin)) {
+    let mut ignored = reader.take(CALLER_BYTES);
+    let _ = tokio::time::timeout(ACK_GRACE, io::copy(&mut ignored, &mut io::sink())).await;
+}
+
 /// Write `answer` then `body`, and end the stream, all under [`REQUEST_DEADLINE`].
 async fn answer(
     writer: &mut (impl AsyncWrite + Unpin),
@@ -189,6 +220,40 @@ async fn bounded<T>(step: impl Future<Output = io::Result<T>>) -> io::Result<T> 
 /// bound, never the socket's: a member that admits a stream and says nothing, or grants no credit for the
 /// answer, holds a task for this long and no longer.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long the stopped node waits for the caller to close its side after `Done`, before it stops anyway.
+/// The caller closes the moment it reads the answer, so on a live path this is one round trip; the bound
+/// is for a caller that never closes, which can then delay the stop by this much and no more. A member may
+/// stop the node outright, so the delay gives it nothing it did not already hold.
+pub const ACK_GRACE: Duration = Duration::from_secs(2);
+
+/// The most the stopped node reads from the caller while it waits for the close. The caller sends nothing
+/// after its request, so any cap works; one that does send more than this ends the wait early, which can
+/// cost only that caller its answer.
+const CALLER_BYTES: u64 = 64;
+
+/// The line a node stopped over `control.serve` prints: the name this node holds for the key that stopped
+/// it and its short key, or the whole key when it holds no name for it. One of your devices is named as
+/// yours first, whatever else the book saved the key under.
+///
+/// Any of your devices may stop any other, so this line on the stopped node's own stderr is the one trail
+/// a stop leaves. It is built only from the key the connection proved, so nothing on it can come from the
+/// caller's request, and a caller cannot claim to be another device.
+pub fn stopped_by(contacts: &Contacts, peer: VerifyKey) -> String {
+    // An admitted peer's key is one the transport proved, so it is always a usable key; the arm keeps the
+    // whole key for one that somehow is not.
+    let Ok(node) = peer.node_id() else {
+        return format!("Stopped by {peer}.");
+    };
+    let mine = contacts
+        .mine()
+        .find(|(_, key)| **key == node)
+        .map(|(label, _)| OwnDevice::from(label.clone()).to_string());
+    match mine.or_else(|| contacts.saved_at(&node).map(|name| name.to_string())) {
+        Some(name) => format!("Stopped by {name} ({}).", crate::credential::short(&node)),
+        None => format!("Stopped by {node}."),
+    }
+}
 
 /// A request on `control.serve`: one byte, no body, no version byte (the route's name is its version).
 ///
@@ -282,7 +347,8 @@ impl FirstRound {
         (Self(finished), Hold(open))
     }
 
-    /// Another [`Hold`] on this round, for a second reader (`control.stop`'s oracle, while it is bound).
+    /// Another [`Hold`] on this round, for a test that watches it from outside.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn hold(&self) -> Hold {
         Hold(self.0.subscribe())
     }

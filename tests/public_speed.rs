@@ -5,12 +5,12 @@
 //! The flagship delib-39 proof, end to end over the in-process transport: a per-service `--public speed`
 //! node admits a STRANGER (no badge) to `speed` while every other service stays family-gated. This is the
 //! `swoosh serve --public speed` scenario that shipped BROKEN (a node-wide open gate died on the always-on
-//! `control.stop`); per-service exposure is the fix, and a live run certifies it, not a code read.
+//! control route); per-service exposure is the fix, and a live run certifies it, not a code read.
 //!
-//! One node serves `ping` (gated), `speed` (opened via `--public speed`), and the always-on `control.stop`
+//! One node serves `ping` (gated), `speed` (opened via `--public speed`), and the always-on `control.serve`
 //! (never openable), assembled through the SAME `diagnostics` helper the product `serve` path binds and
 //! opened through the SAME Router public proof. A STRANGER presenting no capability at all is ADMITTED to
-//! `speed` (a real speedtest moves bytes) but REFUSED at `ping` and at `control.stop`, byte-uniformly. The
+//! `speed` (a real speedtest moves bytes) but REFUSED at `ping` and at `control.serve`, byte-uniformly. The
 //! refusals are the load-bearing half: opening `speed` leaks nothing about the gated services, and the
 //! control surface can never be opened.
 
@@ -19,9 +19,8 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, ProtocolError, Refusal, Speedtest};
-use nauthy::Denylist;
-use swoosh::serve::{CONTROL_STOP_SERVICE, Stop};
-use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
+use swoosh::serve::{CONTROL_SERVE_SERVICE, StopSource, control};
+use tightbeam::tunnel::{CancellationToken, Connector, Router};
 
 /// The signet's fixed secret: its public half is the family the gate trusts. No badge here is rooted at it,
 /// because the whole point is that a STRANGER (rooted nowhere the gate trusts) still reaches the OPEN service.
@@ -30,7 +29,7 @@ const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 /// Run the proof on a worker thread with a generous stack: over mem a bidir speedtest nests several 64 KiB
 /// chunk buffers on one LocalSet thread, which can exceed the default stack (see `gated_measure.rs`).
 #[test]
-fn a_public_speed_node_admits_a_stranger_to_speed_but_refuses_ping_and_control_stop() {
+fn a_public_speed_node_admits_a_stranger_to_speed_but_refuses_ping_and_control_serve() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -53,22 +52,23 @@ async fn proof() {
 
     tokio::task::spawn_local(async move {
         // The routes a `swoosh serve speed --public speed` node carries: the gated `ping`, the opened
-        // `speed`, and the always-on member-only `control.stop` every node answers. `--public speed` builds:
+        // `speed`, and the always-on member-only `control.serve` every node answers. `--public speed` builds:
         // the open set binds the metered `speed` engine (capped by construction, the only one the proof
-        // opens) and `control.stop` (Never) is not named, so the proof does not refuse the node. This is
+        // opens) and `control.serve` (Never) is not named, so the proof does not refuse the node. This is
         // the build that used to die: the opened route the stranger reaches is the capped one, while the
         // gated `ping` binds the owner engine.
         let public: Vec<nauthy::Service> = vec!["speed".parse().unwrap()];
-        let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-        let exposer = swoosh::serve::diagnostics(Router::new(gate), &public)
-            .unwrap()
-            .member_service(
-                CONTROL_STOP_SERVICE.parse().unwrap(),
-                Stop::new(CancellationToken::new(), std::sync::Arc::default()),
-            )
-            .unwrap()
+        let (gate, cut, _home) = swoosh::testkit::admitting(signet, host_id).await;
+        let (router, _catalog, _first_round) = control::bind_serve(
+            swoosh::serve::diagnostics(Router::new(gate), &public).unwrap(),
+            CancellationToken::new(),
+            std::sync::Arc::new(StopSource::new()),
+            &cut,
+        )
+        .unwrap();
+        let exposer = router
             .expose()
-            .expect("`--public speed` builds: speed is openable, control.stop stays gated");
+            .expect("`--public speed` builds: speed is openable, control.serve stays gated");
         exposer.run(&host, CancellationToken::new()).await;
     });
 
@@ -110,9 +110,9 @@ async fn proof() {
         "a stranger must still be refused at the gated ping service: {refused:?}"
     );
 
-    // And REFUSED at the always-on `control.stop`: the control surface can never be opened, so a stranger
+    // And REFUSED at the always-on `control.serve`: the control surface can never be opened, so a stranger
     // cannot stop this node. The refusal surfaces as the ServiceSession's own stream error.
-    let control = Connector::to_node(host_id, CONTROL_STOP_SERVICE.parse().unwrap(), None)
+    let control = Connector::to_node(host_id, CONTROL_SERVE_SERVICE.parse().unwrap(), None)
         .open_service(&stranger)
         .await
         .expect("the base connect lands; the gate refuses per-stream");
@@ -121,15 +121,6 @@ async fn proof() {
             control.open_bi().await,
             Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
         ),
-        "a stranger must be refused at the always-on control.stop, even on a --public node"
+        "a stranger must be refused at the always-on control.serve, even on a --public node"
     );
-}
-
-/// An empty revocation denylist: this test exercises admission, not revocation, so the gate loads from a
-/// path that does not exist (an absent file is an empty set). `tag` keeps parallel tests' paths apart.
-async fn empty_denylist(tag: &str) -> Denylist {
-    let path =
-        std::env::temp_dir().join(format!("swoosh-public-speed-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    Denylist::load(path).unwrap()
 }

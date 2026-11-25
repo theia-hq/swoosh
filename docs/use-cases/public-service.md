@@ -47,8 +47,7 @@ ed01hcq6balrlxwa
 
 - **You must name the services.** There is no `all` or `*`.
 - **Not every service opens.** A keyless shell ([`sshd:`](../reference/services.md#sshd)) has no
-  public form. `control.stop` and `control.services` are member-only: only your own devices can stop
-  or inspect the node.
+  public form. `control.serve` never opens: only your own devices can stop the machine.
 - **Public streams share a node-wide pool of four.** Four connected public streams fill it, on any mix
   of public services; each holds its slot until its stream ends, even if idle. A fifth public dial is
   refused until a slot frees, and gated services are outside the pool. A raw stream opened with

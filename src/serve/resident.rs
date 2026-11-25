@@ -44,8 +44,7 @@ pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// The resident state the accept loop serves from. Built once at `serve` start; every query reads
 /// the services off through the gate's own [`LiveServeToml`], so the status and the gate agree on every
-/// service, and the socket is never a data channel into the gate. The gate asks it through the first
-/// round's hold, which refuses only `control.stop`, a node route the status never lists as off.
+/// service, and the socket is never a data channel into the gate.
 pub struct Resident {
     /// The resident's pid, reported in the status reply.
     pid: u32,
@@ -128,7 +127,7 @@ impl Resident {
     }
 
     /// Fire the socket stop: record the local source (so the run classifies the stop as local, never
-    /// as a wire `control.stop`) and cancel the one teardown token. Split from
+    /// as a wire stop) and cancel the one teardown token. Split from
     /// [`answer`](Self::answer) so the Ack is written first: cancelling before the confirm let the
     /// process exit out from under the reply.
     pub fn fire_stop(&self) {
@@ -498,7 +497,7 @@ fn accept_error_fatal(error: &std::io::Error) -> bool {
 }
 
 /// Which path fired the teardown token. Recorded once (first writer wins), never collapsing the
-/// socket stop into the wire `control.stop` one: each trigger keeps its own bookkeeping.
+/// socket stop into the wire `control.serve` one: each trigger keeps its own bookkeeping.
 pub struct StopSource {
     /// The first recorded source, if any.
     first: std::sync::Mutex<Option<StopKind>>,
@@ -511,7 +510,7 @@ pub enum StopKind {
     Interrupted,
     /// A `--expires` deadline elapsed.
     Expires,
-    /// An admitted wire `control.stop` caller, by the key its connection proved: the one record of which
+    /// An admitted wire `control.serve` stop, by the key its connection proved: the one record of which
     /// device stopped the node.
     Wire(VerifyKey),
     /// A local-uid socket `Stop`.

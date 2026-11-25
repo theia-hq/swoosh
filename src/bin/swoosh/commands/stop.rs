@@ -1,32 +1,28 @@
 //! `swoosh stop [me/<name>]`: stop swoosh serve on this machine, or on one of your own devices.
 //!
 //! Bare `stop` stops this machine's `serve` over the local control socket and prints the pid that answered;
-//! `stop me/<name>` dials that device's member-only `control.stop` and, once admitted, triggers a graceful
-//! teardown, the same stop a Ctrl-C or a `serve --expires` deadline gives. It stops the NODE (the node stops
-//! serving); it does not power off the machine, and it serves again when `swoosh serve` next runs there.
+//! `stop me/<name>` asks that device's member-only `control.serve` for a stop and, once answered, the device
+//! runs a graceful teardown, the same stop a Ctrl-C or a `serve --expires` deadline gives. It stops the NODE
+//! (the node stops serving); it does not power off the machine, and it serves again when `swoosh serve`
+//! next runs there.
 //!
 //! The machine is only ever `me/<name>`, a name in the list of your devices. Every other shape (a bare word,
 //! `me` alone, a contact, a key, a link, a path, two machines) is a usage error, exit 2, before any transport
 //! binds: a path or a link at parse, the rest once the list of your devices is read, so only a device of
 //! yours ever reaches the dial. Your own name stops this machine locally, as bare `stop` does.
 //!
-//! `control.stop` is MEMBER-only, not merely family-gated: the node admits a whole-node membership badge
+//! `control.serve` is MEMBER-only, not merely family-gated: the node admits a whole-node membership badge
 //! (your own devices), and refuses a delegated slip at the route's member floor with the same uniform
 //! refusal a gate miss gives, before any `Response::Ok`. Any of your own devices can stop any other, which
-//! is correct for a CI teardown; the stopped node says which one did. Hardening the lifecycle further (an
-//! arm->confirm nonce + a single-use device-bound destroy-cap, ideally owner-only so another fleet device
-//! cannot stop the node) is a follow-up, and it needs a security review before `control.stop` is trusted
-//! across a multi-device fleet.
+//! is correct for a CI teardown; the stopped node says which one did.
 //!
 //! A refusal is a LOUD typed error, never a silent success: if the node's gate does not admit this caller,
-//! opening the control stream fails and `stop` reports the refusal and exits non-zero.
+//! opening the stream fails and `stop` reports the refusal and exits non-zero.
 //!
-//! `Stopped` prints only on what proves the stop: the node's ack byte, or the stream it admitted closing
-//! cleanly as the node goes down. A dial that never connected sent no request, so nothing was stopped. A
-//! stream open that fails after the dial never saw the admission, so it cannot tell a node tearing itself
-//! down for this request from a path that dropped it: the verb probes the peer's gate for a bounded
-//! window, and a gate still answering has stopped nothing, while a peer gone may have stopped or may only
-//! be out of reach, and the line says the stop is unconfirmed.
+//! The request is one byte, written on the opened stream and never with the open, so an open that fails
+//! carried no request and nothing was stopped, whatever failed. `Stopped` prints only on the node's `Done`.
+//! Once the byte may have left, every other ending (another answer aside) is unconfirmed: a stream that
+//! breaks or ends before an answer, or one that sends none within [`ANSWER_DEADLINE`].
 //!
 //! The stop is one body on both paths: by its own bind, or as one Open through `swoosh serve` when it
 //! runs here. Either way the request rides a connection of its own, so it goes out at most once.
@@ -45,24 +41,19 @@ use swoosh::peer::{Machine, OwnDevice, Peer};
 use swoosh::peers::{Hints, OpenError};
 use swoosh::root_key::RootKey;
 use swoosh::roster::RosterDoc;
+use swoosh::serve::CONTROL_SERVE_SERVICE;
+use swoosh::serve::control::{Answer, Request};
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal};
-use swoosh::serve::{ACK_GRACE, CONTROL_STOP_SERVICE, STOP_ACK};
 use swoosh::streams::{Ask, Opened, StreamSource, Unopened};
 use swoosh::transport::{BareReachFlag, ReachArgs};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::time::Instant;
 
 use crate::commands::route::Route;
 
-/// How long after the stop's open the probe waits before it asks the device's gate. A node that took the
-/// stop keeps its gate up until this side closes or [`ACK_GRACE`] passes, so a gate that answers inside
-/// that grace proves nothing; one still answering after it, plus a second for the cancel to close the
-/// gate, proves no stop landed.
-const STOP_SETTLE: Duration = ACK_GRACE.saturating_add(Duration::from_secs(1));
-
-/// How long the probe's one open may take, after [`STOP_SETTLE`]. A live peer's gate answers at once; one
-/// that does not inside this window is gone, stopping, or out of reach, and the probe cannot tell which.
-const STOP_PROBE_WINDOW: Duration = Duration::from_secs(3);
+/// How long the stop waits for the device once its stream is open: the request's write, the one byte back,
+/// and the close. A device answers at once, so this bounds only a stalled `serve` or a device that keeps
+/// the stream open and says nothing, which would otherwise hold `stop` (and a CI teardown) forever.
+pub const ANSWER_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The refusal for a link or a path where the machine goes: a link carries no right to stop a machine.
 pub const A_LINK_STOPS_NOTHING: &str = "a link cannot stop a machine; only your own devices can";
@@ -224,7 +215,7 @@ impl Aim {
 enum Target {
     /// This machine: stopped over the local control socket.
     Here,
-    /// Another of your devices: stopped over its `control.stop`.
+    /// Another of your devices: stopped over its `control.serve`.
     Device {
         /// Its name, for every line.
         device: OwnDevice,
@@ -343,7 +334,7 @@ pub struct Usage(pub String);
 impl StopCmd {
     /// Everything before a dial: resolve the machine against the list of your devices, then either stop this
     /// machine over its control socket (bare, or your own name) and return `None`, or return the device to
-    /// stop over its `control.stop`. Runs before any transport is composed, so a refused shape binds nothing.
+    /// stop over its `control.serve`. Runs before any transport is composed, so a refused shape binds nothing.
     /// `typed` is a reach flag typed on the command line, which stopping this machine refuses.
     pub async fn run_local(
         self,
@@ -391,8 +382,8 @@ async fn stop_resolved(client: &ControlClient) -> eyre::Result<String> {
     Ok(stop_line(pid))
 }
 
-/// `stop me/<name>` for another of your devices, resolved: reach its member-only `control.stop` and trigger
-/// a graceful stop.
+/// `stop me/<name>` for another of your devices, resolved: ask its member-only `control.serve` for a
+/// graceful stop.
 #[derive(Debug)]
 pub struct StopDevice {
     /// The device as dialed, for the stale-list exchange beside the stop.
@@ -434,10 +425,11 @@ impl StopDevice {
         Credential::Family { present: None }
     }
 
-    /// Stop the device over one `control.stop` stream from `source`, on a connection of its own, its lines
-    /// on `err`, each outcome worded by `route` where `stop` has no line of its own. On admission the node
-    /// writes one ack byte and waits for this side to close before it cancels its teardown token; a node
-    /// that does not admit this caller refuses LOUDLY here, never a silent no-op.
+    /// Stop the device over one `control.serve` stream from `source`, on a connection of its own, its lines
+    /// on `err`, each outcome worded by `route` where `stop` has no line of its own. The request is written
+    /// once the stream is open; the node answers one byte and, on `Done`, waits for this side to close
+    /// before it cancels its teardown token. A node that does not admit this caller refuses LOUDLY here,
+    /// never a silent no-op.
     ///
     /// The connection is its own, never a held session: an open on a held one that fails is retried on a
     /// fresh dial, which would send the request a second time, and could report the device unreachable
@@ -445,61 +437,70 @@ impl StopDevice {
     ///
     /// # Errors
     ///
-    /// The run's line: unreached, refused, unconfirmed, still live, or the route's for an outcome that says
-    /// nothing of the device.
+    /// The run's line: unreached, refused, not stopped, not yet, unconfirmed, or the route's for an outcome
+    /// that says nothing of the device.
     pub(crate) async fn stop(
         &self,
-        source: impl StreamSource + Copy,
+        source: impl StreamSource,
         route: &Route<'_>,
         machine: &Machine,
         err: &mut impl io::Write,
     ) -> eyre::Result<()> {
+        // The open carries no request: the stop byte is written below, only on the stream an open returned.
+        // So an open that fails, however late, stopped nothing.
         let ask = Ask {
             peer: self.node,
             hints: Hints::NONE,
-            service: CONTROL_STOP_SERVICE.parse()?,
+            service: CONTROL_SERVE_SERVICE.parse()?,
             lane: OpenLane::Isolated,
             slip: None,
         };
-        // Taken before the open, so the probe's settle counts from the earliest the request could have
-        // landed.
-        let sent = Instant::now();
         let Opened {
             mut write,
             mut read,
             ..
         } = match source.open(&ask).await {
             Ok(opened) => opened,
-            Err(unopened) => {
-                return Err(self.unopened(unopened, sent, source, route, machine).await);
-            }
+            Err(unopened) => return Err(self.unopened(unopened, route, machine).await),
         };
         let device = &self.device;
 
-        // Read the node's ack byte: proof the stop was actioned, not merely that the dial was admitted.
-        let mut ack = [0u8; 1];
-        let answer = read.read_exact(&mut ack).await;
-        // Close this side the moment the ack is read: the node stops only once it sees this end, so its
-        // teardown cannot drop the ack in flight. Shut down, not only dropped, since a dropped writer does
-        // not end the stream on every transport. Any end counts there, so a close that fails or is lost on
-        // the way still stops it within its bound.
-        let _ = write.shutdown().await;
-        confirmed(answer.map(|_| ack[0]), device)?;
+        // The request, then the answer, with this side still open: the node stops only once it sees this
+        // end, so its teardown cannot drop the answer in flight. Bounded as one, since from the first write
+        // on the byte may have left and only an answer tells. The close below takes what is left of the
+        // same bound, so the whole stop after the open is bounded once.
+        let deadline = tokio::time::Instant::now() + ANSWER_DEADLINE;
+        let answer = tokio::time::timeout_at(deadline, async {
+            write.write_all(&[Request::Stop.encode()]).await?;
+            write.flush().await?;
+            let mut answer = [0u8; 1];
+            read.read_exact(&mut answer).await?;
+            Ok(answer[0])
+        })
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the device sent no answer in time",
+            ))
+        });
+        // Shut down, not only dropped, since a dropped writer does not end the stream on every transport.
+        // Any end counts there, so a close that fails or is lost on the way still stops it within its bound.
+        // Under the deadline too: a close that waits on a peer granting nothing would otherwise hold `stop`
+        // past its bound. Past the deadline it is still tried once, then the writer is dropped.
+        let _ = tokio::time::timeout_at(deadline, write.shutdown()).await;
+        confirmed(answer, device)?;
         write!(err, "{}", stopped_line(device, self.node))?;
         Ok(())
     }
 
-    /// The line an open that gave no stream ends the run with. Only a dial that never connected proves no
-    /// request left, so only it says nothing was stopped; an open that failed after the dial may have
-    /// carried the request to a node that lost the race with the very teardown it triggered, or the path
-    /// may have dropped it, so the device is probed: still live, it stopped nothing; gone, the stop is
-    /// unconfirmed. An outcome that says nothing of the device prints `route`'s line, the probe's own
-    /// included. `sent` is when the stop's open began.
+    /// The line an open that gave no stream ends the run with. The request rides only an opened stream, so
+    /// no outcome here sent it: the device's refusal and an unreached device keep their own lines, every
+    /// other failure of the open says nothing was stopped, and an outcome that says nothing of the device
+    /// prints `route`'s line.
     async fn unopened(
         &self,
         unopened: Unopened,
-        sent: Instant,
-        source: impl StreamSource,
         route: &Route<'_>,
         machine: &Machine,
     ) -> eyre::Report {
@@ -511,21 +512,15 @@ impl StopDevice {
             "the stop's stream was not opened"
         );
         match unopened {
-            // A refusal is a LIVE peer saying no, so it is never raced away.
-            Unopened::Refused(OpenRefusal::Peer(_)) => eyre::eyre!(
-                "{device} refused: only your own devices can stop it\n  If it has just started, try again in a minute."
-            ),
+            Unopened::Refused(OpenRefusal::Peer(_)) => {
+                eyre::eyre!("{device} refused: only your own devices can stop it")
+            }
             Unopened::Own(OpenError::Unreachable(_))
             | Unopened::Refused(OpenRefusal::Unreachable(_)) => unreachable(device),
             Unopened::Own(OpenError::Timeout | OpenError::Open(_))
             | Unopened::Refused(
                 OpenRefusal::Timeout | OpenRefusal::Broken(_) | OpenRefusal::PeerUnreadable(_),
-            ) => match self.probe(source, sent).await {
-                Ok(Probed::Gone) => unconfirmed(device),
-                Ok(Probed::Live) => eyre::eyre!("could not stop {device}\n  Nothing was stopped."),
-                Ok(Probed::RunEnded(unopened)) => route.line(unopened, machine).await,
-                Err(report) => report,
-            },
+            ) => eyre::eyre!("could not stop {device}\n  Nothing was stopped."),
             unopened @ (Unopened::Own(OpenError::Busy)
             | Unopened::Refused(
                 OpenRefusal::Busy | OpenRefusal::StandingEnded | OpenRefusal::NotHere,
@@ -538,67 +533,26 @@ impl StopDevice {
             | Unopened::Control(_)) => route.line(unopened, machine).await,
         }
     }
-
-    /// What the device's gate says once a stop that `sent` could have landed has settled: the liveness probe
-    /// that tells a lost teardown race from a live peer. It waits until [`STOP_SETTLE`] after `sent` (an
-    /// open that took longer waits nothing), since a gate inside the node's ack grace answers whether or
-    /// not the stop landed. Then ONE `ping` stream from `source` on Main decides, bounded by
-    /// [`STOP_PROBE_WINDOW`]: admitted or refused by the gate is live; anything else is gone, the
-    /// unconfirmed line, the safe direction for a slow but live node. A connect alone is not live, since a
-    /// node mid-teardown can still accept one. An outcome every later open would repeat (`serve` gone or
-    /// of another version) is the run's, never the device's. The probe asks only for `ping`, so a redial
-    /// it makes never sends a second stop.
-    async fn probe(&self, source: impl StreamSource, sent: Instant) -> eyre::Result<Probed> {
-        let ask = Ask {
-            peer: self.node,
-            hints: Hints::NONE,
-            service: swoosh::reach::PING_SERVICE.parse()?,
-            lane: OpenLane::Main,
-            slip: None,
-        };
-        tokio::time::sleep_until(sent + STOP_SETTLE).await;
-        Ok(
-            match tokio::time::timeout(STOP_PROBE_WINDOW, source.open(&ask)).await {
-                // The gate's `NotAdmitted` ends a run too, but it is the device answering: live first.
-                Ok(Ok(_) | Err(Unopened::Refused(OpenRefusal::Peer(_)))) => Probed::Live,
-                Ok(Err(unopened)) if unopened.ends_run() => Probed::RunEnded(unopened),
-                Ok(Err(unopened)) => {
-                    tracing::debug!(
-                        unopened = %Escaped(&format!("{unopened:?}")),
-                        "the stop's probe met no live gate"
-                    );
-                    Probed::Gone
-                }
-                Err(_elapsed) => Probed::Gone,
-            },
-        )
-    }
 }
 
-/// What the stop's probe found of the device.
-enum Probed {
-    /// Its gate answered after the stop settled: nothing was stopped.
-    Live,
-    /// Its gate did not answer: stopped, stopping, or out of reach.
-    Gone,
-    /// The probe met an outcome that says nothing of the device and every later open would repeat.
-    RunEnded(Unopened),
-}
-
-/// Whether the node's answer on the admitted control stream proves the stop: its ack byte, or the stream
-/// closing cleanly before one, which an admitted stop does as the node goes down. A wrong byte, or a
-/// stream broken any other way, proves nothing, so the device may still be serving. Through `serve` a
-/// clean close reads the same: the resident ends the download only on the node's own clean end, and a
-/// cut reads as a reset.
+/// Whether the node's answer proves the stop: only `Done` does. `NotYet` is a machine still in its first
+/// sync, which stopped nothing. Any other byte, a stream that ended or broke before an answer, or no answer
+/// in time proves nothing, so the device may still be serving. A conforming node never ends the stream
+/// cleanly before its answer (an unanswered stream is reset), so a clean end is no proof either.
 fn confirmed(answer: io::Result<u8>, device: &OwnDevice) -> eyre::Result<()> {
-    match answer {
-        Ok(STOP_ACK) => Ok(()),
-        Ok(_) => eyre::bail!("{device} sent an unknown reply to the stop; it may still be serving"),
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
+    match answer.map(Answer::decode) {
+        Ok(Some(Answer::Done)) => Ok(()),
+        Ok(Some(Answer::NotYet)) => eyre::bail!(
+            "{device} has just started; it cannot be stopped from here yet\n  {} is still syncing with your devices. Try again in a minute.",
+            device.label()
+        ),
+        Ok(Some(Answer::BadRequest) | None) => {
+            eyre::bail!("{device} sent an unknown reply to the stop; it may still be serving")
+        }
         Err(error) => {
             tracing::debug!(
                 error = %Escaped(&error.to_string()),
-                "the stop's stream broke before the node answered"
+                "the stop's stream ended before the node answered"
             );
             Err(unconfirmed(device))
         }

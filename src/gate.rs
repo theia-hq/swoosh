@@ -270,7 +270,7 @@ pub struct AnchorCut {
 impl AnchorCut {
     /// The revocations this cut and its gate read, the one instance: a handler that must refuse a key
     /// revoked after its stream was admitted asks this store, which sees what the gate would see now.
-    pub fn revocations(&self) -> Arc<Denylist> {
+    pub(crate) fn revocations(&self) -> Arc<Denylist> {
         Arc::clone(&self.revoked)
     }
 }

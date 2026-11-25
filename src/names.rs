@@ -3,7 +3,7 @@
 //!
 //! ASCII capitals fold to lowercase on input, so a name has one stored spelling. Nothing else folds, and
 //! nothing else is allowed: a name can never hold the invite's `.` separator, a path's `/` or `~`, a
-//! marker's `:`, or whitespace. Internal routes are dotted (`control.stop`), so no typed name can be one.
+//! marker's `:`, or whitespace. Internal routes are dotted (`control.serve`), so no typed name can be one.
 //!
 //! Five names are reserved and are never a person or a device: `me`, `root` and `anyone`, and the two
 //! internal route groups, `control` and `lookup`, which are never a typed service either.
@@ -56,7 +56,7 @@ impl Name {
 
 /// Parse a service name a person typed (`serve --public <service>`, `share <service>`, `reach <peer>
 /// <service>`, ...): the one name rule, folded, as the [`Service`] the router and the grant carry. A dotted
-/// internal route (`control.stop`) is never a name, so it can never be typed; nor is a group of them
+/// internal route (`control.serve`) is never a name, so it can never be typed; nor is a group of them
 /// (`control`, `lookup`), which is no service of its own.
 pub fn service(text: &str) -> Result<Service, NameError> {
     let name: Name = text.parse()?;

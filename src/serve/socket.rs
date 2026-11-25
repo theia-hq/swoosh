@@ -602,7 +602,7 @@ pub enum Response {
         /// This node's id.
         node_id: NodeId,
     },
-    /// The stop confirm (answers [`Request::Stop`], the socket twin of `STOP_ACK`).
+    /// The stop confirm (answers [`Request::Stop`], the socket twin of `control.serve`'s `Done`).
     Ack,
     /// A gate/dial refusal, in the same reason vocabulary as the wire path.
     Refused(String),

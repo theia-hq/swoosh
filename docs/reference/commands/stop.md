@@ -24,9 +24,9 @@ Bare `swoosh stop` stops swoosh serve on this machine: `Stopped swoosh serve her
 **Things to know.** It stops swoosh serve, not the machine. A machine that
 [runs swoosh serve at login](../../use-cases/run-at-login.md#the-limit) starts it again on its own. `stop` takes
 only your own devices, by name; a contact's machine, a key or a link is refused, because only
-[your devices can stop a machine](../services.md#control-stop). The stopped machine prints which device stopped it.
-Just after swoosh serve starts, a machine refuses a stop from another device until it has
-[synced your device list](sync.md); try again in a minute.
+[your devices can stop a machine](../services.md#control-serve). The stopped machine prints which device stopped it.
+Just after swoosh serve starts, a machine does not take a stop from another device until it has
+[synced your device list](sync.md). `stop` says it has just started; try again in a minute.
 If `swoosh stop` cannot confirm that the device stopped, it ends with
 `error: could not confirm that me/nas stopped; it may still be serving`. Run `swoosh status me/<name>` or the stop again.
 

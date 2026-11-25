@@ -28,9 +28,9 @@ use bifrost_mem::MemTransport;
 use nauthy::{Denylist, Revocation};
 use swoosh::serve::control::{self, Answer, REQUEST_DEADLINE};
 use swoosh::serve::{CONTROL_SERVE_SERVICE, StopKind, StopSource};
-use swoosh::testkit::TestRoot;
+use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{self, CancellationToken, Connector, Router, ServiceCatalog};
+use tightbeam::tunnel::{CancellationToken, Connector, Router, ServiceCatalog};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// The byte the signet's fixed key is seeded with; its public half is the root the gate trusts.
@@ -249,7 +249,7 @@ async fn a_device_revoked_by_the_first_round_cannot_stop_on_a_stream_opened_duri
             // The first round's fold, as `serve` makes it: the key is written to the file through another
             // instance, the round waits out the stat debounce, then ends. The store the gate and the handler
             // share learns it only from the file.
-            let writer_side = Denylist::for_repair(serving.revoked.path().to_owned());
+            let writer_side = Denylist::for_repair(serving.revoked.clone());
             let lock = writer_side.lock().unwrap();
             writer_side
                 .revoke(
@@ -305,8 +305,8 @@ struct Serving {
     run: tokio::task::JoinHandle<()>,
     cancel: CancellationToken,
     source: Arc<StopSource>,
-    /// The one store the gate and the handler read.
-    revoked: Arc<Denylist>,
+    /// The file the one store the gate and the handler read is loaded from.
+    revoked: std::path::PathBuf,
     catalog: ServiceCatalog,
     /// The first round, until a test ends it.
     first_round: Option<control::FirstRound>,
@@ -316,28 +316,17 @@ impl Serving {
     /// Bind and run the node. The diagnostics are there because a node exposing exactly one service answers
     /// every name with it.
     async fn start() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "swoosh-gated-serve-{}-{}",
-            std::process::id(),
-            rand_suffix()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let revoked = Arc::new(Denylist::load(path).unwrap());
-        let gate = tunnel::resolve_gate(
-            Some(TestRoot::seeded(SIGNET).node_id()),
-            Arc::clone(&revoked),
+        let (gate, cut, home) = swoosh::testkit::admitting(
+            TestRoot::seeded(SIGNET).node_id(),
+            TestNode::seeded(SIGNET + 2).node_id(),
         )
-        .unwrap();
+        .await;
+        let revoked = home.revoked();
         let router = swoosh::serve::diagnostics(Router::new(gate), &[]).unwrap();
         let cancel = CancellationToken::new();
         let source = Arc::new(StopSource::new());
-        let (router, catalog, first_round) = control::bind_serve(
-            router,
-            cancel.clone(),
-            Arc::clone(&source),
-            Arc::clone(&revoked),
-        )
-        .unwrap();
+        let (router, catalog, first_round) =
+            control::bind_serve(router, cancel.clone(), Arc::clone(&source), &cut).unwrap();
         let exposer = router.expose().unwrap();
         let node = Node::new(MemTransport::bind(), NoDiscovery);
         let host = node.node_id();
@@ -416,11 +405,4 @@ fn signet_badge(signer: u8, bound: NodeId) -> String {
         .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
-}
-
-/// A suffix that keeps each test's denylist file its own.
-fn rand_suffix() -> u64 {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    NEXT.fetch_add(1, Ordering::Relaxed)
 }
