@@ -103,10 +103,9 @@ impl Unopened {
             )
             | Self::ServeGone
             | Self::Skew
-            | Self::Malformed(_)
-            | Self::Control(ControlError::Untrusted { .. } | ControlError::Unattributed { .. }) => {
-                true
-            }
+            | Self::Malformed(_) => true,
+            // One predicate on the error decides, so no list here can miss a variant added later.
+            Self::Control(error) => error.distrusts_socket(),
             Self::Refused(
                 OpenRefusal::Peer(PeerRefusal::BadRequest(_) | PeerRefusal::Unavailable(_))
                 | OpenRefusal::PeerUnreadable(_)
@@ -117,8 +116,7 @@ impl Unopened {
             )
             | Self::Own(_)
             | Self::Home(_)
-            | Self::ServeError(_)
-            | Self::Control(_) => false,
+            | Self::ServeError(_) => false,
         }
     }
 

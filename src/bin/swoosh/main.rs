@@ -1408,10 +1408,70 @@ enum Exchanging {
 enum Exchanged {
     /// `sync`: the devices its exchanges named.
     Synced(Vec<swoosh::sync::Device>),
-    /// `invite`, `revoke` or `root restore`: a root act, which may cut the very device its exchange met.
+    /// `invite` or `root restore`: a root act, which may cut the very device its exchange met.
     Acted,
+    /// `revoke`: a root act too, with where its cut reached. A published one is the change the sync a
+    /// started `serve` runs first offers your devices, so its endings after the act say so; one a newer
+    /// list kept back is not, and ends as [`Acted`](Self::Acted) does.
+    Revoked(swoosh::reach_report::Reach),
     /// `join`'s pull: never printed, so nothing after it is either.
     Pulled,
+}
+
+/// Which line a run ends on once `serve` went under it, by what the verb did before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// `sync`: nothing landed, so the plain lines, a rerun included.
+    Sync,
+    /// A landed root act whose change a started `serve` is not shown to send: `invite`, `root restore`,
+    /// or a `revoke` a newer list kept back. No rerun, and no promise about your devices.
+    Act,
+    /// A published `revoke`: the sync a started `serve` runs first tells your devices, so the line says
+    /// so.
+    Revoke,
+}
+
+impl Exchanged {
+    /// Which line the run ends on if `serve` went under it: `None` for `join`'s pull, which prints
+    /// nothing.
+    fn ending(&self) -> Option<Ending> {
+        use swoosh::reach_report::Reach;
+
+        match self {
+            Self::Synced(_) => Some(Ending::Sync),
+            // A cut a newer list kept back is not published, so no started `serve` sends it: the plain
+            // lines, which promise nothing of your devices.
+            Self::Acted | Self::Revoked(Reach::Behind) => Some(Ending::Act),
+            Self::Revoked(
+                Reach::Complete
+                | Reach::Published { .. }
+                | Reach::Held { .. }
+                | Reach::LocalOnly { .. },
+            ) => Some(Ending::Revoke),
+            Self::Pulled => None,
+        }
+    }
+}
+
+impl Ending {
+    /// The line for `serve` gone as `why`, a stopped one naming `machine`, the device its exchange met.
+    fn line(self, why: swoosh::streams::GoneWhy, machine: String) -> eyre::Report {
+        use commands::through_serve::{
+            ServeStopped, Skew, SkewAfterRevoke, StoppedAfterAct, StoppedAfterRevoke, Unresponsive,
+            UnresponsiveAfterRevoke,
+        };
+        use swoosh::streams::GoneWhy;
+
+        match (why, self) {
+            (GoneWhy::Skew, Self::Revoke) => SkewAfterRevoke.into(),
+            (GoneWhy::Skew, Self::Sync | Self::Act) => Skew.into(),
+            (GoneWhy::Unresponsive, Self::Revoke) => UnresponsiveAfterRevoke.into(),
+            (GoneWhy::Unresponsive, Self::Sync | Self::Act) => Unresponsive.into(),
+            (GoneWhy::Stopped, Self::Sync) => ServeStopped::to(machine).into(),
+            (GoneWhy::Stopped, Self::Act) => StoppedAfterAct(machine).into(),
+            (GoneWhy::Stopped, Self::Revoke) => StoppedAfterRevoke(machine).into(),
+        }
+    }
 }
 
 impl Exchanging {
@@ -1452,8 +1512,7 @@ impl Exchanging {
                 Exchanged::Acted
             }
             Self::Revoke(cmd) => {
-                cmd.publish.run(home, prompt, dial, err).await?;
-                Exchanged::Acted
+                Exchanged::Revoked(cmd.publish.run(home, prompt, dial, err).await?)
             }
             Self::RootRestore(cmd) => {
                 cmd.finish(home, dial, err).await?;
@@ -1586,8 +1645,7 @@ async fn exchange_through_serve(
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
-    use commands::through_serve::{Moot, ServeStopped, Skew, StoppedAfterAct, Unresponsive};
-    use swoosh::streams::GoneWhy;
+    use commands::through_serve::Moot;
 
     if let Some(moot) = Moot::first(exchanging.reach_args()) {
         return Err(moot.into());
@@ -1601,34 +1659,29 @@ async fn exchange_through_serve(
     // A root act may cut the very device its exchange met, so its names are read before it, and after.
     let before = swoosh::sync::devices(home, []).await.unwrap_or_default();
     let after = async || swoosh::sync::devices(home, []).await.unwrap_or_default();
-    let (named, act) = match exchanging
+    // What the verb did picks the line it ends on, should `serve` have gone ([`Exchanged::ending`]).
+    let exchanged = exchanging
         .run(home, &source, &dial, &fetch, prompt, out, err)
-        .await?
-    {
-        Exchanged::Synced(named) => (named, false),
-        Exchanged::Acted => (after().await, true),
+        .await?;
+    let Some(ending) = exchanged.ending() else {
+        return Ok(());
+    };
+    let named = match exchanged {
+        Exchanged::Synced(named) => named,
+        Exchanged::Acted | Exchanged::Revoked(_) => after().await,
+        // Its `ending` is `None`, so the run returned above; it prints nothing either way.
         Exchanged::Pulled => return Ok(()),
     };
     source.settle().await;
     let Some(gone) = source.went() else {
         return Ok(());
     };
-    Err(match gone.why {
-        GoneWhy::Skew => Skew.into(),
-        GoneWhy::Unresponsive => Unresponsive.into(),
-        GoneWhy::Stopped => {
-            let name = named
-                .into_iter()
-                .chain(before)
-                .find(|device| device.key == gone.peer)
-                .map_or_else(|| credential::short(&gone.peer), |device| device.name);
-            if act {
-                StoppedAfterAct(name).into()
-            } else {
-                ServeStopped::to(name).into()
-            }
-        }
-    })
+    let machine = named
+        .into_iter()
+        .chain(before)
+        .find(|device| device.key == gone.peer)
+        .map_or_else(|| credential::short(&gone.peer), |device| device.name);
+    Err(ending.line(gone.why, machine))
 }
 
 /// Which iroh constructor the bind selects, the flags' one mechanism. A named choice instead of an
@@ -2175,7 +2228,7 @@ mod tests {
             forward(hints(crowded, 17)).expect_err("a seventeenth address for one key refuses");
         assert_eq!(
             error.to_string(),
-            format!("--peer or SWOOSH_PEER gives more than 16 addresses for {crowded}")
+            format!("--peer or SWOOSH_PEER gives more than 16 addresses for one key:\n  {crowded}")
         );
     }
 

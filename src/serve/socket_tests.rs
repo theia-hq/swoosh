@@ -176,3 +176,76 @@ async fn whoami_reply_roundtrips() {
         Err(ControlError::Protocol(reason)) if reason == "unknown response tag 0x0e"
     ));
 }
+
+/// Only the three lines that say the socket itself cannot be trusted end a run on it: its path, the
+/// process answering it, or a process `serve.lock` does not record. Every other variant belongs to one
+/// connection. `rank` names every variant, so a new one fails to build here until `rank` places it;
+/// add its row beside it.
+#[test]
+fn only_the_socket_distrust_variants_distrust_the_socket() {
+    use std::path::PathBuf;
+
+    use super::{LocalDetailError, MalformedOpen, WireVersion};
+
+    // Each variant's place in the table, by an exhaustive match: no wildcard, so no variant can hide.
+    fn rank(error: &ControlError) -> usize {
+        match error {
+            ControlError::NoResident => 0,
+            ControlError::Untrusted { .. } => 1,
+            ControlError::UntrustedPeer { .. } => 2,
+            ControlError::Unattributed { .. } => 3,
+            ControlError::Timeout { .. } => 4,
+            ControlError::Io(_) => 5,
+            ControlError::TooLarge(_) => 6,
+            ControlError::Foreign => 7,
+            ControlError::Version { .. } => 8,
+            ControlError::Protocol(_) => 9,
+            ControlError::Catalog(_) => 10,
+            ControlError::Refused(_) => 11,
+            ControlError::Open(_) => 12,
+            ControlError::LocalDetail(_) => 13,
+        }
+    }
+
+    let path = || PathBuf::from("/run/user/1000/swoosh/home/control.sock");
+    let rows = [
+        (ControlError::NoResident, false),
+        (ControlError::Untrusted { path: path() }, true),
+        (ControlError::UntrustedPeer { path: path() }, true),
+        (
+            ControlError::Unattributed {
+                path: path(),
+                pid: 4242.try_into().unwrap(),
+            },
+            true,
+        ),
+        (ControlError::Timeout { phase: "connect" }, false),
+        (ControlError::Io(std::io::Error::other("cut")), false),
+        (ControlError::TooLarge(1), false),
+        (ControlError::Foreign, false),
+        (
+            ControlError::Version {
+                peer: WireVersion([0xff]),
+            },
+            false,
+        ),
+        (ControlError::Protocol("bad tag".to_owned()), false),
+        (ControlError::Catalog(eyre::eyre!("bad blob")), false),
+        (ControlError::Refused("not admitted".to_owned()), false),
+        (ControlError::Open(MalformedOpen::Truncated), false),
+        (
+            ControlError::LocalDetail(LocalDetailError::MissingStartup),
+            false,
+        ),
+    ];
+    let mut ranks: Vec<usize> = rows.iter().map(|(error, _)| rank(error)).collect();
+    ranks.sort_unstable();
+    assert_eq!(
+        ranks,
+        (0..rows.len()).collect::<Vec<_>>(),
+        "each row a distinct variant, ranks without gaps"
+    );
+    for (error, distrusts) in rows {
+        assert_eq!(error.distrusts_socket(), distrusts, "{error:?}");
+    }
+}

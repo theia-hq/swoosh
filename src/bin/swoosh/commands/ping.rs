@@ -771,6 +771,84 @@ mod tests {
         );
     }
 
+    /// `ping`'s part of the no-transport rule, on both paths: the block's head is the machine alone and
+    /// a `path:` row follows it, and nothing printed, the error included, names the transport. A run
+    /// through `serve` that measured ends with no error, so the error's part is read off one that broke,
+    /// whose line and error print on stdout and stderr.
+    #[tokio::test(start_paused = true)]
+    async fn default_output_names_no_transport() {
+        use swoosh::serve::control_codec::PathReply;
+        use swoosh::testkit::{Script, ScriptedPeer};
+
+        use crate::commands::through_serve::tests::{Dialing, empty_home, machine};
+
+        let (out, log, ended) = through_serve(
+            &["-c", "1"],
+            &Echo::default(),
+            [PathReply::Sample(bifrost::ConnInfo {
+                path: Path::Direct,
+                ..bifrost::ConnInfo::default()
+            })],
+        )
+        .await;
+        ended.expect("a measured ping through serve exits 0");
+        let serve = (out, log.join("\n"), Ok(()));
+        // Through `serve`, a ping whose stream was cut prints its line and its error, exit 1.
+        let cut = Echo {
+            refused: Some(bifrost::Error::Closed),
+            ..Echo::default()
+        };
+        let ((out, log, ended), _) = through_serve_with(&["-c", "1"], &cut, [], None).await;
+        assert!(ended.is_err(), "a broken ping exits 1");
+        assert_eq!(
+            out,
+            "me/nas: reached, but the probe failed (stream: the stream was cut)\n"
+        );
+        assert_eq!(
+            log,
+            [
+                "stderr: error: me/nas: reached, but the probe failed",
+                "Finish"
+            ]
+        );
+        for printed in [&out, &log.join("\n")] {
+            for word in ["via", "iroh", "transport"] {
+                assert!(!printed.contains(word), "broken: {word}: {printed}");
+            }
+        }
+        // By own bind, over a machine that holds the stream and answers no probe: the block still prints.
+        let key = Echo::default().peer();
+        let mut contacts = swoosh::contacts::Contacts::default();
+        contacts
+            .save(&"me/nas".parse().expect("a device"), key)
+            .expect("the name is free");
+        let peer = ScriptedPeer::new(key, [Script::Holds]);
+        let node = bifrost::Node::new(peer, bifrost::NoDiscovery);
+        let peers = swoosh::peers::Peers::new(&node);
+        let home = empty_home("ping-no-transport");
+        let ran = Dialing::of(&["ping", "me/nas", "-c", "1"])
+            .by_own_bind(&peers, &home, node.node_id(), &machine(&contacts, "me/nas"))
+            .await;
+        let own = (ran.out, ran.err, ran.ended);
+        for (path, (out, err, ended)) in [("serve", serve), ("own", own)] {
+            let error = ended
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_default();
+            let mut lines = out.lines();
+            assert_eq!(lines.next(), Some("me/nas"), "{path}: {out}");
+            assert!(
+                lines.next().is_some_and(|row| row.starts_with("  path: ")),
+                "{path}: {out}"
+            );
+            for printed in [&out, &err, &error] {
+                for word in ["via", "iroh", "transport"] {
+                    assert!(!printed.contains(word), "{path}: {word}: {printed}");
+                }
+            }
+        }
+    }
+
     /// A relayed path through `host`, as iroh names one: by the relay's URL.
     fn relayed(host: &str) -> Path {
         Path::Relayed(Relay::from(

@@ -1882,7 +1882,7 @@ fn a_confirmed_stall_ends_the_proxy() {
         let _ = resident.await;
         assert_eq!(
             format!("{ended:#}"),
-            "swoosh serve on this machine did not answer\n  Restart it."
+            "swoosh serve did not answer here\n  Restart it."
         );
         assert_eq!(
             responses
@@ -1891,7 +1891,7 @@ fn a_confirmed_stall_ends_the_proxy() {
                 .collect::<Vec<_>>(),
             [(
                 "HTTP/1.1 502 Bad Gateway",
-                "proxy failed: swoosh serve on this machine did not answer"
+                "proxy failed: swoosh serve did not answer here"
             )]
         );
         assert_eq!(err, "", "no warning first");

@@ -316,7 +316,7 @@ async fn crowded_hints_refuse_before_anything_is_written() {
         })
         .collect();
     let line = format!(
-        "--peer or SWOOSH_PEER gives more than 16 addresses for {}",
+        "--peer or SWOOSH_PEER gives more than 16 addresses for one key:\n  {}",
         TestNode::seeded(NAS).node_id()
     );
     for (verb, serving) in [
@@ -463,7 +463,7 @@ async fn a_flagged_root_act_refuses_a_held_unreachable_serve_first() {
 /// was changed, exit 1, the home as it was.
 #[tokio::test]
 async fn a_flagged_root_act_against_a_stalled_or_skewed_serve_changes_nothing() {
-    let stalled = "error: swoosh serve on this machine did not answer\n  Restart it.\n";
+    let stalled = "error: swoosh serve did not answer here\n  Restart it.\n";
     let skewed = "error: swoosh serve on this machine is a different version\n  Restart it with this version.\n";
     for (wrong, line) in [(Wrong::Skewed, skewed), (Wrong::Stalled, stalled)] {
         for argv in flagged_root_acts() {
@@ -599,6 +599,38 @@ async fn a_flagged_root_act_refuses_a_socket_another_process_answers() {
                  {}.\n  Nothing was sent through it.\n",
                 std::process::id(),
                 home.control_socket().unwrap().display()
+            ),
+            "{argv:?}"
+        );
+        assert!(after == before, "{argv:?}: the home is as it was");
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
+}
+
+/// With a reach flag, `join`, `revoke` and `root restore` ask before their act, and a control socket
+/// whose directory is open to others refuses there with its own line alone, which already says nothing
+/// was sent: exit 1, the home as it was.
+#[tokio::test]
+async fn a_flagged_root_act_refuses_a_socket_not_private_to_you() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for argv in flagged_root_acts() {
+        let home = device(&format!("flagged-untrusted-{}", argv[0])).await;
+        let (lock, listener) = claimed(&home).await;
+        let leaf = home.runtime_dir().unwrap();
+        let before = snapshot(home.dir());
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (status, stderr) = swoosh(&home, &argv).await;
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let after = snapshot(home.dir());
+        drop((lock, listener));
+        assert_eq!(status, Some(1), "{argv:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "error: swoosh serve's socket is not private to you\n  {} is not yours alone.\n  \
+                 Nothing was sent through it.\n",
+                leaf.display()
             ),
             "{argv:?}"
         );

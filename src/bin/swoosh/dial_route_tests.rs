@@ -1024,7 +1024,7 @@ fn a_stalled_serve_ends_a_send_of_many_files_once() {
             assert!(!printed.ok, "{sends_first}");
             let error = printed.error.unwrap();
             assert!(
-                error.starts_with("swoosh serve on this machine did not answer"),
+                error.starts_with("swoosh serve did not answer here\n  Restart it."),
                 "{error}"
             );
             assert_eq!(error.matches("did not answer").count(), 1, "{error}");

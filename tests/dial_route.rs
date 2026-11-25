@@ -306,7 +306,7 @@ async fn crowded_hints_refuse_a_dialing_verb_first() {
     let crowded: Vec<String> = (0..17)
         .map(|port| format!("{nas}=127.0.0.1:{}", 4000 + port))
         .collect();
-    let line = format!("--peer or SWOOSH_PEER gives more than 16 addresses for {nas}");
+    let line = format!("--peer or SWOOSH_PEER gives more than 16 addresses for one key:\n  {nas}");
     for serving in [true, false] {
         let home = device(&format!("crowded-{serving}"), 60).await;
         let file = a_file(&home);
@@ -1020,7 +1020,7 @@ async fn a_stalled_probe_is_unresponsive() {
     assert_eq!(status, Some(1), "{stderr}");
     assert_eq!(
         stderr,
-        "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+        "error: swoosh serve did not answer here\n  Restart it.\n"
     );
     assert_eq!(opens.load(Ordering::SeqCst), 0, "{stderr}");
     assert!(took < Duration::from_secs(15), "bounded: {took:?}");

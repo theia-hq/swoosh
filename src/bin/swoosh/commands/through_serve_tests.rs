@@ -1874,7 +1874,7 @@ async fn a_stalled_serve_is_unresponsive_for_a_dialing_verb() {
             assert!(report.is::<super::Unresponsive>(), "{tag}: {report:#}");
             assert_eq!(
                 printed(&report),
-                "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+                "error: swoosh serve did not answer here\n  Restart it.\n"
             );
         } else {
             assert!(report.is::<ConnectionLost>(), "{tag}: {report:#}");
@@ -1940,7 +1940,7 @@ async fn a_stalled_serve_is_unresponsive_at_a_port_admission() {
     assert!(report.is::<super::Unresponsive>(), "{report:#}");
     assert_eq!(
         printed(&report),
-        "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+        "error: swoosh serve did not answer here\n  Restart it.\n"
     );
     assert_eq!(heard.len(), 1, "one admission Open");
 }
@@ -2035,7 +2035,7 @@ async fn the_probe_rule_is_one_table() {
         let refused = rule(silent(), lock).err().unwrap();
         assert_eq!(
             printed(&refused),
-            "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+            "error: swoosh serve did not answer here\n  Restart it.\n"
         );
     }
     // A connection ended before its reply: a free lock is no `serve`, an emptied one the key
@@ -2052,7 +2052,7 @@ async fn the_probe_rule_is_one_table() {
         let refused = rule(Probed::Dropped, lock).err().unwrap();
         assert_eq!(
             printed(&refused),
-            "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+            "error: swoosh serve did not answer here\n  Restart it.\n"
         );
     }
     let refused = rule(silent(), Some(Lock::Free)).err().unwrap();
@@ -2151,7 +2151,7 @@ async fn probe_eof_lock_held_is_unresponsive() {
     drop(kept);
     assert_eq!(
         printed(&refused),
-        "error: swoosh serve on this machine did not answer\n  Restart it.\n"
+        "error: swoosh serve did not answer here\n  Restart it.\n"
     );
 }
 

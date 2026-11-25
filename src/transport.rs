@@ -221,11 +221,10 @@ pub struct UnusedReachFlag {
     pub bind: UnusedReach,
 }
 
-/// `--peer` gives one key more addresses than one dial takes. The key prints whole, so it can be compared
-/// with what was set.
+/// `--peer` gives one key more addresses than one dial takes. The key prints whole, alone on its line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "--peer or SWOOSH_PEER gives more than {} addresses for {key}",
+    "--peer or SWOOSH_PEER gives more than {} addresses for one key:\n  {key}",
     Hints::MAX
 )]
 pub struct CrowdedHints {

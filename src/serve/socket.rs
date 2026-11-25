@@ -901,8 +901,8 @@ enum ResponseRead {
 
 /// Why a control frame could not be read or written, or a control operation could not be attempted.
 /// One typed error the codec, the socket client, and the resident all map into, so a caller can
-/// match `NoResident`/`Untrusted`/`Unattributed`/`Refused` instead of stringifying a cause it cannot
-/// inspect.
+/// match `NoResident`/`Untrusted`/`UntrustedPeer`/`Unattributed`/`Refused` instead of stringifying a
+/// cause it cannot inspect.
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {
     /// No resident node is addressable under this home: either no socket exists, or the runtime root
@@ -910,10 +910,8 @@ pub enum ControlError {
     #[error("swoosh serve is not running on this machine")]
     NoResident,
     /// A path is not this user's alone (a foreign owner, a mode wider than 0700, a symlink, a stat
-    /// failure), or the connected peer is another uid or its credentials could not be read: never
-    /// trusted enough to send to. A peer the kernel names no process for lands here too, even when it
-    /// is this user's: on Linux `SO_PEERCRED` reports pid 0 for a listener outside the reader's pid
-    /// namespace, which the credential query rejects.
+    /// failure): never trusted enough to send to. The process answering at a path that is fine is
+    /// [`UntrustedPeer`](Self::UntrustedPeer) instead, under the same head.
     #[error(
         "swoosh serve's socket is not private to you\n  {} is not yours alone.\n  Nothing was sent \
          through it.",
@@ -921,6 +919,20 @@ pub enum ControlError {
     )]
     Untrusted {
         /// The path that failed the ownership, mode, or socket check.
+        path: PathBuf,
+    },
+    /// The path is fine, but the process answering at it is another uid, or its credentials could not
+    /// be read: never trusted enough to send to. A peer the kernel names no process for lands here too,
+    /// even when it is this user's: on Linux `SO_PEERCRED` reports pid 0 for a listener outside the
+    /// reader's pid namespace, which the credential query rejects. Its own detail, since the line
+    /// naming the path would send the person to fix a path that is not at fault.
+    #[error(
+        "swoosh serve's socket is not private to you\n  The process answering at {} is not known to \
+         be yours.\n  Nothing was sent through it.",
+        EscapedPath(path)
+    )]
+    UntrustedPeer {
+        /// The socket the untrusted process answered at.
         path: PathBuf,
     },
     /// The socket's listener is this user's but not the process `serve.lock` records, or there is no
@@ -937,7 +949,7 @@ pub enum ControlError {
         path: PathBuf,
         /// The answering process, as the kernel reports it. Always a real pid, because the code builds
         /// this variant only from one: a credential query that failed, or a pid of 0 (Linux, across pid
-        /// namespaces), is [`Untrusted`](Self::Untrusted) instead.
+        /// namespaces), is [`UntrustedPeer`](Self::UntrustedPeer) instead.
         pid: ProcessId,
     },
     /// The resident did not answer an exchange phase within its bound. The line names no phase: what
@@ -992,6 +1004,30 @@ pub enum ControlError {
     /// Local service-detail failure, distinct from an absent resident or a wire-version mismatch.
     #[error(transparent)]
     LocalDetail(#[from] LocalDetailError),
+}
+
+impl ControlError {
+    /// Whether this says the socket itself cannot be trusted: its path, the process answering it, or
+    /// a process `serve.lock` does not record. Every later connect fails the same check, so a caller
+    /// ends there and keeps this line, which already says nothing was sent. Every variant is named, so
+    /// a new one is a compile error here, never a silent `false` at a caller.
+    #[must_use]
+    pub fn distrusts_socket(&self) -> bool {
+        match self {
+            Self::Untrusted { .. } | Self::UntrustedPeer { .. } | Self::Unattributed { .. } => true,
+            Self::NoResident
+            | Self::Timeout { .. }
+            | Self::Io(_)
+            | Self::TooLarge(_)
+            | Self::Foreign
+            | Self::Version { .. }
+            | Self::Protocol(_)
+            | Self::Catalog(_)
+            | Self::Refused(_)
+            | Self::Open(_)
+            | Self::LocalDetail(_) => false,
+        }
+    }
 }
 
 /// Write the disabled section into a payload buffer: a presence tag, then either the known names or

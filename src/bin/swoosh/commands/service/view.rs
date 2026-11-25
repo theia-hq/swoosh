@@ -34,11 +34,11 @@ fn read_report(home: &Home, error: ReadError) -> eyre::Report {
         }
         // These lines carry only this machine's paths, already escaped, and a pid: escaping the whole
         // again would print their line breaks and apostrophes as escapes.
-        ReadError::Daemon(
-            error @ (ControlError::Untrusted { .. }
-            | ControlError::Unattributed { .. }
-            | ControlError::Timeout { .. }),
-        ) => error.into(),
+        ReadError::Daemon(error)
+            if error.distrusts_socket() || matches!(error, ControlError::Timeout { .. }) =>
+        {
+            error.into()
+        }
         ReadError::Daemon(error) => eyre::eyre!("{}", Escaped(&error.to_string())),
         error => eyre::Report::new(error).wrap_err(format!(
             "could not read local service configuration from {}",

@@ -26,7 +26,7 @@ sent does not land.
 A name the receiver already holds is refused, never replaced.
 A file that does not land prints `skip <file>: <reason>`, and `send` exits non-zero.
 If the machine refuses or cannot be reached, or the same failure would hit every file, `send` stops with one line instead.
-If `swoosh serve` here has stopped answering, `send` stops with `error: swoosh serve on this machine did not answer`.
+If `swoosh serve` here has stopped answering, `send` stops with `error: swoosh serve did not answer here`.
 If `swoosh serve` here stops during a `send`, `send` ends with `error: swoosh serve stopped here and ended the connection to <machine>`.
 Run it again without the files already marked `sent`; if every file was marked `sent`, there is nothing to send.
 If the receiver does not answer a file within 10 minutes, `send` prints a `skip` line, and the file may have arrived.

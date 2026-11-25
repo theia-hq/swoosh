@@ -778,7 +778,7 @@ async fn the_exchange_beside_leaves_the_verbs_result() {
     }
 }
 
-/// A control socket that cannot be trusted at an Open's connect, its path or its listener's uid, or one
+/// A control socket that cannot be trusted at an Open's connect, its path or the process answering, or one
 /// another process answers, keeps its own error through `serve`, never a cut's `connection lost` or
 /// `serve`'s stopped line.
 #[test]
@@ -799,6 +799,7 @@ fn an_untrusted_socket_at_an_open_keeps_its_own_line() {
         let path = served.home.dir().join("serve.sock");
         for untrusted in [
             ControlError::Untrusted { path: path.clone() },
+            ControlError::UntrustedPeer { path: path.clone() },
             ControlError::Unattributed {
                 path: path.clone(),
                 pid: 4242.try_into().unwrap(),
