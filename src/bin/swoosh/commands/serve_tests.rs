@@ -22,9 +22,8 @@ use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, FirstRound, ProxyScope,
-    ProxyService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, control,
-    extract_recv_services,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, ProxyScope, ProxyService,
+    SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, control, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
@@ -4814,7 +4813,7 @@ async fn the_first_sync_round_runs_at_start() {
         swoosh::sync::SourceDial::new(&own, &home),
         swoosh::renewal::SourceFetch::new(&own),
     );
-    let (first_round, _held) = FirstRound::hold_stop(AllEnabled);
+    let (first_round, _held) = control::FirstRound::new();
     let started = tokio::time::Instant::now();
     tokio::select! {
         () = super::sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds never end"),
@@ -4847,7 +4846,7 @@ async fn serves_rounds_ride_its_own_peers() {
         swoosh::sync::SourceDial::new(&own, &home),
         swoosh::renewal::SourceFetch::new(&own),
     );
-    let (first_round, _held) = FirstRound::hold_stop(AllEnabled);
+    let (first_round, _held) = control::FirstRound::new();
     let renewed = TestRoot::seeded(FIRST_ROUND_ROOT)
         .device_badge(
             desk,
@@ -4909,7 +4908,8 @@ async fn a_round_that_finds_no_sibling_still_opens_stop() {
         swoosh::sync::SourceDial::new(&own, &home),
         swoosh::renewal::SourceFetch::new(&own),
     );
-    let (first_round, held) = FirstRound::hold_stop(AllEnabled);
+    let (first_round, hold) = control::FirstRound::new();
+    let held = swoosh::serve::StopAfterFirstRound::new(AllEnabled, hold);
     let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
     let started = tokio::time::Instant::now();
     let rounds = super::sync_rounds(&home, &dial, &fetch, first_round);
@@ -4957,7 +4957,8 @@ async fn a_host_that_is_not_your_device_opens_stop_after_its_round() {
         swoosh::sync::SourceDial::new(&own, &home),
         swoosh::renewal::SourceFetch::new(&own),
     );
-    let (first_round, held) = FirstRound::hold_stop(AllEnabled);
+    let (first_round, hold) = control::FirstRound::new();
+    let held = swoosh::serve::StopAfterFirstRound::new(AllEnabled, hold);
     let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
     let started = tokio::time::Instant::now();
     tokio::select! {
@@ -5021,9 +5022,10 @@ async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_after_the_first_
                 .expect("control.stop binds")
                 .expose()
                 .expect("the exposer builds");
-            // The two halves apart, as `FirstRound::hold` wires them, so the test can watch the hold open.
-            let (first_round, held) = FirstRound::hold_stop(AllEnabled);
-            let held = std::sync::Arc::new(held);
+            // The two halves apart, as `serve` wires them, so the test can watch the hold open.
+            let (first_round, hold) = control::FirstRound::new();
+            let held =
+                std::sync::Arc::new(swoosh::serve::StopAfterFirstRound::new(AllEnabled, hold));
             let exposer = exposer.with_enabled(SharedHold(std::sync::Arc::clone(&held)));
             let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
             let connector = |node: bifrost::NodeId| {
@@ -5140,6 +5142,246 @@ async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_after_the_first_
             let _ = std::fs::remove_dir_all(home.dir());
         })
         .await;
+}
+
+/// The same thief, over `control.serve`: it opens its streams during the first round, while the gate still
+/// admits it and just before the revoking list lands, and sends a `Stop` on one the moment the round ends
+/// and every 10 ms for three debounces after. Each is refused, unanswered and reset, and your other
+/// device's stop is answered `Done` after. The stream was admitted before the fold, so the handler's own
+/// look at `revoked` is all that refuses it, and that look is fresh only because the round waits out a
+/// stat debounce before it ends: open the stop the moment the round ends and the store, last read when
+/// the thief's streams opened just before the fold, answers from that read and lets the thief stop this
+/// machine.
+#[tokio::test]
+async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_through_control_serve() {
+    use core::cell::RefCell;
+
+    use bifrost::Session as _;
+    use tightbeam::identity::AsVerifyKey as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+            let host_id = host.node_id();
+            let thief = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+            let sibling =
+                bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+            let thief_key = thief.node_id().verify_key().expect("a usable key");
+            let sibling_key = sibling.node_id().verify_key().expect("a usable key");
+            let others = [(thief_key, "laptop"), (sibling_key, "phone")];
+            let home = home_listing("revoked-first-serve", &others).await;
+
+            let (gate, cut) =
+                swoosh::gate::anchored(&home, host_id, swoosh::serve::BoundTargets::default())
+                    .await
+                    .expect("the gate");
+            let cancel = CancellationToken::new();
+            let source = std::sync::Arc::new(swoosh::serve::StopSource::new());
+            // The store the gate reads, as `serve` passes it. No live cut: the thief's session outlives
+            // the fold, so the handler's own look is the only thing between its stream and a stop.
+            let (router, _catalog, first_round) = control::bind_serve(
+                swoosh::serve::diagnostics(Router::new(gate), &[]).expect("the diagnostics bind"),
+                cancel.clone(),
+                std::sync::Arc::clone(&source),
+                cut.revocations(),
+            )
+            .expect("control.serve binds");
+            let hold = first_round.hold();
+            let exposer = router.expose().expect("the exposer builds");
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+            let serve: nauthy::Service = swoosh::serve::CONTROL_SERVE_SERVICE
+                .parse()
+                .expect("a service");
+
+            let thief_session = member_connector(host_id, &serve, thief.node_id())
+                .open_service(&thief)
+                .await
+                .expect("the thief's connect lands; the gate decides per stream");
+            let opened = RefCell::new(Vec::new());
+            let dial = InOrder {
+                home: home.clone(),
+                // The thief's list, from before its revocation, then the one that revokes it.
+                lists: [
+                    first_round_list(2, &others, &[]),
+                    first_round_list(3, &others[1..], &[thief_key]),
+                ],
+                // The thief's streams, then one more a debounce after them, so that admission reads
+                // `revoked` afresh just before the fold: the store's last read is from before it.
+                before_revoking: async || {
+                    let mut streams = Vec::new();
+                    for _ in 0..40 {
+                        streams.push(
+                            thief_session
+                                .open_bi()
+                                .await
+                                .expect("the gate admits the thief before the fold"),
+                        );
+                    }
+                    tokio::time::sleep(nauthy::STAT_DEBOUNCE * 2).await;
+                    streams.push(
+                        thief_session
+                            .open_bi()
+                            .await
+                            .expect("the gate admits the thief before the fold"),
+                    );
+                    opened.borrow_mut().extend(streams);
+                },
+                asked: AtomicU32::new(0),
+            };
+            let asking = async {
+                tokio::time::timeout(Duration::from_secs(30), hold.opened())
+                    .await
+                    .expect("the round opens the stop");
+                // A stop open before the revoking list landed is open to the thief whatever the handler
+                // asks: the row would prove nothing.
+                assert_eq!(
+                    dial.asked.load(Ordering::SeqCst),
+                    2,
+                    "the stop opened before the revoking list landed"
+                );
+                // At once and for a few debounces after the hold opens: the window a store still holding
+                // its read from before the fold would answer the thief's stop in.
+                let mut streams = opened.take().into_iter();
+                let started = tokio::time::Instant::now();
+                while started.elapsed() < nauthy::STAT_DEBOUNCE * 3 {
+                    let (mut writer, mut reader) =
+                        streams.next().expect("a stream opened before the fold");
+                    writer
+                        .write_all(&[control::Request::Stop.encode()])
+                        .await
+                        .expect("the request is sent");
+                    let mut answer = Vec::new();
+                    let read = reader.read_to_end(&mut answer).await;
+                    assert!(
+                        read.is_err() && answer.is_empty(),
+                        "the thief's stop is never answered: {read:?} {answer:?}"
+                    );
+                    assert!(!cancel.is_cancelled(), "and the node runs on");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                () = super::sync_rounds(&home, &dial, &NoRenewal, first_round) => {
+                    unreachable!("the rounds never end")
+                }
+                () = asking => {}
+            }
+            assert_eq!(source.first(), None, "nothing noted a stop");
+
+            let (mut writer, mut reader) = member_connector(host_id, &serve, sibling.node_id())
+                .open_service(&sibling)
+                .await
+                .expect("your other device reaches control.serve")
+                .open_bi()
+                .await
+                .expect("your other device is admitted");
+            writer
+                .write_all(&[control::Request::Stop.encode()])
+                .await
+                .expect("the request is sent");
+            let mut answer = [0_u8; 1];
+            reader
+                .read_exact(&mut answer)
+                .await
+                .expect("the node answers the stop");
+            assert_eq!(answer, [control::Answer::Done.encode()]);
+            writer.shutdown().await.expect("the device closes its side");
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("the stop ends the run")
+                .expect("the run task joins");
+            assert_eq!(
+                source.first(),
+                Some(swoosh::serve::StopKind::Wire(sibling_key))
+            );
+            let _ = std::fs::remove_dir_all(home.dir());
+        })
+        .await;
+}
+
+/// The exposer `serve` runs holds `control.stop` until the first round has ended: a member is refused it
+/// before `finished()` and admitted after. Built through the same `held_exposer` `serve` calls, so a run
+/// that loses the hold on its old stop route turns this red.
+#[tokio::test]
+async fn serves_exposer_holds_control_stop_until_the_first_round_ends() {
+    use bifrost::Session as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+            let host_id = host.node_id();
+            let member =
+                bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+            let home = home_with_a_sibling("held-stop", member.node_id()).await;
+            let (gate, cut) =
+                swoosh::gate::anchored(&home, host_id, swoosh::serve::BoundTargets::default())
+                    .await
+                    .expect("the gate");
+            let cancel = CancellationToken::new();
+            let router = swoosh::serve::diagnostics(Router::new(gate), &[])
+                .expect("the diagnostics bind")
+                .member_service(
+                    CONTROL_STOP_SERVICE.parse().expect("a service"),
+                    Stop::new(cancel.clone(), std::sync::Arc::default()),
+                )
+                .expect("control.stop binds");
+            let (first_round, _hold) = control::FirstRound::new();
+            let exposer = super::held_exposer(router, AllEnabled, &first_round, cut)
+                .expect("the exposer builds");
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+            let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a service");
+            let session = member_connector(host_id, &stop, member.node_id())
+                .open_service(&member)
+                .await
+                .expect("the member's connect lands; the gate decides per stream");
+
+            match session.open_bi().await {
+                Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted)) => {}
+                Ok(_) => panic!("control.stop was admitted before the first round ended"),
+                Err(error) => panic!("the stream failed otherwise: {error}"),
+            }
+            assert!(!cancel.is_cancelled(), "a held stop stops nothing");
+
+            first_round.finished();
+            let (mut writer, mut reader) = session
+                .open_bi()
+                .await
+                .expect("control.stop is admitted once the round has ended");
+            let mut ack = [0_u8; 1];
+            reader
+                .read_exact(&mut ack)
+                .await
+                .expect("the node acks the stop");
+            writer.shutdown().await.expect("the member closes its side");
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("the stop ends the run")
+                .expect("the run task joins");
+            let _ = std::fs::remove_dir_all(home.dir());
+        })
+        .await;
+}
+
+/// A connector from `node` to `service` on `host`, presenting a device badge the first-round root signed.
+fn member_connector(
+    host: bifrost::NodeId,
+    service: &nauthy::Service,
+    node: bifrost::NodeId,
+) -> tightbeam::tunnel::Connector {
+    let until =
+        std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(swoosh::testkit::STANDING_UNTIL);
+    let badge = swoosh::testkit::TestRoot::seeded(FIRST_ROUND_ROOT)
+        .device_badge(node, until)
+        .expect("a badge");
+    tightbeam::tunnel::Connector::to_node(host, service.clone(), Some(badge))
 }
 
 /// Devices that answer in the order asked, whoever is asked: the first hands over `lists[0]`, the second
