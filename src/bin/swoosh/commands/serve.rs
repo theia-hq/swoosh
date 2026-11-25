@@ -49,10 +49,10 @@ use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FirstRound,
-    InstanceLock, ProxyScope, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError,
-    Started, Stop, StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_lookup,
-    bind_recv, bind_renewal, classify_stop, extract_recv_services, refuse_recv_into_home,
+    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FirstRound,
+    InstanceLock, ProxyScope, RecvService, Resident, ServiceList, SingleError, Started, Stop,
+    StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv, classify_stop, control,
+    extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -622,18 +622,10 @@ impl ServeCmd {
         for entry in &requested {
             router = bind_entry(router, entry, host_seed, &public)?;
         }
-        // The update route, on every `serve` whatever the standing, member-gated: only this root's devices
-        // exchange on it. Bound by the node, never by an entry, and dotted, so no typed name reaches it.
-        router = router.member_service(SYNC_SERVICE.parse()?, Exchange::new(home.clone()))?;
-        // The pick-up route, proven-only: a device of this root whose standing ended takes its renewal
-        // here. Bound on every `serve` so a `join` under a running one needs no restart, but only while
-        // this home is a device or holds its root, and its update verifies under the pin, does any key
-        // reach the handler: a key the update lists live.
-        let (bound, known) = bind_renewal(router, &home).await?;
-        router = bound;
-        // The root route, proven-only: a peer this home saves as one machine of a person asks it which
-        // root vouches for this machine. Every other key misses before it takes a slot.
-        let (bound, saved) = bind_lookup(router, &home).await?;
+        // The update, pick-up and root routes, on every `serve` whatever the standing. Bound by the node,
+        // never by an entry, and dotted, so no typed name reaches them.
+        let (bound, control::Watched { known, devices }) =
+            control::bind_exchanges(router, &home).await?;
         router = bound;
         for scoped in proxy.services() {
             // One engine handler per proxy service, holding ONLY its own origin scope. Every scope names an
@@ -774,7 +766,7 @@ impl ServeCmd {
             never = expiry => match never {},
             () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
-            () = saved.watch() => unreachable!("the root route's keys are read until the node stops"),
+            () = devices.watch() => unreachable!("the root route's keys are read until the node stops"),
             () = enabled.watch(|waiting| {
                 eprint!("{}", waiting_warnings(waiting));
                 let changed: Vec<String> = waiting.added.iter().chain(&waiting.changed).cloned().collect();
@@ -926,8 +918,7 @@ fn serving_block(
     };
     let mut out = Vec::new();
     let mut rows = Vec::new();
-    for (name, target) in service_pairs(&entries).filter(|(name, _)| !name.starts_with("control."))
-    {
+    for (name, target) in service_pairs(&entries) {
         let open = manifest
             .iter()
             .any(|entry| entry.name == name && entry.posture == Posture::Open);
@@ -949,8 +940,8 @@ fn serving_block(
         }
     }
     if let Some(saved_entries) = &saved_entries {
-        for (name, target) in service_pairs(saved_entries)
-            .filter(|(name, _)| !name.starts_with("control.") && !bound.contains_key(name))
+        for (name, target) in
+            service_pairs(saved_entries).filter(|(name, _)| !bound.contains_key(name))
         {
             rows.push(Row {
                 name,

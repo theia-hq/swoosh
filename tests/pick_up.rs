@@ -117,8 +117,8 @@ async fn renewing(nas: &Home, laptop: NodeId) -> Link {
     standing
 }
 
-/// Serve `home` on `host` as `serve` does: `ping`, the update route, and the pick-up route, behind the
-/// anchored gate, with the live cut.
+/// Serve `home` on `host` as `serve` does: `ping`, the update route, the pick-up route and the root route,
+/// behind the anchored gate, with the live cut.
 fn serve(home: Home, host: Node<MemTransport, NoDiscovery>) {
     tokio::task::spawn_local(async move {
         let (gate, cut) = swoosh::gate::anchored(
@@ -129,13 +129,9 @@ fn serve(home: Home, host: Node<MemTransport, NoDiscovery>) {
         .await
         .unwrap();
         let router = swoosh::serve::diagnostics(Router::new(gate), &[]).unwrap();
-        let router = router
-            .member_service(
-                SYNC_SERVICE.parse().unwrap(),
-                swoosh::serve::Exchange::new(home.clone()),
-            )
+        let (router, _watched) = swoosh::serve::control::bind_exchanges(router, &home)
+            .await
             .unwrap();
-        let (router, _known) = swoosh::serve::bind_renewal(router, &home).await.unwrap();
         router
             .expose()
             .unwrap()
@@ -297,7 +293,7 @@ fn a_read_error_keeps_the_devices_the_door_knows() {
         let laptop = TestNode::seeded(0x53).node_id();
         renewing(&nas, laptop).await;
         let key = laptop.verify_key().unwrap();
-        let known = swoosh::serve::Known::load(&nas).await;
+        let known = swoosh::serve::control::Known::load(&nas).await;
         assert!(known.knows(&key), "the door knows the laptop");
 
         for path in [nas.root_pub(), nas.devices()] {
@@ -348,7 +344,7 @@ fn a_revoked_key_reaches_no_route() {
     });
 }
 
-/// A router over `home`'s anchored gate carrying only the pick-up route, bound as `serve` binds it.
+/// A router over `home`'s anchored gate carrying the pick-up route, bound as `serve` binds it.
 async fn router(home: &Home) -> Router {
     let (gate, _cut) = swoosh::gate::anchored(
         home,
@@ -357,7 +353,7 @@ async fn router(home: &Home) -> Router {
     )
     .await
     .unwrap();
-    swoosh::serve::bind_renewal(Router::new(gate), home)
+    swoosh::serve::control::bind_exchanges(Router::new(gate), home)
         .await
         .unwrap()
         .0

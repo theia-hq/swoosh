@@ -22,8 +22,8 @@ use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, Exchange, FirstRound,
-    ProxyScope, ProxyService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, FirstRound, ProxyScope,
+    ProxyService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, control,
     extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
@@ -217,7 +217,10 @@ fn update_route(router: Router) -> Router {
     ))
     .expect("a home");
     router
-        .member_service(SYNC_SERVICE.parse().expect("a name"), Exchange::new(home))
+        .member_service(
+            SYNC_SERVICE.parse().expect("a name"),
+            control::Sync::new(home),
+        )
         .expect("the update route binds")
 }
 
@@ -363,15 +366,6 @@ fn serving_rows_escape_complete_targets_and_stack_without_splitting() {
     assert!(empty.contains(
         "Serving nothing.\nTo save a service for a bare start:\n  swoosh service add <service>\n"
     ));
-    let internal = Started::Named(vec![
-        "control.stop=echo:".to_owned(),
-        "ping=ping:".to_owned(),
-    ]);
-    assert!(
-        !serving_block(&internal, None, &default_manifest())
-            .unwrap()
-            .contains("control.stop")
-    );
 }
 
 /// The line that says how to keep this machine serving prints only where no service manager runs it and

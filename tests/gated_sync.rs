@@ -96,7 +96,7 @@ async fn proof() {
         Router::new(gate)
             .member_service(
                 SYNC_SERVICE.parse().unwrap(),
-                swoosh::serve::Exchange::new(serving),
+                swoosh::serve::control::Sync::new(serving),
             )
             .unwrap()
             .expose()
@@ -193,7 +193,7 @@ async fn lapsed_pull() {
         Router::new(gate)
             .member_service(
                 SYNC_SERVICE.parse().unwrap(),
-                swoosh::serve::Exchange::new(serving),
+                swoosh::serve::control::Sync::new(serving),
             )
             .unwrap()
             .expose()

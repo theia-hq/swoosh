@@ -3057,8 +3057,8 @@ mod tests {
             swoosh::gate::anchored(&home, own, swoosh::serve::BoundTargets::default())
                 .await
                 .expect("the gate builds");
-        let (router, _known) =
-            swoosh::serve::bind_renewal(tightbeam::tunnel::Router::new(gate), &home)
+        let (router, _watched) =
+            swoosh::serve::control::bind_exchanges(tightbeam::tunnel::Router::new(gate), &home)
                 .await
                 .expect("the route binds");
         assert!(
