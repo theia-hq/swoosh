@@ -19,7 +19,7 @@ fn bound(local: bool) -> transport::Bound {
 #[test]
 fn a_reached_but_refused_probe_is_a_refusal_without_the_reach_hint() {
     let err = Outcome::Refused
-        .into_result(&"alice", &bound(true))
+        .into_result(&alice(), &bound(true))
         .expect_err("a refusal is non-zero");
     let msg = format!("{err:#}");
     assert!(msg.contains("reached, but refused"), "{msg}");
@@ -27,18 +27,112 @@ fn a_reached_but_refused_probe_is_a_refusal_without_the_reach_hint() {
     assert!(!msg.contains("--peer"), "{msg}");
 }
 
-// Under `--local` the remedy names the setting as the cause, both its spellings, since only the variable
-// may be set: the internet fallback is what it removed.
-#[test]
-fn an_all_unreachable_local_probe_names_the_flag_as_the_cause() {
+/// `alice/laptop`, a contact's machine, resolved as a verb resolves it.
+fn alice() -> Machine {
+    let mut contacts = Contacts::default();
+    contacts
+        .save(&"alice/laptop".parse().expect("a contact"), laptop())
+        .expect("the name is free");
+    "alice/laptop"
+        .parse::<Peer>()
+        .expect("a name")
+        .machine(&contacts)
+        .expect("one machine")
+}
+
+/// The key of `alice/laptop` in [`alice`].
+fn laptop() -> bifrost::NodeId {
+    bifrost::NodeId::from_ed25519_secret(&[0x1a; 32])
+}
+
+// A `--local` dial that reached nothing names both spellings of the setting as the cause, since only the
+// variable may be set, then where the machine lists its addresses and the `--peer` form with its whole key.
+// Named, the title and the pointer name the machine; unnamed, the title holds the short key and the
+// pointer says `that machine`. The dial's cause chain is not shown: it says how the dial failed, which the
+// person cannot act on.
+#[tokio::test]
+async fn a_local_miss_names_status_and_the_peer_form() {
+    let named = alice();
     let err = Outcome::Unreachable
-        .into_result(&"alice", &bound(true))
+        .into_result(&named, &bound(true))
         .expect_err("all-unreachable is non-zero");
     assert_eq!(
         format!("{err:#}"),
-        "could not reach alice\n  With --local or SWOOSH_LOCAL, swoosh looks on this network only.\n  \
-         Give its address with --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL."
+        format!(
+            "could not reach alice/laptop on this network\n  \
+             With --local or SWOOSH_LOCAL, swoosh looks for it on this network,\n  \
+             or at an address you give.\n  \
+             On alice/laptop, swoosh status lists its addresses under reach.\n  \
+             Add one of those addresses to your command:\n    \
+             --peer {}=<address>",
+            laptop()
+        )
     );
+
+    let (node, unnamed) = unreachable();
+    let peers = crate::peers::Peers::new(&node);
+    let Err(error) = peers
+        .isolated(unnamed.key(), crate::peers::Hints::NONE)
+        .await
+    else {
+        panic!("a dial the peer closed is an error");
+    };
+    let shown = format!("{:#}", open_failed(&unnamed, error, &bound(true)));
+    assert_eq!(
+        shown,
+        format!(
+            "could not reach {} on this network\n  \
+             With --local or SWOOSH_LOCAL, swoosh looks for it on this network,\n  \
+             or at an address you give.\n  \
+             On that machine, swoosh status lists its addresses under reach.\n  \
+             Add one of those addresses to your command:\n    \
+             --peer {}=<address>",
+            crate::credential::short(&HostilePeer::node_id()),
+            HostilePeer::node_id()
+        )
+    );
+    assert!(!shown.contains("closed by peer"), "{shown}");
+}
+
+// Outside `--local` a miss keeps its own line, byte for byte: the chain the dial gave, escaped, and the
+// resolver it asked when it is not n0's. None of the `--local` words reach a default bind.
+#[tokio::test]
+async fn a_default_miss_is_unchanged() {
+    let (node, machine) = unreachable();
+    let over_own = transport::Bound {
+        local: false,
+        reach: transport::Reach {
+            relay: transport::RelayHome::N0,
+            resolver: transport::Resolver::Custom(
+                "https://dns.example/pkarr"
+                    .parse()
+                    .expect("a valid resolver url"),
+            ),
+        },
+    };
+    for (bound, expected) in [
+        (
+            bound(false),
+            r"could not reach ed012txmdbu7…: connect to peer: closed by peer: no\r\u{1b}[2Kalice: 900 MiB/s\u{202e}",
+        ),
+        (
+            over_own,
+            "could not reach ed012txmdbu7…: connect to peer: closed by peer: no\\r\\u{1b}[2Kalice: 900 MiB/s\\u{202e}\n  \
+             resolver asked: https://dns.example/pkarr",
+        ),
+    ] {
+        let peers = crate::peers::Peers::new(&node);
+        let Err(error) = peers
+            .isolated(machine.key(), crate::peers::Hints::NONE)
+            .await
+        else {
+            panic!("a dial the peer closed is an error");
+        };
+        assert_eq!(
+            format!("{:#}", open_failed(&machine, error, &bound)),
+            expected
+        );
+    }
 }
 
 // An iroh dial that reached nobody names the RESOLVER it asked, because iroh's own error does not:
@@ -61,12 +155,12 @@ fn an_all_unreachable_iroh_probe_names_the_resolver_it_asked() {
         },
     };
     let err = Outcome::Unreachable
-        .into_result(&"alice", &over_own)
+        .into_result(&alice(), &over_own)
         .expect_err("all-unreachable is non-zero");
     let msg = format!("{err:#}");
     assert_eq!(
         msg,
-        "could not reach alice\n  resolver asked: https://dns.example/pkarr"
+        "could not reach alice/laptop\n  resolver asked: https://dns.example/pkarr"
     );
 }
 
@@ -75,9 +169,9 @@ fn an_all_unreachable_iroh_probe_names_the_resolver_it_asked() {
 #[test]
 fn an_all_unreachable_n0_probe_names_no_reach_service() {
     let err = Outcome::Unreachable
-        .into_result(&"alice", &bound(false))
+        .into_result(&alice(), &bound(false))
         .expect_err("all-unreachable is non-zero");
-    assert_eq!(format!("{err:#}"), "could not reach alice");
+    assert_eq!(format!("{err:#}"), "could not reach alice/laptop");
 }
 
 // A probe that failed mid-protocol is its OWN non-zero outcome: the node was reached, so the error
@@ -87,7 +181,7 @@ fn an_all_unreachable_n0_probe_names_no_reach_service() {
 #[test]
 fn a_failed_probe_probe_is_non_zero_and_says_the_probe_failed() {
     let err = Outcome::Failed
-        .into_result(&"alice", &bound(true))
+        .into_result(&alice(), &bound(true))
         .expect_err("a failed probe is non-zero");
     let msg = format!("{err:#}");
     assert!(msg.contains("reached, but the probe failed"), "{msg}");
@@ -99,10 +193,10 @@ fn a_failed_probe_probe_is_non_zero_and_says_the_probe_failed() {
 #[test]
 fn only_a_healthy_probe_exits_green() {
     let local = bound(true);
-    assert!(Outcome::Healthy.into_result(&"alice", &local).is_ok());
+    assert!(Outcome::Healthy.into_result(&alice(), &local).is_ok());
     for outcome in [Outcome::Unreachable, Outcome::Refused, Outcome::Failed] {
         assert!(
-            outcome.into_result(&"alice", &local).is_err(),
+            outcome.into_result(&alice(), &local).is_err(),
             "{outcome:?} must not exit green"
         );
     }
@@ -112,29 +206,25 @@ fn only_a_healthy_probe_exits_green() {
 /// bidi override.
 const HOSTILE: &str = "closed by peer: no\r\u{1b}[2Kalice: 900 MiB/s\u{202e}";
 
-/// A node whose every dial fails with [`HOSTILE`] as the cause, the raw key it is asked to reach, and the
-/// machine that key resolves to.
-fn unreachable() -> (
-    bifrost::Node<HostilePeer, bifrost::NoDiscovery>,
-    Peer,
-    Machine,
-) {
+/// A node whose every dial fails with [`HOSTILE`] as the cause, and the machine it is asked to reach: a
+/// raw key no name here holds.
+fn unreachable() -> (bifrost::Node<HostilePeer, bifrost::NoDiscovery>, Machine) {
     let node = bifrost::Node::new(HostilePeer::Unreachable(HOSTILE), bifrost::NoDiscovery);
-    let target = HostilePeer::node_id()
+    let machine = HostilePeer::node_id()
         .to_string()
         .parse::<Peer>()
-        .expect("a raw key parses as a Peer");
-    let machine = target
+        .expect("a raw key parses as a Peer")
         .machine(&Contacts::default())
         .expect("a key is one machine");
-    (node, target, machine)
+    (node, machine)
 }
 
 /// The line a target the dial did not reach prints: the connect's cause chain, the peer's reason escaped,
 /// on one line, with the words as they were.
-fn escaped_unreached(target: &Peer) -> String {
+fn escaped_unreached(target: &Machine) -> String {
     format!(
-        r"could not reach {target}: connect to peer: closed by peer: no\r\u{{1b}}[2Kalice: 900 MiB/s\u{{202e}}"
+        r"could not reach {}: connect to peer: closed by peer: no\r\u{{1b}}[2Kalice: 900 MiB/s\u{{202e}}",
+        target.label()
     )
 }
 
@@ -142,7 +232,7 @@ fn escaped_unreached(target: &Peer) -> String {
 // own text.
 #[tokio::test]
 async fn a_hostile_connect_failure_prints_escaped() {
-    let (node, target, machine) = unreachable();
+    let (node, machine) = unreachable();
     let bound = bound(false);
     let peers = crate::peers::Peers::new(&node);
     let Err(error) = peers
@@ -152,8 +242,8 @@ async fn a_hostile_connect_failure_prints_escaped() {
         panic!("a dial the peer closed is an error");
     };
     assert_eq!(
-        format!("{:#}", open_failed(&target, error, &bound)),
-        escaped_unreached(&target)
+        format!("{:#}", open_failed(&machine, error, &bound)),
+        escaped_unreached(&machine)
     );
 }
 

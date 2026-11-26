@@ -5,7 +5,7 @@
 use bifrost::{NodeId, Refusal};
 use swoosh::escape::{Escaped, causes, escaped_report};
 use swoosh::node_client::UidSocket;
-use swoosh::peer::{Machine, Peer};
+use swoosh::peer::Machine;
 use swoosh::peers::OpenError;
 use swoosh::reach;
 use swoosh::serve::control_codec::{OpenRefusal, PeerRefusal};
@@ -19,13 +19,9 @@ use crate::commands::through_serve::{Busy, Dial, Skew, StandingEnded, ThisMachin
 /// The path a run's streams take, for the lines an outcome prints: each path prints its own for the
 /// same outcome.
 pub enum Route<'a> {
-    /// By own bind: the machine as typed and what the run bound, for an unreachable one's line, and the
-    /// key it bound, for an ended standing's remedy.
-    Own {
-        peer: &'a Peer,
-        bound: &'a Bound,
-        this: NodeId,
-    },
+    /// By own bind: what the run bound, for an unreachable machine's line, and the key it bound, for an
+    /// ended standing's remedy.
+    Own { bound: &'a Bound, this: NodeId },
     /// Through `serve`: the dial's lines, and its socket to ask whether `serve` went.
     Serve {
         dial: &'a Dial<'a>,
@@ -66,12 +62,12 @@ impl Route<'_> {
     /// The line `unopened` prints for `machine`: by own bind, the cause chain as a transport's failure
     /// prints it; through `serve`, the routed verbs' line for it.
     pub async fn line(&self, unopened: Unopened, machine: &Machine) -> eyre::Report {
-        let (peer, bound, this) = match self {
+        let (bound, this) = match self {
             Self::Serve { dial, socket } => {
                 let unattached = dial.unopened(unopened, socket).await;
                 return dial.unattached(unattached, *socket).await;
             }
-            Self::Own { peer, bound, this } => (*peer, *bound, *this),
+            Self::Own { bound, this } => (*bound, *this),
         };
         match unopened {
             Unopened::Refused(OpenRefusal::Peer(refusal)) => {
@@ -90,7 +86,7 @@ impl Route<'_> {
                 OpenRefusal::Broken(detail) | OpenRefusal::PeerUnreadable(detail),
             ) => peer_error(&bifrost::Error::Stream(detail.to_string().into())),
             Unopened::Own(error @ OpenError::Unreachable(_)) => {
-                reach::open_failed(peer, error, bound)
+                reach::open_failed(machine, error, bound)
             }
             Unopened::Own(error) => peer_error(&error),
             Unopened::Home(report) => peer_error(report.as_ref()),
@@ -127,12 +123,12 @@ impl Route<'_> {
         }
     }
 
-    /// The exit of a probe of `peer` that got as far as `outcome`: by own bind an unreachable machine
+    /// The exit of a probe of `machine` that got as far as `outcome`: by own bind an unreachable machine
     /// carries the bind's reach hint; through `serve` no bind of this run's can be the cause.
-    pub fn result(&self, outcome: reach::Outcome, peer: &Peer) -> eyre::Result<()> {
+    pub fn result(&self, outcome: reach::Outcome, machine: &Machine) -> eyre::Result<()> {
         match self {
-            Self::Own { bound, .. } => outcome.into_result(peer, bound),
-            Self::Serve { .. } => outcome.unbound_result(peer),
+            Self::Own { bound, .. } => outcome.into_result(machine, bound),
+            Self::Serve { .. } => outcome.unbound_result(&machine.label()),
         }
     }
 

@@ -322,7 +322,6 @@ fn one_ending_table_on_both_paths() {
         let cmd = port_forward("me/nas");
         let bound = bound();
         let own = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: crate::commands::through_serve::tests::nas(),
         };
@@ -629,10 +628,8 @@ fn a_port_admission_ends_with_end_on_both_paths() {
     on_a_big_stack(async || {
         let contacts = book();
         let machine: Machine = machine(&contacts, "me/nas");
-        let cmd = port_forward("me/nas");
         let bound = bound();
         let route = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: crate::commands::through_serve::tests::nas(),
         };
@@ -701,10 +698,8 @@ impl StreamSource for AsksLate<'_> {
 #[test]
 fn a_port_closes_before_its_ending_asks_why() {
     on_a_big_stack(async || {
-        let cmd = port_forward("me/nas");
         let bound = bound();
         let route = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: crate::commands::through_serve::tests::nas(),
         };

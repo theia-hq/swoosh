@@ -618,7 +618,7 @@ async fn an_anyone_link_binds_its_own_key_while_serve_runs() {
     // The `--local` teaching line is the own bind's: through `serve` the flag is refused first.
     assert!(stderr.starts_with("error: could not reach "), "{stderr}");
     assert!(
-        stderr.contains("With --local or SWOOSH_LOCAL, swoosh looks on this network only."),
+        stderr.contains("With --local or SWOOSH_LOCAL, swoosh looks for it on this network,"),
         "{stderr}"
     );
     assert!(!stderr.contains("swoosh serve"), "{stderr}");

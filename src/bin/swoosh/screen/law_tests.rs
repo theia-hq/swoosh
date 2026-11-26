@@ -50,7 +50,8 @@ Invite:
     (
         "the --local refusal",
         "error: could not reach me/laptop on this network
-  With --local, swoosh looks for it on this network, or at an address you give.
+  With --local or SWOOSH_LOCAL, swoosh looks for it on this network,
+  or at an address you give.
   On me/laptop, swoosh status lists its addresses under reach.
   Add one of those addresses to your command:
     --peer ed01r25iqp4gca63iwwfjmrgn54ckpnwcvkxl6ylhrtbya32mvgjrpma=<address>
@@ -82,6 +83,35 @@ fn the_signed_screens_hold_the_law() {
     for (source, screen) in SIGNED {
         if let Err(breach) = read(screen) {
             panic!("{source}: {breach}");
+        }
+    }
+}
+
+/// The `--local` refusal as the run prints it, named and unnamed, holds the law: the code's own lines, not
+/// a copy of them.
+#[test]
+fn the_local_refusal_holds_the_law() {
+    let bound = swoosh::transport::Bound {
+        local: true,
+        reach: swoosh::transport::Reach::default(),
+    };
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x1a; 32]);
+    let mut contacts = swoosh::contacts::Contacts::default();
+    contacts
+        .save(&"me/laptop".parse().expect("a device"), key)
+        .expect("the name is free");
+    for saved in [contacts, swoosh::contacts::Contacts::default()] {
+        let machine = swoosh::peer::Peer::Raw(key)
+            .machine(&saved)
+            .expect("a key is one machine");
+        let refused = swoosh::reach::Outcome::Unreachable
+            .into_result(&machine, &bound)
+            .expect_err("a miss is an error");
+        let mut screen = Vec::new();
+        crate::print_error(&refused, &mut screen);
+        let screen = String::from_utf8(screen).expect("the refusal is UTF-8");
+        if let Err(breach) = read(&screen) {
+            panic!("{breach}\n{screen}");
         }
     }
 }

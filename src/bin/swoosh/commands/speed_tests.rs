@@ -513,7 +513,6 @@ async fn speed_reads_its_own_path() {
         reach: swoosh::transport::Reach::default(),
     };
     let route = crate::commands::route::Route::Own {
-        peer: &cmd.peer,
         bound: &bound,
         this: node.node_id(),
     };

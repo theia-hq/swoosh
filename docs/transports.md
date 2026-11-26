@@ -59,7 +59,8 @@ its `limits` settings cap connections and bandwidth per client.
 
 `--peer <key>=<address>` (or `SWOOSH_PEER`) gives a peer's address by hand. You need it only when
 discovery cannot reach the peer: a locked-down network where automatic discovery is blocked, or under
-`--local`. Take an address from the `local` lane of the banner a peer's `serve` printed and pass it back:
+`--local`. Take an address from the `this network` row of the banner a peer's `serve` printed, or from `reach` in its
+`swoosh status`, and pass it back:
 
 <!-- manual: needs a direct peer and its address -->
 ```console

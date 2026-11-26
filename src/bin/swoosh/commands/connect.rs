@@ -1444,7 +1444,6 @@ pub(crate) mod tests {
         let home = crate::commands::through_serve::tests::empty_home("hostile-forward");
         let bound = crate::probe_route_tests::bound();
         let route = crate::commands::route::Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: node.node_id(),
         };
@@ -1563,7 +1562,6 @@ pub(crate) mod tests {
         let home = crate::commands::through_serve::tests::empty_home(&typed.replace('/', "-"));
         let bound = crate::probe_route_tests::bound();
         let route = crate::commands::route::Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: node.node_id(),
         };
@@ -1640,10 +1638,8 @@ pub(crate) mod tests {
     ) -> (Option<eyre::Report>, String) {
         let contacts = crate::commands::through_serve::tests::book();
         let machine = crate::commands::through_serve::tests::machine(&contacts, "me/nas");
-        let cmd = port_forward("me/nas");
         let bound = crate::probe_route_tests::bound();
         let route = crate::commands::route::Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: node.node_id(),
         };
