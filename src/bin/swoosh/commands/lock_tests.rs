@@ -317,26 +317,127 @@ async fn lock_touch_id_on_a_touch_id_only_key_says_nothing_changed() {
     assert!(prompt.touches().is_empty());
 }
 
-/// A passphrase put on a key under `touch-id` alone beside a kept root goes beside the touch, and the done
-/// line says so. Red when it reads as a first passphrase, which would say every command now asks for it.
-#[tokio::test]
-async fn lock_passphrase_beside_touch_id_says_it_went_beside() {
+/// `bytes` as this machine's key in `home`, owner-only, with a root kept beside it when `root_kept`.
+fn placed(home: &Home, bytes: &[u8], root_kept: bool) {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let home = scratch("lock-passphrase-beside-touch-id");
-    swoosh::identity::make_machine_dir(&home).unwrap();
-    std::fs::write(home.key(), swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE).unwrap();
+    swoosh::identity::make_machine_dir(home).unwrap();
+    std::fs::write(home.key(), bytes).unwrap();
     std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600)).unwrap();
-    std::fs::write(home.root_key(), b"a root kept here").unwrap();
-    let mut prompt = Counting::new([LONG])
+    if root_kept {
+        std::fs::write(home.root_key(), b"a root kept here").unwrap();
+    }
+}
+
+/// At this Mac, the touch scripted to open.
+fn proving(answers: impl IntoIterator<Item = &'static str>) -> Counting {
+    Counting::new(answers)
         .at_this_mac(keystore::Health::Live)
-        .touching([swoosh::touch::Touched::Opened(None)]);
-    let (result, err) = lock(&home, &["passphrase"], &mut prompt).await;
+        .touching([swoosh::touch::Touched::Opened(None)])
+}
+
+/// What an added passphrase prints where no root is kept: the step back to Touch ID alone.
+const ADDED_PASSPHRASE: &str = "\
+Added a passphrase to this machine's key.
+It now opens with Touch ID or the passphrase.
+
+To go back to Touch ID alone:
+  swoosh lock passphrase --remove
+";
+
+/// What an added Touch ID prints where no root is kept: the step to Touch ID alone.
+#[cfg(target_os = "macos")]
+const ADDED_TOUCH_ID: &str = "\
+Added Touch ID to this machine's key.
+It now opens with Touch ID or the passphrase.
+
+To make Touch ID its only lock:
+  swoosh lock passphrase --remove
+";
+
+/// Each add that leaves both locks prints its screen, byte for byte, through the screen law. Where a root is
+/// kept, the passphrase cannot come off beside Touch ID, so no step offers it. Red when a byte differs, the
+/// step is a bare `swoosh lock --remove`, or a step that would be refused is printed.
+#[tokio::test]
+async fn an_added_lock_prints_its_result_screen() {
+    for root_kept in [false, true] {
+        let home = scratch(&format!("lock-added-passphrase-{root_kept}"));
+        placed(
+            &home,
+            &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+            root_kept,
+        );
+        let (result, err) = lock(&home, &["passphrase"], &mut proving([LONG])).await;
+        result.unwrap();
+        let expected = if root_kept {
+            "Added a passphrase to this machine's key.\n\
+             It now opens with Touch ID or the passphrase.\n"
+        } else {
+            ADDED_PASSPHRASE
+        };
+        assert_eq!(err, expected, "root kept {root_kept}");
+    }
+    #[cfg(target_os = "macos")]
+    for root_kept in [false, true] {
+        let home = scratch(&format!("lock-added-touch-id-{root_kept}"));
+        lock(&home, &[], &mut Counting::new([LONG]))
+            .await
+            .0
+            .unwrap();
+        if root_kept {
+            std::fs::write(home.root_key(), b"a root kept here").unwrap();
+        }
+        let (result, err) = lock(&home, &["touch-id"], &mut proving([LONG])).await;
+        result.unwrap();
+        let expected = if root_kept {
+            "Added Touch ID to this machine's key.\n\
+             It now opens with Touch ID or the passphrase.\n"
+        } else {
+            ADDED_TOUCH_ID
+        };
+        assert_eq!(err, expected, "root kept {root_kept}");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = scratch("lock-changed-touch-id");
+        placed(
+            &home,
+            &swoosh::testkit::touch_id::DEVICE_PASSPHRASE_AND_TOUCH_ID,
+            false,
+        );
+        let mut prompt = proving([swoosh::testkit::touch_id::PASSPHRASE]);
+        let (result, err) = lock(&home, &["touch-id"], &mut prompt).await;
+        result.unwrap();
+        assert_eq!(err, "Changed Touch ID on this machine's key.\n");
+    }
+}
+
+/// `lock touch-id` on a key under Touch ID alone beside a kept root changes nothing and exits 0, but never
+/// reads as all clear: it says the key needs a passphrase there, and names the command that adds it. Red when
+/// it says the key already has the one lock asked for, or names no command.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn touch_id_alone_beside_a_root_names_the_passphrase_command() {
+    let home = scratch("lock-touch-id-beside-root");
+    placed(
+        &home,
+        &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+        true,
+    );
+    let before = snapshot(home.dir());
+    let mut prompt = Counting::refusing().at_this_mac(keystore::Health::Live);
+    let (result, err) = lock(&home, &["touch-id"], &mut prompt).await;
     result.unwrap();
     assert_eq!(
         err,
-        "added a passphrase to this machine's key, beside touch-id.\n"
+        "Your root is on this machine, so its key needs a passphrase beside Touch ID.\n\
+         Nothing was changed.\n\
+         To add the passphrase:\n  \
+         swoosh lock passphrase\n"
     );
+    assert_eq!(prompt.events(), 0);
+    assert!(prompt.touches().is_empty());
+    assert!(snapshot(home.dir()) == before, "nothing written");
 }
 
 /// `lock --remove`'s help says it removes the lock named, whichever that is.

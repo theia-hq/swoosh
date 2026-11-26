@@ -19,7 +19,7 @@ use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
 use crate::passphrase::{Asked, Prompt};
 use crate::standing::Standing;
-use crate::touch::{self, Then, Touch, TouchAct, TouchHere};
+use crate::touch::{self, Touch, TouchAct, TouchHere};
 
 /// Why the root's locks were not changed.
 #[derive(Debug, thiserror::Error)]
@@ -135,10 +135,7 @@ pub async fn lock_touch_id(
     let touch = Touch {
         file,
         reason: touch::CHECK_ROOT,
-        act: TouchAct::BesidePassphrase {
-            current,
-            then: Then::Keep,
-        },
+        act: TouchAct::BesidePassphrase { current },
     };
     touch::changed(prompt.touch(touch), &lines).map_err(prompt_error)?;
     Ok((target.relocked(), TouchIdChange::Added))

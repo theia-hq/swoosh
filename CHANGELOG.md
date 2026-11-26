@@ -5,9 +5,10 @@ All notable changes to swoosh, newest first.
 ## Unreleased
 
 ### New
-- **`touch-id`, a lock on macOS.** `swoosh lock touch-id` locks this machine's key so a touch on this
-  Mac opens it; `swoosh root lock touch-id` adds the same lock beside your root's passphrase. `status`
-  says whether each lock opens here.
+- **`swoosh lock` adds a lock to this machine's key.** `swoosh lock passphrase` and, on macOS, `swoosh lock
+  touch-id` each add a lock beside the ones the key has, and any one opens it. `--remove` takes one off.
+  `swoosh root lock touch-id` adds the same lock beside your root's passphrase. `status` says whether each
+  lock opens here.
 - **`revoke root:<key>` ends a root for good on the machine it runs on.** It needs a terminal and the
   8 characters after the key's `ed01` typed back. Where the root is kept, it asks for the root's passphrase
   and deletes the root; on one of its devices, the machine leaves it; anywhere else, this machine never

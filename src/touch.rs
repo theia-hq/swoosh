@@ -58,18 +58,51 @@ macro_rules! finger_added_later {
     };
 }
 
-/// Said before `lock touch-id` asks or writes anything, where no root is kept: the key will have one lock.
-/// Two lines, said as one warning.
+/// Said before `lock touch-id` asks or writes anything on a key with no lock yet, where no root is kept: the
+/// key will have one lock. Two lines, said as one warning.
 pub const ONE_LOCK: &str = concat!(
     "this machine's key will open with touch-id only.\n",
     finger_added_later!()
 );
 
-/// Said before `lock touch-id` asks or writes anything, where a root is kept: a passphrase stays beside it.
+/// Said before `lock touch-id` asks or writes anything on a key with no lock yet, where a root is kept: a
+/// passphrase goes beside it.
 pub const BESIDE_PASSPHRASE: &str = concat!(
     "this machine's key will open with touch-id or a passphrase, since your root is on this machine.\n",
     finger_added_later!()
 );
+
+/// Who may open a `touch-id` lock: every finger enrolled when it is made, someone else's included, so it is
+/// said before an act puts one on this machine's key or changes it. A macro, so `concat!` can join it into a
+/// notice as one constant.
+macro_rules! every_fingerprint {
+    () => {
+        "Every fingerprint in Touch ID & Password opens it."
+    };
+}
+
+/// Said before `lock passphrase` on a key under `touch-id` alone asks for anything: the passphrase goes
+/// beside the lock it has, and a copy of the file then opens with it anywhere.
+pub const BESIDE_TOUCH_ID: &str = "This adds a passphrase beside Touch ID; either will open this machine's key.\n\
+     A copy of the key file would then open with the passphrase on any machine.";
+
+/// Said before `lock touch-id` on a key under a passphrase alone asks for anything: the passphrase stays, so
+/// a copy of the file still opens with it anywhere.
+pub const TOUCH_ID_BESIDE: &str = concat!(
+    "This adds Touch ID beside the passphrase; either will open this machine's key.\n",
+    "A copy of the key file still opens with the passphrase on any machine.\n",
+    every_fingerprint!()
+);
+
+/// Said before `lock touch-id` on a key under both locks asks for anything: the new `touch-id` lock replaces
+/// the old one, and the passphrase stays beside it. Followed by [`EVERY_FINGERPRINT`], unless the old lock does
+/// not open here, whose warning says who opens the new one.
+pub const CHANGES_TOUCH_ID: &str = "This changes Touch ID on this machine's key.\n\
+     Once changed, either lock will open it.\n\
+     A copy of the key file still opens with the passphrase on any machine.";
+
+/// Who may open the new `touch-id` lock, said on its own after [`CHANGES_TOUCH_ID`].
+pub const EVERY_FINGERPRINT: &str = every_fingerprint!();
 
 /// Said before `root lock touch-id` asks or writes anything.
 pub const ROOT_BESIDE_PASSPHRASE: &str = concat!(
@@ -101,8 +134,8 @@ pub fn set_elsewhere(here: TouchHere, command: &str) -> String {
 }
 
 /// A change a touch was asked for, as its end: done, or the refusal. A cancel or a lock that does not open
-/// changed nothing, since every act fails at its first touch before it writes. A write that fails after the
-/// new lock went on says the file holds both, never that the touch did not open.
+/// changed nothing, since every act is one call into the key store, which fails at its touch before it
+/// writes.
 ///
 /// # Errors
 ///
@@ -114,21 +147,6 @@ pub(crate) fn changed(touched: Touched, lines: &Lines<'_>) -> eyre::Result<()> {
             eyre::bail!("touch-id did not open {}; nothing changed", lines.key())
         }
         Touched::Failed(why) => Err(why.wrap_err(format!("touch-id did not open {}", lines.key()))),
-        // Only this machine's key drops a lock after adding one: a root keeps its passphrase.
-        Touched::HalfDone {
-            left: Method::Passphrase,
-            why,
-        } => eyre::bail!(
-            "this machine's key has its new touch-id lock, but its passphrase did not come off: {why:#}\n\
-             to take it off: swoosh lock --remove"
-        ),
-        Touched::HalfDone {
-            left: Method::TouchId,
-            why,
-        } => eyre::bail!(
-            "this machine's key has its new passphrase, but its touch-id lock did not come off: {why:#}\n\
-             to take it off: swoosh lock touch-id --remove"
-        ),
         Touched::TimedOut => eyre::bail!("{TIMED_OUT}"),
     }
 }
@@ -173,8 +191,9 @@ pub struct Touch {
     pub act: TouchAct,
 }
 
-/// What a touch is asked for. Each is one call into the key store, or two where a lock is replaced, and
-/// each shows one dialog.
+/// What a touch is asked for. Each is one call into the key store, and each shows one dialog. None takes a
+/// lock off but [`RemoveTouchId`](Self::RemoveTouchId): a lock comes off a key only where a person asked
+/// for that.
 #[derive(Debug)]
 pub enum TouchAct {
     /// Open the file through its `touch-id` lock.
@@ -183,33 +202,19 @@ pub enum TouchAct {
     Write(keystore::Secret),
     /// Put a `touch-id` lock on a plain file.
     SealPlain,
-    /// Put a `touch-id` lock on the file, opened with its passphrase; then keep the passphrase lock, or
-    /// take it off.
+    /// Put a `touch-id` lock on the file beside its passphrase, opened with that passphrase. A `touch-id`
+    /// lock the file already has is replaced by the new one.
     BesidePassphrase {
         /// The passphrase that opens the file now.
         current: Passphrase,
-        /// What becomes of the passphrase lock.
-        then: Then,
     },
-    /// Put a passphrase lock on the file, opened with its `touch-id` lock; then keep the `touch-id` lock, or
-    /// take it off.
+    /// Put a passphrase lock on the file beside its `touch-id` lock, opened with that lock.
     AddPassphrase {
         /// The new passphrase.
         new: Passphrase,
-        /// What becomes of the `touch-id` lock.
-        then: Then,
     },
     /// Take the file's `touch-id` lock off, opened with itself.
     RemoveTouchId,
-}
-
-/// What becomes of the lock that opened the file, once the new one is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Then {
-    /// It stays beside the new one.
-    Keep,
-    /// It comes off, so the new lock is the file's one lock.
-    Drop,
 }
 
 /// How a touch ended.
@@ -224,31 +229,8 @@ pub enum Touched {
     /// Anything else: the enclave failed, the unwrap refused (a lock someone else made with this Mac's
     /// enclave reads live and fails here), or the act's own write.
     Failed(eyre::Report),
-    /// The touch opened and the new lock is on, then taking the old lock, `left`, off failed: the file holds
-    /// both.
-    HalfDone {
-        /// The lock that stayed on.
-        left: Method,
-        /// Why it stayed.
-        why: eyre::Report,
-    },
     /// Nobody touched in time: the key store closed the dialog, and nothing was written.
     TimedOut,
-}
-
-/// Where an act stopped: at the call that asks the touch, or at the write after it.
-#[derive(Debug)]
-pub(crate) enum Stopped {
-    /// The call that asks the touch refused, and nothing was written.
-    Touch(keystore::Error),
-    /// The new lock is on; taking the old one, of this method, off refused.
-    After(Method, keystore::Error),
-}
-
-impl From<keystore::Error> for Stopped {
-    fn from(error: keystore::Error) -> Self {
-        Self::Touch(error)
-    }
 }
 
 impl Touch {
@@ -256,8 +238,8 @@ impl Touch {
     ///
     /// # Errors
     ///
-    /// The key store's refusal, the touch's own included, and where the act stopped.
-    pub(crate) fn run(self) -> Result<Option<keystore::Secret>, Stopped> {
+    /// The key store's refusal, the touch's own included.
+    pub(crate) fn run(self) -> Result<Option<keystore::Secret>, keystore::Error> {
         let Self { file, reason, act } = self;
         let touch = Unlock::TouchId {
             reason,
@@ -271,13 +253,11 @@ impl Touch {
             // The file is read again here, on this thread: its unlock proves its own header, so the key it
             // returns is the one this file holds now, which `open` checks against the header the caller read.
             TouchAct::Open => match file.load()? {
-                Some(Stored::Locked(locked)) => {
-                    locked.unlock(touch).map(Some).map_err(Stopped::Touch)
-                }
-                Some(Stored::Plain(_)) | None => Err(Stopped::Touch(keystore::Error::NoLock {
+                Some(Stored::Locked(locked)) => locked.unlock(touch).map(Some),
+                Some(Stored::Plain(_)) | None => Err(keystore::Error::NoLock {
                     path: file.path().to_path_buf(),
                     method: Method::TouchId,
-                })),
+                }),
             },
             TouchAct::Write(secret) => file
                 .write(
@@ -287,50 +267,27 @@ impl Touch {
                         wait: TOUCH_WAIT,
                     },
                 )
-                .map(|()| None)
-                .map_err(Stopped::Touch),
-            TouchAct::SealPlain => file
-                .add_lock(None, new)
-                .map(|()| None)
-                .map_err(Stopped::Touch),
-            TouchAct::BesidePassphrase { current, then } => {
-                let with = Unlock::Passphrase(&current);
-                file.add_lock(Some(with), new)?;
-                if then == Then::Drop {
-                    file.remove_lock(with, Method::Passphrase)
-                        .map_err(|error| Stopped::After(Method::Passphrase, error))?;
-                }
-                Ok(None)
-            }
-            TouchAct::AddPassphrase { new, then } => {
-                file.add_lock(Some(touch), NewLock::Passphrase(&new))?;
-                if then == Then::Drop {
-                    file.remove_lock(Unlock::Passphrase(&new), Method::TouchId)
-                        .map_err(|error| Stopped::After(Method::TouchId, error))?;
-                }
-                Ok(None)
-            }
-            TouchAct::RemoveTouchId => file
-                .remove_lock(touch, Method::TouchId)
-                .map(|()| None)
-                .map_err(Stopped::Touch),
+                .map(|()| None),
+            TouchAct::SealPlain => file.add_lock(None, new).map(|()| None),
+            TouchAct::BesidePassphrase { current } => file
+                .add_lock(Some(Unlock::Passphrase(&current)), new)
+                .map(|()| None),
+            TouchAct::AddPassphrase { new } => file
+                .add_lock(Some(touch), NewLock::Passphrase(&new))
+                .map(|()| None),
+            TouchAct::RemoveTouchId => file.remove_lock(touch, Method::TouchId).map(|()| None),
         }
     }
 }
 
 /// The key store's answer, as a touch's end. Only the refusals a person can tell apart are named; the rest is
-/// a failure, carried whole, and a write that failed after the new lock went on says so. A timeout is named
-/// so it never reads as a failure, which falls to the passphrase: nobody touched for a minute, so nobody is
-/// there to type one.
-impl From<Result<Option<keystore::Secret>, Stopped>> for Touched {
-    fn from(answer: Result<Option<keystore::Secret>, Stopped>) -> Self {
+/// a failure, carried whole. A timeout is named so it never reads as a failure, which falls to the
+/// passphrase: nobody touched for a minute, so nobody is there to type one.
+impl From<Result<Option<keystore::Secret>, keystore::Error>> for Touched {
+    fn from(answer: Result<Option<keystore::Secret>, keystore::Error>) -> Self {
         match answer {
             Ok(opened) => Self::Opened(opened),
-            Err(Stopped::After(left, error)) => Self::HalfDone {
-                left,
-                why: eyre::Report::new(error),
-            },
-            Err(Stopped::Touch(keystore::Error::TouchId { source, .. })) => match source {
+            Err(keystore::Error::TouchId { source, .. }) => match source {
                 keystore::TouchIdError::Declined(_) => Self::Declined,
                 keystore::TouchIdError::TimedOut(_) => Self::TimedOut,
                 keystore::TouchIdError::NotHere(_) | keystore::TouchIdError::Unavailable => {
@@ -338,7 +295,7 @@ impl From<Result<Option<keystore::Secret>, Stopped>> for Touched {
                 }
                 other => Self::Failed(eyre::Report::new(other)),
             },
-            Err(Stopped::Touch(other)) => Self::Failed(eyre::Report::new(other)),
+            Err(other) => Self::Failed(eyre::Report::new(other)),
         }
     }
 }
@@ -473,9 +430,7 @@ pub fn open(
                 // A cancel is its own answer: the prompt that follows says the rest.
                 Touched::Declined => None,
                 Touched::NotHere => Some(Aside::Warn(lines.warning())),
-                Touched::Failed(why) | Touched::HalfDone { why, .. } => {
-                    Some(Aside::Say(lines.failed(&why)))
-                }
+                Touched::Failed(why) => Some(Aside::Say(lines.failed(&why))),
             };
             if !lines.passphrase {
                 eyre::bail!(

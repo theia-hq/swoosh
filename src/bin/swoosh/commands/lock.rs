@@ -1,17 +1,18 @@
-//! `swoosh lock [<method>] [--remove]`: set, change or remove the lock on this machine's key.
+//! `swoosh lock [<method>] [--remove]`: add, change or remove a lock on this machine's key.
 //!
-//! The method is a property of the key file, chosen here and nowhere else. `lock` only ever wraps the same key,
+//! The methods are a property of the key file, chosen here and nowhere else. `lock <method>` adds that lock
+//! beside the ones the key has, and only `--remove` takes one off. `lock` only ever wraps the same key,
 //! so this machine stays the same machine, and it runs beside a `serve`, which holds its key in memory. Your
 //! root's locks are `swoosh root lock`'s; this command takes no `--root`. `touch-id` is a value on a macOS
 //! build only: elsewhere there is no enclave to make it, so it is not offered.
-
-use std::io::{self, Write};
 
 use clap::{Args, ValueEnum};
 use keystore::Method;
 use swoosh::home::Home;
 use swoosh::identity::Locked;
 use swoosh::passphrase::{Prompt, Terminal};
+
+use crate::screen::{Block, Paint, Screen};
 
 /// set, change or remove the lock on this machine's key
 #[derive(Debug, Args)]
@@ -48,16 +49,33 @@ impl From<LockMethod> for Method {
 impl LockCmd {
     /// Lock, at the terminal, saying what changed on stderr.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
-        self.lock(home, &mut Terminal, &mut io::stderr()).await
+        self.lock(home, &mut Terminal, &mut anstream::stderr())
+            .await
     }
 
     pub(crate) async fn lock(
         self,
         home: &Home,
         prompt: &mut impl Prompt,
-        err: &mut impl Write,
+        err: &mut impl Paint,
     ) -> eyre::Result<()> {
-        match swoosh::identity::lock(home, Method::from(self.method), self.remove, prompt).await? {
+        let locked =
+            swoosh::identity::lock(home, Method::from(self.method), self.remove, prompt).await?;
+        match locked {
+            Locked::PassphraseBesideTouchId { root_kept } => beside(
+                "Added a passphrase to this machine's key.",
+                (!root_kept).then_some("To go back to Touch ID alone:"),
+            )
+            .write(err)?,
+            Locked::TouchIdBesidePassphrase { root_kept } => beside(
+                "Added Touch ID to this machine's key.",
+                (!root_kept).then_some("To make Touch ID its only lock:"),
+            )
+            .write(err)?,
+            Locked::TouchIdChanged => Screen::default()
+                .block(Block::default().text("Changed Touch ID on this machine's key.".to_owned()))
+                .write(err)?,
+            Locked::NeedsPassphrase => needs_passphrase().write(err)?,
             Locked::Set { first: true } => writeln!(
                 err,
                 "set a passphrase on this machine's key.\n\
@@ -107,13 +125,39 @@ impl LockCmd {
                 err,
                 "this machine's key already has touch-id as its only lock; nothing was changed."
             )?,
-            Locked::PassphraseBesideTouchId => writeln!(
-                err,
-                "added a passphrase to this machine's key, beside touch-id."
-            )?,
         }
         Ok(())
     }
+}
+
+/// The screen for a lock put beside the key's other one: what was added, what it opens with now, then the
+/// step that takes the passphrase off, under `back`. Where a root is kept here the passphrase never comes off
+/// beside `touch-id`, so the caller gives no `back` and no step prints.
+fn beside(done: &'static str, back: Option<&'static str>) -> Screen<'static> {
+    let now = Block::default()
+        .text(done.to_owned())
+        .text("It now opens with Touch ID or the passphrase.".to_owned());
+    let step = back.map_or_else(Block::default, |back| {
+        Block::default()
+            .text(back.to_owned())
+            .command("swoosh lock passphrase --remove".to_owned())
+    });
+    Screen::default().block(now).block(step)
+}
+
+/// The screen for `lock touch-id` on a key under `touch-id` alone beside a kept root: nothing changed, which
+/// must not read as all clear, since the key there needs a passphrase beside it.
+fn needs_passphrase() -> Screen<'static> {
+    Screen::default().block(
+        Block::default()
+            .text(
+                "Your root is on this machine, so its key needs a passphrase beside Touch ID."
+                    .to_owned(),
+            )
+            .text("Nothing was changed.".to_owned())
+            .text("To add the passphrase:".to_owned())
+            .command("swoosh lock passphrase".to_owned()),
+    )
 }
 
 #[cfg(test)]
