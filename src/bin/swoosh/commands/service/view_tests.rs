@@ -8,6 +8,7 @@ use swoosh::home::Home;
 use swoosh::serve::Started;
 use swoosh::serve::control_codec::{DisabledList, Request, Response, ServiceMenu, StatusReply};
 use swoosh::serve_toml::ServeToml;
+use swoosh::testkit::CONTROL_MAGIC;
 use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -96,7 +97,7 @@ impl Drop for Fixture {
 }
 
 fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
-    let mut bytes = b"SWC2".to_vec();
+    let mut bytes = CONTROL_MAGIC.to_vec();
     bytes.push(tag);
     bytes.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(body);
@@ -330,7 +331,7 @@ async fn acquisition_modes_are_exclusive_and_detail_failure_never_becomes_down()
     let status = Response::Status(StatusReply {
         node_id: swoosh::testkit::TestNode::seeded(9).node_id(),
         pid: 1,
-        addr: None,
+        reach: swoosh::testkit::loopback_reach(),
         uptime_secs: 0,
         menu: ServiceMenu {
             catalog: ServiceCatalog::decode(b"\x00\x00\x00\x01\x00\x03web\x00").unwrap(),

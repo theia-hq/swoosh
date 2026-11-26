@@ -6,6 +6,7 @@ use rand::RngCore;
 use super::{Epoch, EpochError, PathAction, PathRef, PathReply, PathRequest, Ticket};
 use crate::serve::control_codec::{ControlError, Request, Response};
 use crate::serve::socket::RequestKind;
+use crate::testkit::{CONTROL_MAGIC, control_frame};
 
 /// `E1`: one, as sixteen big-endian bytes.
 fn e1() -> [u8; 16] {
@@ -22,7 +23,7 @@ fn reference(epoch: [u8; 16], ticket: u64) -> PathRef {
 }
 
 fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
-    let mut out = b"SWC2".to_vec();
+    let mut out = CONTROL_MAGIC.to_vec();
     out.push(tag);
     out.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
     out.extend_from_slice(body);
@@ -70,7 +71,7 @@ async fn sample_and_finish_are_the_published_bytes() {
             action,
         });
         let bytes = written_request(&request).await;
-        assert_eq!(&bytes[..7], b"SWC2\x05\x00\x19");
+        assert_eq!(&bytes[..7], control_frame(b"\x05\x00\x19"));
         assert_eq!(&bytes[7..], body(e1(), 1, byte).as_slice());
         let (read, kind, left) = read_request(&bytes).await;
         assert_eq!(read.unwrap(), request);
@@ -88,9 +89,12 @@ async fn the_three_replies_are_the_published_bytes() {
     }));
     let unavailable = Response::Path(PathReply::Unavailable);
     for (response, bytes) in [
-        (&unknown, b"SWC2\x08\x00\x04\x00\x00\x00\x00".as_slice()),
-        (&direct, b"SWC2\x08\x00\x04\x00\x01\x00\x00"),
-        (&unavailable, b"SWC2\x08\x00\x01\x01"),
+        (
+            &unknown,
+            control_frame(b"\x08\x00\x04\x00\x00\x00\x00").as_slice(),
+        ),
+        (&direct, &control_frame(b"\x08\x00\x04\x00\x01\x00\x00")),
+        (&unavailable, &control_frame(b"\x08\x00\x01\x01")),
     ] {
         assert_eq!(written(response).await, bytes);
         assert_eq!(&read_path(bytes).await.unwrap(), response);

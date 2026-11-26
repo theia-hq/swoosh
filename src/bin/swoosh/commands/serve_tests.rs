@@ -3136,6 +3136,20 @@ fn no_self_daemonize() {
         status.pid, pid,
         "the spawned pid IS the serving pid: no double-fork or re-exec"
     );
+    assert_eq!(
+        status.reach.internet,
+        swoosh::serve::Internet::Off,
+        "a `--local` bind says so in its reach"
+    );
+    assert!(
+        status
+            .reach
+            .at
+            .computer()
+            .is_some_and(|socket| socket.ip().is_loopback()),
+        "a wildcard bind answers on loopback, and the reply names it: {:?}",
+        status.reach
+    );
     assert!(
         child.0.try_wait().expect("poll the resident").is_none(),
         "the resident stays the foreground child the caller spawned"
@@ -3776,7 +3790,7 @@ async fn catalog_connected_exchange_never_reconnects_or_repeats_requests() {
     }
 }
 
-/// One SWC2 request/response over the resident control socket, bounded by the caller's timeout.
+/// One control request/response over the resident control socket, bounded by the caller's timeout.
 async fn control_round_trip(socket: &Path, request: Request) -> Result<Response, ControlError> {
     let mut stream = tokio::net::UnixStream::connect(socket)
         .await

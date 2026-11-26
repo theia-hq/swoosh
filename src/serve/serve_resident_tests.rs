@@ -16,16 +16,36 @@ use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
 use crate::serve::control_codec::{
     DisabledList, MAX_DISABLED_NAMES, MAX_FRAME, Request, Response, ServiceMenu, StatusReply,
 };
+use crate::serve::reachable::{Internet, Lan, Network, Picks, ReachSource, Reachable};
 use crate::serve::socket::ControlError;
-
-/// The four magic bytes a well-formed control frame opens with, spelled out rather than imported, so
-/// a test cannot agree with the codec by sharing its constant.
-const MAGIC: [u8; 4] = *b"SWC2";
+use crate::testkit::{CONTROL_MAGIC, control_frame};
 
 /// Serializes scratch dir names within this test process; the pid keeps two concurrent runs of the
 /// binary apart. Names stay short on purpose: the control socket path must fit `sun_path` (104
 /// bytes on macOS).
 static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// The reach a test resident binds: an address on this network and loopback, both concrete, so the
+/// expansion reads nothing of this host.
+fn test_reach() -> ReachSource {
+    ReachSource::new(
+        vec![
+            "192.168.1.20:51006".parse().expect("a socket"),
+            "127.0.0.1:51006".parse().expect("a socket"),
+        ],
+        Internet::Off,
+        Lan::ByAddressOnly,
+    )
+}
+
+/// A reach with no address at all: what a bind with no sockets reports.
+fn no_reach() -> Reachable {
+    Reachable {
+        internet: Internet::On,
+        lan: Lan::Announced,
+        at: Picks::of(&bifrost_mdns::Dialable::from_iter([])),
+    }
+}
 
 /// An empty catalog: the codec tests exercise framing, not service content.
 fn empty_catalog() -> ServiceCatalog {
@@ -66,7 +86,7 @@ fn resident_over(dir: &std::path::Path, cancel: CancellationToken) -> Resident {
     let home = crate::home::Home::resolve(Some(dir.to_owned())).expect("a scratch home");
     Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
-        None,
+        test_reach(),
         empty_catalog(),
         crate::serve_toml::LiveServeToml::load(&home).expect("the services off load"),
         cancel,
@@ -111,7 +131,7 @@ async fn detail_capture_failures_never_write_a_success_header() {
             .await;
         let mut bytes = Vec::new();
         client.read_to_end(&mut bytes).await.unwrap();
-        let mut expected = b"SWC2\x09".to_vec();
+        let mut expected = control_frame(b"\x09");
         expected.extend_from_slice(&(outcome.len() as u16).to_be_bytes());
         expected.extend_from_slice(&outcome);
         assert_eq!(bytes, expected);
@@ -166,10 +186,14 @@ fn detail_resident() -> Resident {
 
 #[tokio::test]
 async fn detail_is_one_shot_without_halfclose_or_stop_splicing() {
-    for second in [b"".as_slice(), b"SWC2\x03\0\0", b"SWC2\x06\0\0"] {
+    for second in [
+        b"".as_slice(),
+        &control_frame(b"\x03\0\0"),
+        &control_frame(b"\x06\0\0"),
+    ] {
         let resident = detail_resident();
         let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
-        client.write_all(b"SWC2\x06\0\0").await.unwrap();
+        client.write_all(&control_frame(b"\x06\0\0")).await.unwrap();
         client.write_all(second).await.unwrap();
         tokio::time::timeout(
             READ_TIMEOUT,
@@ -274,15 +298,15 @@ async fn detail_capture_releases_guard_before_a_stalled_writer() {
 async fn malformed_detail_requests_get_only_bounded_fixed_errors() {
     for (request, expected) in [
         (
-            b"SWC2\x06\0\x01x".as_slice(),
+            control_frame(b"\x06\0\x01x").as_slice(),
             "invalid local service detail request",
         ),
         (
-            b"SWC2\x02\0\x01x",
+            &control_frame(b"\x02\0\x01x"),
             "control protocol error: unexpected request payload",
         ),
         (
-            b"SWC2\xff\0\0",
+            &control_frame(b"\xff\0\0"),
             "control protocol error: unknown request tag 0xff",
         ),
         (b"XXXX\x06\0\0", "not a control stream"),
@@ -308,7 +332,7 @@ async fn requests_round_trip() {
     for request in [Request::Services, Request::Status, Request::Stop] {
         let mut buf = Vec::new();
         request.write(&mut buf).await.expect("request writes");
-        assert_eq!(&buf[..4], &MAGIC, "frames carry the SWC2 magic");
+        assert_eq!(buf[..4], CONTROL_MAGIC, "frames carry this build's magic");
         let back = Request::read(&mut &buf[..]).await.expect("request reads");
         assert_eq!(back, request, "a request round-trips");
     }
@@ -391,7 +415,8 @@ async fn a_version_skewed_request_is_answered_naming_both_versions() {
         panic!("a version mismatch is answered on the wire: {reply:?}")
     };
     assert!(message.contains("SWC9"), "{message}");
-    assert!(message.contains("SWC2"), "{message}");
+    let ours = core::str::from_utf8(&CONTROL_MAGIC).expect("the magic is ASCII");
+    assert!(message.contains(ours), "{message}");
     task.await.expect("the serve task joins");
 }
 
@@ -406,7 +431,7 @@ async fn responses_round_trip() {
     let status = StatusReply {
         node_id: NodeId::from_ed25519_secret(&[9u8; 32]),
         pid: 1234,
-        addr: None,
+        reach: crate::testkit::loopback_reach(),
         uptime_secs: 7,
         menu,
         warm: Vec::new(),
@@ -438,7 +463,7 @@ async fn responses_round_trip() {
 #[tokio::test]
 async fn oversized_frame_is_rejected() {
     let mut buf = Vec::new();
-    buf.extend_from_slice(&MAGIC);
+    buf.extend_from_slice(&CONTROL_MAGIC);
     buf.push(1);
     buf.extend_from_slice(&((MAX_FRAME + 1) as u16).to_be_bytes());
     let error = Request::read(&mut &buf[..])
@@ -455,26 +480,29 @@ fn minimal_status() -> StatusReply {
     StatusReply {
         node_id: NodeId::from_ed25519_secret(&[9u8; 32]),
         pid: 4242,
-        addr: None,
+        reach: no_reach(),
         uptime_secs: 3,
         menu: empty_menu(),
         warm: Vec::new(),
     }
 }
 
-/// The raw status frame prefix up to and including the `has_addr` byte: key, pid, presence.
-fn status_prefix(has_addr: u8) -> Vec<u8> {
+/// The raw status frame prefix up to and including the reach: key, pid, then `reach` as written.
+fn status_prefix(reach: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(NodeId::from_ed25519_secret(&[9u8; 32]).key());
     bytes.extend_from_slice(&4242u32.to_be_bytes());
-    bytes.push(has_addr);
+    bytes.extend_from_slice(reach);
     bytes
 }
+
+/// A reach with no address: on, announced, nothing present.
+const NO_REACH: [u8; 3] = [0, 0, 0];
 
 /// A raw status frame with no addr, zero uptime, a real empty catalog, and the given disabled
 /// section.
 fn status_frame_with_disabled(disabled: &[u8]) -> Vec<u8> {
-    let mut bytes = status_prefix(0);
+    let mut bytes = status_prefix(&NO_REACH);
     bytes.extend_from_slice(&0u64.to_be_bytes());
     let catalog = empty_catalog()
         .encode()
@@ -502,32 +530,33 @@ fn status_decode_refuses_every_prefix() {
     }
 }
 
-/// `has_addr = 2` is not a presence: only 0 and 1 are legal, so the decode refuses.
+/// A reach the codec refuses fails the whole status, loudly: a garbled reply from this user's own
+/// `serve` is a bug to show, never a field to drop. Each case changes one reach byte of a status that
+/// decodes, so only the reach check stands between it and a reply.
 #[test]
-fn status_decode_refuses_an_unknown_addr_presence() {
-    let error = StatusReply::decode(&status_prefix(2)).expect_err("presence 2 must refuse");
-    assert!(
-        matches!(error, ControlError::Protocol(_)),
-        "an unknown addr presence is a protocol error: {error}"
-    );
-}
-
-/// The addr string cap is checked before the bytes are read: a declared 257-byte addr refuses.
-#[test]
-fn status_decode_refuses_an_over_long_addr() {
-    let mut bytes = status_prefix(1);
-    bytes.extend_from_slice(&257u16.to_be_bytes());
-    let error = StatusReply::decode(&bytes).expect_err("addr over 256 must refuse");
-    assert!(
-        matches!(error, ControlError::Protocol(_)),
-        "an over-long addr is a protocol error: {error}"
-    );
+fn status_decode_refuses_a_malformed_reach() {
+    let whole = minimal_status().encode().expect("a minimal status encodes");
+    StatusReply::decode(&whole).expect("the whole frame decodes");
+    // The reach follows the 32-byte key and the 4-byte pid: internet, lan, presence.
+    for (offset, byte, reason) in [
+        (36, 2, "unknown reach internet 0x02"),
+        (37, 2, "unknown reach lan 0x02"),
+        (38, 0b1000_0000, "unknown reach presence 0x80"),
+    ] {
+        let mut bytes = whole.clone();
+        bytes[offset] = byte;
+        let error = StatusReply::decode(&bytes).expect_err("a malformed reach must refuse");
+        assert!(
+            matches!(&error, ControlError::Protocol(text) if text == reason),
+            "byte {offset} = {byte:#04x} is refused for its own reason: {error}"
+        );
+    }
 }
 
 /// A declared catalog over the frame cap is typed `TooLarge`, never an on-demand allocation.
 #[test]
 fn status_decode_refuses_an_over_large_catalog() {
-    let mut bytes = status_prefix(0);
+    let mut bytes = status_prefix(&NO_REACH);
     bytes.extend_from_slice(&0u64.to_be_bytes());
     bytes.extend_from_slice(&((MAX_FRAME + 1) as u32).to_be_bytes());
     let error = StatusReply::decode(&bytes).expect_err("an oversized catalog must refuse");
@@ -643,9 +672,13 @@ async fn accepts_own_uid_refuses_foreign_uid() {
     let reply = Response::read(&mut client)
         .await
         .expect("our uid is served");
-    assert!(
-        matches!(reply, Response::Status(_)),
-        "a status reply comes back"
+    let Response::Status(status) = reply else {
+        panic!("a status reply comes back: {reply:?}");
+    };
+    assert_eq!(
+        status.reach,
+        test_reach().reachable(),
+        "the reply that carries the addresses is the one only our uid reads"
     );
     task.await.expect("the serve task joins");
     assert_eq!(admitted.served(), 1, "the admitted connection was served");
@@ -743,7 +776,7 @@ async fn slow_loris_is_timed_out() {
         }
     });
     client
-        .write_all(&MAGIC[..1])
+        .write_all(&CONTROL_MAGIC[..1])
         .await
         .expect("a partial frame writes");
     tokio::time::timeout(core::time::Duration::from_secs(5), task)
@@ -772,7 +805,7 @@ async fn oversized_declared_frame_ends_the_connection() {
         }
     });
     let mut frame = Vec::new();
-    frame.extend_from_slice(&MAGIC);
+    frame.extend_from_slice(&CONTROL_MAGIC);
     frame.push(1);
     frame.extend_from_slice(&((MAX_FRAME + 1) as u16).to_be_bytes());
     client
@@ -1078,7 +1111,7 @@ async fn pending_permit_keeps_its_queue_position_while_controls_complete() {
 async fn a_partial_frame_deadline_releases_its_control_permit() {
     let resident = test_resident();
     let (mut client, server, observed) = observed_pair(WriteMode::Ready);
-    client.write_all(&MAGIC[..1]).await.unwrap();
+    client.write_all(&CONTROL_MAGIC[..1]).await.unwrap();
     let (accept, _) = scripted_accept([Ok(server)]);
     let serving = resident.serve_accepting(accept, &crate::testkit::NoOpens);
     tokio::pin!(serving);
@@ -1226,7 +1259,7 @@ async fn dropping_the_outer_serve_drops_controls_without_firing_its_token() {
             let (mut client, server, observed) = observed_pair(WriteMode::Stalled);
             if index == 0 {
                 if matches!(wait, ControlWait::Permit) {
-                    client.write_all(b"SWC2\x03").await.unwrap();
+                    client.write_all(&control_frame(b"\x03")).await.unwrap();
                 } else {
                     Request::Stop.write(&mut client).await.unwrap();
                 }
@@ -1503,7 +1536,7 @@ fn a_capped_disabled_list_keeps_the_refused_names_this_run_bound() {
     off.serving(&crate::serve::Started::Named(vec!["zzz=ping:".to_owned()]));
     let resident = Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
-        None,
+        test_reach(),
         empty_catalog(),
         off,
         CancellationToken::new(),
@@ -1600,7 +1633,7 @@ async fn status_past_frame_cap_is_error_frame() {
     let node_id = NodeId::from_ed25519_secret(&[9u8; 32]);
     let resident = Arc::new(Resident::new(
         node_id,
-        None,
+        test_reach(),
         big_catalog(),
         crate::serve_toml::LiveServeToml::load(&home).unwrap(),
         CancellationToken::new(),
@@ -1622,5 +1655,82 @@ async fn status_past_frame_cap_is_error_frame() {
     assert_eq!(
         asked(&resident, Request::Whoami).await,
         Response::Whoami { node_id }
+    );
+}
+
+/// Ask a resident for its status over a socket pair, through the real serve path.
+async fn status_of(resident: &Arc<Resident>) -> StatusReply {
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let task = tokio::spawn({
+        let this = Arc::clone(resident);
+        async move {
+            this.serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+                .await;
+        }
+    });
+    Request::Status
+        .write(&mut client)
+        .await
+        .expect("request writes");
+    let reply = Response::read(&mut client).await.expect("a reply");
+    task.await.expect("the serve task joins");
+    let Response::Status(status) = reply else {
+        panic!("a status reply comes back: {reply:?}");
+    };
+    status
+}
+
+/// A status carries one address per class of the resident's own bind and the reach facts it bound
+/// with, not one address, and nothing the bind does not answer on.
+#[tokio::test]
+async fn status_carries_the_picks_of_its_own_bind() {
+    let status = status_of(&Arc::new(test_resident())).await;
+    assert_eq!(status.reach.internet, Internet::Off);
+    assert_eq!(status.reach.lan, Lan::ByAddressOnly);
+    assert_eq!(
+        status.reach.at.network(),
+        Network::At("192.168.1.20:51006".parse().expect("a socket"))
+    );
+    assert_eq!(
+        status.reach.at.computer(),
+        Some("127.0.0.1:51006".parse().expect("a socket"))
+    );
+    assert_eq!(status.reach.at.public(), None);
+    assert_eq!(status.reach.at.tunnel(), None);
+}
+
+/// Which network the test host is on: moved by each read of it.
+static NETWORK_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(51000);
+
+/// A host that is on a new network each time it is read.
+fn roaming_host(_bound: Vec<core::net::SocketAddr>) -> bifrost_mdns::Dialable {
+    let port = NETWORK_PORT.fetch_add(1, Ordering::Relaxed);
+    [bifrost_mdns::At {
+        socket: core::net::SocketAddr::from(([192, 168, 1, 20], port)),
+        scope: bifrost_mdns::Scope::Network,
+    }]
+    .into_iter()
+    .collect()
+}
+
+/// The addresses are read from the host on every status request, never kept from the bind: a laptop
+/// that moved networks answers with where it is now.
+#[tokio::test]
+async fn status_re_reads_the_host_on_every_ask() {
+    let dir = scratch_dir("roam");
+    let home = crate::home::Home::resolve(Some(dir)).expect("a scratch home");
+    let resident = Arc::new(Resident::new(
+        NodeId::from_ed25519_secret(&[9u8; 32]),
+        test_reach().expanding_with(roaming_host),
+        empty_catalog(),
+        crate::serve_toml::LiveServeToml::load(&home).expect("the services off load"),
+        CancellationToken::new(),
+        Arc::default(),
+    ));
+    let first = status_of(&resident).await.reach.at.network();
+    let second = status_of(&resident).await.reach.at.network();
+    assert!(
+        matches!((first, second), (Network::At(a), Network::At(b)) if a != b),
+        "the second ask reads the host again: {first:?}, {second:?}"
     );
 }

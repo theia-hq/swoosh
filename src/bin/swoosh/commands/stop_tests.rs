@@ -27,7 +27,7 @@ use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
 use swoosh::serve::{CONTROL_SERVE_SERVICE, Resident, StopKind, StopSource, control};
 use swoosh::serve_toml::LiveServeToml;
 use swoosh::streams::{Ask, Opened, OwnBind, StreamSource, Unopened};
-use swoosh::testkit::{HostilePeer, STANDING_UNTIL, TestNode, TestRoot, TestWrite};
+use swoosh::testkit::{HostilePeer, STANDING_UNTIL, TestNode, TestRoot, TestWrite, control_frame};
 use swoosh::transport::ReachArgs;
 use tightbeam::tunnel::{CancellationToken, Router, ServiceCatalog};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
@@ -403,10 +403,10 @@ async fn local_stop_truncated_frames_never_return_a_stopped_line() {
     let client = ControlClient::resolve_socket(&home, path).unwrap();
     let mut cases = 0;
     for (name, frame) in [
-        ("ack", b"SWC2\x03\0\0".as_slice()),
-        ("refusal", b"SWC2\x04\0\x07\0\x05gated"),
-        ("error", b"SWC2\x05\0\x07\0\x05gated"),
-        ("ack-body", b"SWC2\x03\0\x01x"),
+        ("ack", control_frame(b"\x03\0\0").as_slice()),
+        ("refusal", &control_frame(b"\x04\0\x07\0\x05gated")),
+        ("error", &control_frame(b"\x05\0\x07\0\x05gated")),
+        ("ack-body", &control_frame(b"\x03\0\x01x")),
     ] {
         for end in 1..frame.len() {
             let server = async {
@@ -616,7 +616,7 @@ fn resident_stopping(
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
     let resident = Arc::new(Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
-        None,
+        swoosh::testkit::loopback_source(),
         empty_catalog(),
         off,
         cancel.clone(),

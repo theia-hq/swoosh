@@ -49,9 +49,9 @@ use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, InstanceLock, ProxyScope, RecvService, Resident, SingleError, Started,
-    StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv, classify_stop, control,
-    extract_recv_services, refuse_recv_into_home,
+    Activity, BoundTargets, InstanceLock, Internet, Lan, ProxyScope, ReachSource, RecvService,
+    Resident, SingleError, Started, StopKind, StopSource, Stopped, acquire_single, bind_entry,
+    bind_recv, classify_stop, control, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -698,16 +698,22 @@ impl ServeCmd {
             off_lines(name).write(&mut std::io::stderr())?;
         }
 
-        // ONE expansion of this bind, read by both the control socket's status address and the transport
-        // block, so the two can only ever name the same host.
-        let dialable = Dialable::of(node.bound_sockets());
-        // The status address is the first entry of the bind's own dialable set: a peer elsewhere can route
-        // to it where one exists, and it falls back to loopback on a host that has nothing else.
-        let status_addr = dialable.all().first().map(|at| at.socket);
+        let Some(mdns) = self.mdns.as_ref() else {
+            eyre::bail!(
+                "internal: serve reached its banner without the mDNS state (composition-root bug)"
+            );
+        };
+        // The control socket's reach is re-read from the bound sockets on every status request, so it
+        // follows the host to a new network; what `--local` chose and what mDNS managed stay as bound.
+        let reach = ReachSource::new(
+            node.bound_sockets(),
+            Internet::of(self.reach.local),
+            Lan::of(mdns),
+        );
         let addr = node.local_addr();
         let resident = std::sync::Arc::new(Resident::new(
             addr.node,
-            status_addr,
+            reach,
             tightbeam::tunnel::ServiceCatalog::clone(&catalog),
             enabled.clone(),
             cancel.clone(),
@@ -731,18 +737,14 @@ impl ServeCmd {
 
         if !self.quiet {
             let manifest = exposer.manifest();
-            let transport = match (self.verbose, self.mdns.as_ref()) {
-                (false, _) => None,
-                (true, Some(mdns)) => Some(reach_section(
+            let transport = self.verbose.then(|| {
+                reach_section(
                     ReachKind::of(self.reach.local),
                     mdns,
                     &self.bound_reach,
-                    &dialable,
-                )),
-                (true, None) => eyre::bail!(
-                    "internal: serve reached its banner without the mDNS state (composition-root bug)"
-                ),
-            };
+                    &Dialable::of(node.bound_sockets()),
+                )
+            });
             let stop_line = match self.expires {
                 Some(lifetime) => format!(
                     "runs for {}, then stops (or ctrl-c)",

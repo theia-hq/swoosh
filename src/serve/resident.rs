@@ -5,7 +5,6 @@
 //! the single teardown owner; this arm only REQUESTS the stop, never tears anything down itself).
 
 use core::future::Future;
-use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 use std::os::unix::io::AsRawFd;
@@ -20,6 +19,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
 use super::opening::{ClientGone, Opens};
+use super::reachable::ReachSource;
 use super::socket::{
     ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, OpenRefusal,
     OpenRequest, PathRequest, Request, Response, ServiceMenu, StatusReply,
@@ -52,8 +52,8 @@ pub struct Resident {
     started_at: std::time::Instant,
     /// This node's id, reported in the status reply.
     node_id: NodeId,
-    /// The bound address, when the transport hands one out.
-    addr: Option<SocketAddr>,
+    /// Where the status reply reads how peers reach this node, afresh on each request.
+    reach: ReachSource,
     /// The served catalog snapshot (the same snapshot `run_serve` cuts for `control.serve`'s list).
     catalog: ServiceCatalog,
     /// The services off, read live: the same instance the gate asks per stream, there through the first
@@ -74,7 +74,7 @@ impl Resident {
     /// run shares with every other path that may fire that token.
     pub fn new(
         node_id: NodeId,
-        addr: Option<SocketAddr>,
+        reach: ReachSource,
         catalog: ServiceCatalog,
         off: LiveServeToml,
         cancel: CancellationToken,
@@ -84,7 +84,7 @@ impl Resident {
             pid: std::process::id(),
             started_at: std::time::Instant::now(),
             node_id,
-            addr,
+            reach,
             catalog,
             off,
             cancel,
@@ -135,13 +135,13 @@ impl Resident {
         self.cancel.cancel();
     }
 
-    /// Cut a fresh status reply: the public shape only, with the live menu re-read live and the warm
-    /// peer list empty until the cache lands.
+    /// Cut a fresh status reply: the public shape only, with the reach and the live menu re-read live
+    /// and the warm peer list empty until the cache lands.
     fn status_reply(&self) -> StatusReply {
         StatusReply {
             node_id: self.node_id,
             pid: self.pid,
-            addr: self.addr,
+            reach: self.reach.reachable(),
             uptime_secs: self.started_at.elapsed().as_secs(),
             menu: self.menu(),
             warm: Vec::new(),

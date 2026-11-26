@@ -1477,7 +1477,7 @@ impl LocalResident {
         let cancel = CancellationToken::new();
         let resident = Arc::new(swoosh::serve::Resident::new(
             TestNode::seeded(OWN).node_id(),
-            None,
+            swoosh::testkit::loopback_source(),
             catalog(names),
             live,
             cancel.clone(),

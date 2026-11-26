@@ -11,6 +11,7 @@
 //! Keys are seeded by one byte, the secret being that byte 32 times, so a fixture names its key the same
 //! way in every test and every run.
 
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use core::ops::Deref;
 use std::collections::VecDeque;
 use std::time::SystemTime;
@@ -25,10 +26,41 @@ use crate::contacts::DeviceLabel;
 use crate::home::{Home, HomeWrite, ServeLock};
 use crate::passphrase::{Asked, Choice, Prompt};
 use crate::roster::{Member, RevokedDevice, RosterDoc};
+use crate::serve::{Internet, Lan, ReachSource, Reachable};
 use crate::sync::{Answer, Dial, ExchangeError};
 use crate::touch::{Touch, TouchHere, Touched};
 
 pub mod touch_id;
+
+/// The four bytes that open every control frame this build writes, so a test that hand-builds a frame
+/// names the tag the build speaks and never spells it out. A spelled-out tag goes stale at a version bump,
+/// and the frame is then refused as another build's, which a test asserting only "refused" reads as green.
+pub const CONTROL_MAGIC: [u8; 4] = crate::serve::CONTROL_MAGIC;
+
+/// A control frame: [`CONTROL_MAGIC`], then `rest` (the tag, the length and any body), as written.
+pub fn control_frame(rest: &[u8]) -> Vec<u8> {
+    [CONTROL_MAGIC.as_slice(), rest].concat()
+}
+
+/// A control frame's seven-byte header: [`CONTROL_MAGIC`], the tag, then the declared length, big-endian.
+pub const fn control_header(tag: u8, len: u16) -> [u8; 7] {
+    let [i, d, c, v] = CONTROL_MAGIC;
+    let [high, low] = len.to_be_bytes();
+    [i, d, c, v, tag, high, low]
+}
+
+/// A test resident's reach: a bind of `127.0.0.1:51006` alone, which expands with no read of this host.
+pub fn loopback_source() -> ReachSource {
+    ReachSource::new(vec![LOOPBACK], Internet::On, Lan::Announced)
+}
+
+/// What [`loopback_source`] answers: on, announced, and loopback alone. For a status fixture.
+pub fn loopback_reach() -> Reachable {
+    loopback_source().reachable()
+}
+
+/// The loopback socket the reach fixtures bind.
+const LOOPBACK: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 51006));
 
 /// A revoked device for an update: `node`, under the name `gone`, which any number of revoked devices may
 /// share. For a test that needs only the key revoked; one that reads the name builds its own.

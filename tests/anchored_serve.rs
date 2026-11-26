@@ -273,18 +273,17 @@ async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, std::thread::Joi
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    let first = status.addr.expect("a `--local` bind has an address");
-    // The status names the bind's first dialable address, which may be a LAN or internet one. iroh binds
-    // a v4 and a v6 socket, each on its own port, so dial that port on the loopback of the same family:
-    // the socket the status named, reached on this machine as the banner's `(this machine)` row is.
-    let loopback: core::net::IpAddr = match first {
-        SocketAddr::V4(_) => core::net::Ipv4Addr::LOCALHOST.into(),
-        SocketAddr::V6(_) => core::net::Ipv6Addr::LOCALHOST.into(),
-    };
+    // The reply carries the loopback address the wildcard bind answers on, the one the banner's
+    // `(this machine)` row names.
+    let addr = status
+        .reach
+        .at
+        .computer()
+        .expect("a wildcard bind answers on loopback");
     let served = Served {
         child,
         key: status.node_id,
-        addr: SocketAddr::new(loopback, first.port()),
+        addr,
         stderr,
     };
     (served, printed)

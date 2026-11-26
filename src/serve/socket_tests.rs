@@ -1,4 +1,5 @@
 use super::{ControlError, Request, RequestKind, Response};
+use crate::testkit::{CONTROL_MAGIC, control_frame, control_header};
 
 const OPERATIONS: [(u8, RequestKind, Request); 5] = [
     (1, RequestKind::Services, Request::Services),
@@ -15,7 +16,7 @@ const OPERATIONS: [(u8, RequestKind, Request); 5] = [
 #[tokio::test]
 async fn known_tags_return_one_request_and_copy_only_the_operation_context() {
     for (tag, kind, request) in OPERATIONS {
-        let frame = [b'S', b'W', b'C', b'2', tag, 0, 0, 0xff];
+        let frame = control_frame(&[tag, 0, 0, 0xff]);
         let mut reader = frame.as_slice();
         let mut observed = None;
         assert_eq!(
@@ -34,7 +35,7 @@ async fn known_tags_return_one_request_and_copy_only_the_operation_context() {
 #[tokio::test]
 async fn truncated_frames_retain_context_only_after_a_known_tag() {
     for (tag, kind, _) in OPERATIONS {
-        let frame = [b'S', b'W', b'C', b'2', tag, 0, 3, b'a', b'b'];
+        let frame = control_frame(&[tag, 0, 3, b'a', b'b']);
         // Missing length bytes and missing body bytes must retain the same diagnostic policy.
         for end in [5, 6, 7, 8, 9] {
             let mut reader = &frame[..end];
@@ -64,7 +65,7 @@ async fn unknown_tags_and_incomplete_headers_do_not_acquire_operation_context() 
     for frame in [
         b"".as_slice(),
         b"SWC",
-        b"SWC2",
+        &CONTROL_MAGIC,
         b"XWC1\x06\0\0",
         b"SWC9\x06\0\0",
     ] {
@@ -78,7 +79,7 @@ async fn unknown_tags_and_incomplete_headers_do_not_acquire_operation_context() 
         assert_eq!(observed, None);
     }
     for tag in [0, 8, 9, 0xff] {
-        let frame = [b'S', b'W', b'C', b'2', tag, 0, 0];
+        let frame = control_header(tag, 0);
         let mut reader = frame.as_slice();
         let mut observed = None;
         let error = Request::read_observed(&mut reader, &mut observed)
@@ -100,7 +101,7 @@ async fn unknown_tags_and_incomplete_headers_do_not_acquire_operation_context() 
 #[tokio::test]
 async fn malformed_payload_diagnostics_use_the_recorded_operation() {
     for (tag, kind, _) in OPERATIONS {
-        let frame = [b'S', b'W', b'C', b'2', tag, 0, 1, b'x'];
+        let frame = control_frame(&[tag, 0, 1, b'x']);
         let mut reader = frame.as_slice();
         let mut observed = None;
         let error = Request::read_observed(&mut reader, &mut observed)
@@ -146,7 +147,7 @@ fn observed_request_parses_once_without_cloning_an_owning_request() {
 async fn whoami_reply_roundtrips() {
     let mut asked = Vec::new();
     Request::Whoami.write(&mut asked).await.unwrap();
-    assert_eq!(asked, *b"SWC2\x07\0\0");
+    assert_eq!(asked, control_header(0x07, 0));
     assert_eq!(
         Request::read(&mut asked.as_slice()).await.unwrap(),
         Request::Whoami
@@ -158,7 +159,7 @@ async fn whoami_reply_roundtrips() {
         .write(&mut answer)
         .await
         .unwrap();
-    assert_eq!(answer[..7], *b"SWC2\x0d\x00\x20");
+    assert_eq!(answer[..7], control_header(0x0d, 32));
     assert_eq!(&answer[7..], node_id.key());
     assert_eq!(
         Response::read(&mut answer.as_slice()).await.unwrap(),
@@ -166,13 +167,13 @@ async fn whoami_reply_roundtrips() {
     );
 
     // A key one byte short is no reply, and neither is a tag past the last.
-    let short = [b"SWC2\x0d\x00\x1f".as_slice(), &[0; 31]].concat();
+    let short = [control_frame(b"\x0d\x00\x1f").as_slice(), &[0; 31]].concat();
     assert!(matches!(
         Response::read(&mut short.as_slice()).await,
         Err(ControlError::Protocol(_))
     ));
     assert!(matches!(
-        Response::read(&mut b"SWC2\x0e\x00\x00".as_slice()).await,
+        Response::read(&mut control_frame(b"\x0e\x00\x00").as_slice()).await,
         Err(ControlError::Protocol(reason)) if reason == "unknown response tag 0x0e"
     ));
 }
@@ -248,4 +249,11 @@ fn only_the_socket_distrust_variants_distrust_the_socket() {
     for (error, distrusts) in rows {
         assert_eq!(error.distrusts_socket(), distrusts, "{error:?}");
     }
+}
+
+/// The tag this build speaks, pinned once: every other test names it through `CONTROL_MAGIC`, so a
+/// change to it is a change here and nowhere else.
+#[test]
+fn the_control_magic_is_swc3() {
+    assert_eq!(CONTROL_MAGIC, *b"SWC3");
 }

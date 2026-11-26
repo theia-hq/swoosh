@@ -1,10 +1,9 @@
-//! The SWC2 local control codec.
+//! The local control codec.
 //!
 //! Each connection carries one request and one response, except an Open, which splices once attached.
 //! Reads expose status, service membership or local startup targets; Path samples an observed Open's
 //! connection; Stop requests a graceful shutdown. Service edits remain file operations.
 
-use core::net::SocketAddr;
 use std::path::PathBuf;
 
 use bifrost::NodeId;
@@ -13,11 +12,13 @@ use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::escape::EscapedPath;
 use crate::home::ProcessId;
+use crate::serve::reachable::Reachable;
 
 mod attached;
 mod local_detail;
 mod open;
 mod path;
+mod reach;
 pub(crate) mod splice;
 pub use attached::{OpenRead, OpenWrite};
 #[cfg(test)]
@@ -39,8 +40,19 @@ pub use path::{
 const IDENTITY: [u8; 3] = *b"SWC";
 
 /// The frame grammar THIS build speaks, written after [`IDENTITY`] and parsed (never compared whole)
-/// on read: together they are the four magic bytes `SWC2`.
-const VERSION: WireVersion = WireVersion(*b"2");
+/// on read: together they are the four magic bytes `SWC3`.
+const VERSION: WireVersion = WireVersion(*b"3");
+
+/// The four magic bytes this build opens every control frame with: [`IDENTITY`] then [`VERSION`].
+///
+/// One value for the writer and for every test that hand-builds a frame, so a version bump moves them
+/// all at once. A fixture that spelled the tag out would, after a bump, be refused as another build's
+/// frame, and a test meant to exercise one rejection would pass on that one instead.
+pub(crate) const MAGIC: [u8; 4] = {
+    let [i, d, c] = IDENTITY;
+    let [v] = VERSION.0;
+    [i, d, c, v]
+};
 
 /// The magic splits by RULE, not by a remembered offset: the identity is the leading run of capitals,
 /// the version is the digits after it, four bytes in all. Held at build time so a magic that breaks the
@@ -97,7 +109,7 @@ impl WireVersion {
 }
 
 impl core::fmt::Display for WireVersion {
-    /// Renders the WHOLE four-byte tag (`SWC2`), because that is the form the source and the changelog
+    /// Renders the WHOLE four-byte tag (`SWC3`), because that is the form the source and the changelog
     /// use, so a peer handed one in an error can match it against what it reads. A peer's version byte
     /// is arbitrary and need not be printable, so it is escaped rather than trusted: this string
     /// reaches a terminal.
@@ -110,8 +122,7 @@ impl core::fmt::Display for WireVersion {
 /// two writers and the two readers share one pair of helpers so a request and a response can never
 /// disagree about what opens a frame.
 async fn write_magic<W: io::AsyncWrite + Unpin>(writer: &mut W) -> io::Result<()> {
-    writer.write_all(&IDENTITY).await?;
-    writer.write_all(VERSION.as_bytes()).await
+    writer.write_all(&MAGIC).await
 }
 
 /// Read the four magic bytes and check them, parsed as [`IDENTITY`] plus a [`WireVersion`] and never
@@ -137,9 +148,9 @@ async fn read_magic<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<(), Cont
 /// connection closed, before a byte of it is read.
 pub const MAX_FRAME: usize = 8 * 1024;
 
-/// The longest string one status reply carries: a disabled name, an explicit-unknown reason, or the
-/// bound address text. Both the encoder and the decoder enforce it, so an encode can never produce a
-/// status frame its own decode refuses.
+/// The longest string one status reply carries: a disabled name or an explicit-unknown reason. Both
+/// the encoder and the decoder enforce it, so an encode can never produce a status frame its own
+/// decode refuses.
 pub const MAX_STATUS_STRING: usize = 256;
 
 /// The most disabled names one service menu carries. The encoder refuses a longer list and the
@@ -462,17 +473,15 @@ pub struct PeerEntry {
     pub idle_secs: u64,
 }
 
-/// The node's status over the local socket: the public SHAPE only (id, pid, address, uptime, the
-/// live menu, the warm peers). Never key material, never badge bytes.
+/// The node's status over the local socket: the public SHAPE only (id, pid, how it is reached, uptime,
+/// the live menu, the warm peers). Never key material, never badge bytes.
 ///
 /// The wire form (all ints big-endian), self-delimiting so a reader needs no out-of-band length:
 ///
 /// ```text
-///   node_id       32 bytes        ed25519 public key (CryptoKind implicit Ed25519 in SWC2)
+///   node_id       32 bytes        ed25519 public key (CryptoKind implicit Ed25519 in SWC3)
 ///   pid           u32
-///   addr_present  u8              (0 or 1)
-///   addr_len      u16             present iff addr_present == 1
-///   addr          [u8; addr_len]  UTF-8 SocketAddr, at most MAX_STATUS_STRING (256) bytes
+///   reach         3 to 79 bytes   how peers reach the node (`socket/reach.rs`)
 ///   uptime_secs   u64
 ///   menu          ServiceMenu layout (catalog + disabled, above)
 ///   warm_count    u32             at most MAX_WARM_ENTRIES
@@ -486,8 +495,8 @@ pub struct StatusReply {
     pub node_id: NodeId,
     /// The resident's pid.
     pub pid: u32,
-    /// The bound address, when the transport hands one out.
-    pub addr: Option<SocketAddr>,
+    /// How peers reach the node, read from the host when the reply was cut.
+    pub reach: Reachable,
     /// Seconds since the resident started.
     pub uptime_secs: u64,
     /// The live menu: the served catalog snapshot plus the live disabled list.
@@ -506,19 +515,7 @@ impl StatusReply {
         let mut out = Vec::new();
         out.extend_from_slice(self.node_id.key());
         out.extend_from_slice(&self.pid.to_be_bytes());
-        match self.addr {
-            Some(addr) => {
-                out.push(1);
-                let text = addr.to_string();
-                let bytes = text.as_bytes();
-                if bytes.len() > MAX_STATUS_STRING {
-                    return Err(io::Error::other("status addr too long"));
-                }
-                out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-                out.extend_from_slice(bytes);
-            }
-            None => out.push(0),
-        }
+        self.reach.encode_into(&mut out);
         out.extend_from_slice(&self.uptime_secs.to_be_bytes());
         self.menu.encode_into(&mut out)?;
         out.extend_from_slice(&(self.warm.len() as u32).to_be_bytes());
@@ -536,28 +533,7 @@ impl StatusReply {
         let node_id = NodeId::try_new(bifrost::CryptoKind::Ed25519, key)
             .map_err(|error| ControlError::Protocol(format!("status key: {error}")))?;
         let pid = u32::from_be_bytes(take_array(bytes, &mut cursor)?);
-        let has_addr = take_byte(bytes, &mut cursor)?;
-        let addr = match has_addr {
-            0 => None,
-            1 => {
-                let len = usize::from(u16::from_be_bytes(take_array(bytes, &mut cursor)?));
-                if len > MAX_STATUS_STRING {
-                    return Err(ControlError::Protocol("status addr too long".to_owned()));
-                }
-                let text = core::str::from_utf8(take(bytes, &mut cursor, len)?)
-                    .map_err(|_| ControlError::Protocol("status addr is not UTF-8".to_owned()))?;
-                Some(
-                    text.parse().map_err(|_| {
-                        ControlError::Protocol("status addr does not parse".to_owned())
-                    })?,
-                )
-            }
-            other => {
-                return Err(ControlError::Protocol(format!(
-                    "unknown addr presence {other:#04x}"
-                )));
-            }
-        };
+        let reach = Reachable::decode_at(bytes, &mut cursor)?;
         let uptime_secs = u64::from_be_bytes(take_array(bytes, &mut cursor)?);
         let menu = ServiceMenu::decode_at(bytes, &mut cursor)?;
         let warm_count = u32::from_be_bytes(take_array(bytes, &mut cursor)?) as usize;
@@ -582,7 +558,7 @@ impl StatusReply {
         Ok(Self {
             node_id,
             pid,
-            addr,
+            reach,
             uptime_secs,
             menu,
             warm,
