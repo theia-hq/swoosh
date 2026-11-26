@@ -54,9 +54,8 @@ where
         local: false,
         reach: swoosh::transport::Reach::default(),
     };
-    let peer = dialing.peer().expect("a dialing verb names its machine");
     dialing
-        .by_own_bind(node, peers, home, &bound, machine, peer, contacts, admitted)
+        .by_own_bind(node, peers, home, &bound, machine, contacts, admitted)
         .await
 }
 

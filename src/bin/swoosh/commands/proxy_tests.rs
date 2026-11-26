@@ -492,7 +492,6 @@ async fn own<'n, T: bifrost::Transport, R>(
     let home = standing(node.node_id());
     let bound = crate::probe_route_tests::bound();
     let route = Route::Own {
-        peer: &cmd.peer,
         bound: &bound,
         this: node.node_id(),
     };
@@ -760,7 +759,6 @@ fn a_refused_proxy_names_the_cause_on_both_paths() {
         let home = standing(node.node_id());
         let bound = crate::probe_route_tests::bound();
         let route = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: node.node_id(),
         };
@@ -840,7 +838,6 @@ fn an_admitted_proxy_prints_its_url_alone() {
         let home = standing(node.node_id());
         let bound = crate::probe_route_tests::bound();
         let route = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: node.node_id(),
         };
@@ -1511,7 +1508,6 @@ fn a_run_ending_request_answers_the_waiting_clients() {
         let cmd = proxy(&[]);
         let bound = crate::probe_route_tests::bound();
         let own = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: crate::commands::through_serve::tests::nas(),
         };
@@ -1658,7 +1654,6 @@ fn a_host_cut_answers_a_waiting_proxy_client_with_its_502() {
         let nas = machine(&book(), "me/nas");
         let bound = crate::probe_route_tests::bound();
         let route = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: crate::commands::through_serve::tests::nas(),
         };
@@ -1704,7 +1699,6 @@ fn a_host_cut_resets_a_proxy_client_mid_body() {
         let nas = machine(&book(), "me/nas");
         let bound = crate::probe_route_tests::bound();
         let route = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: crate::commands::through_serve::tests::nas(),
         };
@@ -1807,7 +1801,6 @@ fn one_ending_table_on_both_paths() {
         let cmd = proxy(&["--service", "ssh"]);
         let bound = crate::probe_route_tests::bound();
         let own = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: crate::commands::through_serve::tests::nas(),
         };

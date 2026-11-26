@@ -127,7 +127,6 @@ async fn by_own_bind<T: Transport, D: Discovery>(
         reach: swoosh::transport::Reach::default(),
     };
     let route = Route::Own {
-        peer: &cmd.peer,
         bound: &bound,
         this,
     };
@@ -1092,7 +1091,6 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
         let peers = Peers::new(&node);
         let home = empty_home("lookup");
         let route = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: node.node_id(),
         };

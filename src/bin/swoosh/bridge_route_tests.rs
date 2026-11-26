@@ -107,7 +107,6 @@ async fn by_own_bind<T: bifrost::Transport, D: bifrost::Discovery>(
 ) -> eyre::Result<()> {
     let bound = bound();
     let route = Route::Own {
-        peer: &cmd.peer,
         bound: &bound,
         this,
     };
@@ -343,7 +342,6 @@ fn one_open_table_for_the_bridge() {
         let cmd = bridge("me/nas");
         let bound = bound();
         let own = Route::Own {
-            peer: &cmd.peer,
             bound: &bound,
             this: nas(),
         };
@@ -453,7 +451,6 @@ fn one_open_table_for_the_bridge() {
             reach: swoosh::transport::Reach::default(),
         };
         let own_local = Route::Own {
-            peer: &cmd.peer,
             bound: &local,
             this: nas(),
         };

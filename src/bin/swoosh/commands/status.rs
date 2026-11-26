@@ -158,12 +158,12 @@ impl StatusCmd {
                     other => return Err(route.line(other, machine).await),
                 };
                 writeln!(out, "{line}")?;
-                return route.result(line.outcome(), peer);
+                return route.result(line.outcome(), machine);
             }
         };
         admitted.asked_through(source, machine.key());
         let stopped = async || route.stopped().await;
-        observed(&session, follow, asked, &label, peer, stopped, out, err).await
+        observed(&session, follow, asked, &label, stopped, out, err).await
     }
 
     /// The service `status <machine>` asks of `machine`: what it serves, of one of your devices, else a
@@ -228,16 +228,11 @@ impl Probe {
 /// reading fails; the round trip is always the probe's own. A probe that did not answer prints its
 /// line and its error first, and is Finished after. Before a probe that broke blames the machine,
 /// `stopped` asks whether `serve` itself went: then its line stands alone, with nothing on stdout.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the probe, its observer and the lines it prints to"
-)]
 async fn observed<S: Session>(
     session: &S,
     mut observer: impl Follow,
     asked: Probe,
     label: &str,
-    peer: &Peer,
     stopped: impl AsyncFnOnce() -> Option<eyre::Report>,
     out: &mut impl Write,
     err: &mut impl Paint,
@@ -260,7 +255,8 @@ async fn observed<S: Session>(
             if let Err(error) = writeln!(out, "{line}") {
                 return Err(through_serve::failed(error.into(), observer, err).await);
             }
-            return through_serve::ended(line.outcome().unbound_result(peer), observer, err).await;
+            return through_serve::ended(line.outcome().unbound_result(&label), observer, err)
+                .await;
         }
     };
     let path = through_serve::final_path(observer.finish().await, err)?;
@@ -679,7 +675,7 @@ mod tests {
             "an unanswered probe is not healthy: {text}"
         );
         assert!(
-            line.outcome().into_result(&"alice", &bound()).is_err(),
+            line.outcome().into_result(&nas(), &bound()).is_err(),
             "an unanswered probe exits non-zero: {text}"
         );
     }
@@ -715,9 +711,15 @@ mod tests {
             "a failed probe is its own outcome: {text}"
         );
         assert!(
-            line.outcome().into_result(&"alice", &bound()).is_err(),
+            line.outcome().into_result(&nas(), &bound()).is_err(),
             "a failed probe exits non-zero: {text}"
         );
+    }
+
+    /// `me/nas`, the machine every outcome assertion here is made of.
+    fn nas() -> swoosh::peer::Machine {
+        let contacts = crate::commands::through_serve::tests::book();
+        crate::commands::through_serve::tests::machine(&contacts, "me/nas")
     }
 
     /// The bind every outcome assertion here is made under: the default iroh reach, so no
@@ -1011,7 +1013,6 @@ mod tests {
             events.observer(reading(relayed())).await,
             asked,
             "me/nas",
-            &"me/nas".parse().expect("a machine"),
             async || {
                 was_asked.set(true);
                 gone.map(|line| eyre::eyre!("{line}"))
@@ -1421,7 +1422,6 @@ mod tests {
         let peers = swoosh::peers::Peers::new(&node);
         let home = crate::commands::through_serve::tests::empty_home("status-key");
         let route = crate::commands::route::Route::Own {
-            peer: cmd.peer.as_ref().expect("a machine typed"),
             bound: &bound,
             this: node.node_id(),
         };

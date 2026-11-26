@@ -1300,20 +1300,6 @@ impl Dialing {
         }
     }
 
-    /// The machine as typed, which the own bind's lines name. `None` only for a bare `status`, which
-    /// never reaches here.
-    fn peer(&self) -> Option<&Peer> {
-        match self {
-            Self::Ping(cmd) => cmd.dialed(),
-            Self::Speed(cmd) => cmd.dialed(),
-            Self::Status(cmd) => cmd.dialed(),
-            Self::Send(cmd) => cmd.dialed(),
-            Self::Forward(cmd) => cmd.dialed(),
-            Self::Proxy(cmd) => cmd.dialed(),
-            Self::Stop(cmd) => cmd.dialed(),
-        }
-    }
-
     /// What the verb dials as: the credential its bind role carries, and what each of its own bind's
     /// streams presents.
     fn credential(&self) -> credential::Credential {
@@ -1397,12 +1383,12 @@ impl Dialing {
     }
 
     /// Run the verb's one body over this run's own bind on `node`: its streams from `peers`, each presenting
-    /// what its open reads from `home` (or the link typed as `peer`), worded by the own route, which names
-    /// what was `bound`. Its lines go to this process's stdout and stderr, the bridge's stream to its stdin
+    /// what its open reads from `home` (or the link typed as the machine), worded by the own route, which
+    /// names what was `bound`. Its lines go to this process's stdout and stderr, the bridge's stream to its stdin
     /// and stdout.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the own bind's parts, the machine as resolved and as typed, and the run's signal"
+        reason = "the own bind's parts, the machine as resolved, and the run's signal"
     )]
     async fn by_own_bind<'s, 'n: 's, T: Transport, D: Discovery>(
         &self,
@@ -1411,7 +1397,6 @@ impl Dialing {
         home: &'s Home,
         bound: &transport::Bound,
         machine: &Machine,
-        peer: &Peer,
         contacts: &Contacts,
         admitted: swoosh::learn::Admitted<'s>,
     ) -> eyre::Result<()>
@@ -1421,7 +1406,6 @@ impl Dialing {
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
         let route = commands::route::Route::Own {
-            peer,
             bound,
             this: node.node_id(),
         };
@@ -1947,13 +1931,13 @@ where
                     // A bare `status` splits to its local run before any transport is composed, and every
                     // other dialing verb names a machine resolved before the bind, so a missing one here is
                     // a root-dispatch bug, not a user error.
-                    let (Some(machine), Some(peer)) = (machine, dialing.peer()) else {
+                    let Some(machine) = machine else {
                         eyre::bail!(
                             "internal: `{verb}` ran without its machine resolved (root-dispatch bug)"
                         );
                     };
                     dialing
-                        .by_own_bind(node, &peers, home, bound, machine, peer, contacts, admitted)
+                        .by_own_bind(node, &peers, home, bound, machine, contacts, admitted)
                         .await
                 }
                 // The names and the act only word a `serve` gone under the run, which cannot happen here.

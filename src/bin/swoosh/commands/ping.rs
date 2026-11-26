@@ -169,7 +169,7 @@ impl PingCmd {
             other => return Err(route.line(other, machine).await),
         };
         writeln!(out, "{line}")?;
-        route.result(outcome, &self.peer)
+        route.result(outcome, machine)
     }
 
     /// The probes over `session`, one stream, beside `follow`, printing on `out` and `err`. A measured
@@ -251,7 +251,7 @@ impl PingCmd {
         if let Err(error) = writeln!(out, "{line}") {
             return Err(through_serve::failed(error.into(), follow, err).await);
         }
-        through_serve::ended(outcome.unbound_result(&self.peer), follow, err).await
+        through_serve::ended(outcome.unbound_result(&label), follow, err).await
     }
 
     /// The probes this run sends.
@@ -707,6 +707,60 @@ mod tests {
             assert_eq!(out, line);
             assert_eq!(log, [error, "Finish"]);
         }
+    }
+
+    /// A refusal through `serve` names the machine as every other line does, by its name here, not as it
+    /// was typed: a bare person reads as the one machine of theirs that was dialed.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_through_serve_names_the_machine_not_the_word_typed() {
+        use clap::Parser as _;
+
+        use crate::commands::through_serve::tests::{Events, reading, relayed};
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            ping: PingCmd,
+        }
+
+        let session = Echo::refusing(bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded("busy"),
+        });
+        let mut contacts = swoosh::contacts::Contacts::default();
+        contacts
+            .save(&"alice/laptop".parse().expect("a contact"), session.peer())
+            .expect("the name is free");
+        let cmd = Wrap::try_parse_from(["x", "alice", "-c", "1"])
+            .expect("ping parses")
+            .ping;
+        let machine = cmd.peer.machine(&contacts).expect("one machine");
+        let events = Events::answering([]);
+        let mut out = Vec::new();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(60),
+            cmd.observed(
+                &session,
+                events.observer(reading(relayed())).await,
+                &machine,
+                async || None,
+                &mut out,
+                &mut events.clone(),
+            ),
+        )
+        .await
+        .expect("the run ends");
+        assert!(ended.is_err(), "a refused ping exits non-zero");
+        assert_eq!(
+            String::from_utf8(out).expect("text"),
+            "alice/laptop: reached, but refused (unavailable: busy)\n"
+        );
+        assert_eq!(
+            events.log(),
+            [
+                "stderr: error: alice/laptop: reached, but refused",
+                "Finish"
+            ]
+        );
     }
 
     /// A run that broke through `serve` asks whether `serve` went before blaming the machine: gone, its

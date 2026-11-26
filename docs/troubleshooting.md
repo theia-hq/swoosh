@@ -6,11 +6,11 @@ and says why, rather than reporting a healthy-looking result.
 ## "reached, but the probe failed" / "reached, but the probe went unanswered"
 
 ```
-desk: reached, but the probe failed (read frame: stream: peer went away)
-nas: reached, but the probe failed (it sent an unknown reply to the list request)
-nas: reached, but the probe failed (it ended the list request without an answer)
-nas: reached, but the probe went unanswered (1 sent, 0 back)
-Error: desk: reached, but the probe failed
+me/desk: reached, but the probe failed (read frame: stream: peer went away)
+me/nas: reached, but the probe failed (it sent an unknown reply to the list request)
+me/nas: reached, but the probe failed (it ended the list request without an answer)
+me/nas: reached, but the probe went unanswered (1 sent, 0 back)
+Error: me/desk: reached, but the probe failed
 ```
 
 The dial landed and the exchange did not finish. Two shapes: a `failed` line names what broke, and an `unanswered` line
@@ -59,13 +59,16 @@ to it. The reply does not say which. Ask its owner to share `ping` with you.
 
 <!-- manual: needs a --local dial to a machine on another network -->
 ```
-error: could not reach me/nas
-  With --local or SWOOSH_LOCAL, swoosh looks on this network only.
-  Give its address with --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL.
+error: could not reach me/nas on this network
+  With --local or SWOOSH_LOCAL, swoosh looks for it on this network,
+  or at an address you give.
+  On me/nas, swoosh status lists its addresses under reach.
+  Add one of those addresses to your command:
+    --peer ed01r25iqp4gca63iwwfjmrgn54ckpnwcvkxl6ylhrtbya32mvgjrpma=<address>
 ```
 
-The address `--peer` takes is an address the machine's `serve` printed under `local`
-([transports](transports.md#peer)).
+On the machine named, run `swoosh status` while its `swoosh serve` runs, and add one address from `reach` to your
+command as `--peer <key>=<address>` ([transports](transports.md#peer)). Or drop `--local` and unset `SWOOSH_LOCAL`.
 
 ## "could not reach"
 

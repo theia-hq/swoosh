@@ -809,7 +809,6 @@ async fn stop_from(
         .expect("a key is one machine");
     let bound = crate::probe_route_tests::bound();
     let route = Route::Own {
-        peer: &device.peer,
         bound: &bound,
         this,
     };
@@ -1198,7 +1197,6 @@ async fn one_open_table_for_stop() {
         .expect("a key is one machine");
     let bound = crate::probe_route_tests::bound();
     let route = Route::Own {
-        peer: &device.peer,
         bound: &bound,
         this: TestNode::seeded(DESK).node_id(),
     };

@@ -149,10 +149,8 @@ fn one_open_table_for_the_probe_verbs() {
         let served = Served::new("open-table").await;
         let socket = swoosh::node_client::UidSocket::resolve(&served.home).unwrap();
         let contacts = book();
-        let peer: swoosh::peer::Peer = "me/nas".parse().unwrap();
         let bound = bound();
         let own = Route::Own {
-            peer: &peer,
             bound: &bound,
             this: nas(),
         };
@@ -340,7 +338,6 @@ fn one_open_table_for_the_probe_verbs() {
             reach: swoosh::transport::Reach::default(),
         };
         let own_local = Route::Own {
-            peer: &peer,
             bound: &local,
             this: nas(),
         };
@@ -541,7 +538,6 @@ async fn ping_v_prints_changes_from_the_held_session() {
         unreachable!()
     };
     let route = Route::Own {
-        peer: &cmd.peer,
         bound: &bound,
         this: nas(),
     };

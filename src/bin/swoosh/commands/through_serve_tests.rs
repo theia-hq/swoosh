@@ -126,7 +126,6 @@ impl Dialing {
             reach: swoosh::transport::Reach::default(),
         };
         let route = crate::commands::route::Route::Own {
-            peer,
             bound: &bound,
             this,
         };
@@ -547,10 +546,8 @@ async fn a_dial_timeout_prints_as_a_timeout_on_both_paths() {
         printed(&pipe.refused(dial_timeout(), &Serve(None)).await),
         printed(&pipe.refused(OpenRefusal::Timeout, &Serve(None)).await)
     );
-    let typed = Peer::Raw(nas());
     let bound = crate::probe_route_tests::bound();
     let own = crate::commands::route::Route::Own {
-        peer: &typed,
         bound: &bound,
         this: resident_key(),
     };

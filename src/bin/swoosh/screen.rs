@@ -9,6 +9,7 @@
 use core::fmt::{self, Write as _};
 use std::borrow::Cow;
 use std::io;
+use std::sync::OnceLock;
 
 use anstream::{AutoStream, ColorChoice};
 use clap::builder::styling::{self, AnsiColor, Color};
@@ -76,18 +77,25 @@ pub(crate) trait Paint: io::Write {
     }
 }
 
+/// Whether stdout shows style, decided once per run: the environment and the handle do not change under
+/// a run, so every line on one stream is styled alike. A cell per stream, never one for both, since one
+/// stream can be a terminal while the other is a pipe.
+static STDOUT: OnceLock<bool> = OnceLock::new();
+/// Whether stderr shows style; see [`STDOUT`].
+static STDERR: OnceLock<bool> = OnceLock::new();
+
 /// Styled as clap styles its own errors: `NO_COLOR` is plain, then `CLICOLOR_FORCE` styles, then
 /// `CLICOLOR=0` is plain, then a terminal whose `TERM` supports colour styles. A pipe or a file is plain.
 impl Paint for io::Stdout {
     fn styled(&self) -> bool {
-        AutoStream::choice(self) != ColorChoice::Never
+        *STDOUT.get_or_init(|| AutoStream::choice(&io::stdout()) != ColorChoice::Never)
     }
 }
 
 /// The same decision for stderr, made for stderr's own handle.
 impl Paint for io::Stderr {
     fn styled(&self) -> bool {
-        AutoStream::choice(self) != ColorChoice::Never
+        *STDERR.get_or_init(|| AutoStream::choice(&io::stderr()) != ColorChoice::Never)
     }
 }
 

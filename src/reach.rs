@@ -37,26 +37,28 @@ pub const SPEED_SERVICE: &str = "speed";
 pub const FOLLOW_UP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The error for an open through the run's [`Peers`](crate::peers::Peers) that gave no stream: a dial that
-/// reached no session reads `could not reach <target>`, with the fix `bound` needs; any other failure keeps its
-/// chain, escaped, since it can carry the peer's text.
-pub fn open_failed(
-    target: &impl core::fmt::Display,
-    error: OpenError,
-    bound: &transport::Bound,
-) -> eyre::Report {
+/// reached no session reads `could not reach <machine>`, with the fix `bound` needs; any other failure keeps
+/// its chain, escaped, since it can carry the peer's text.
+pub fn open_failed(machine: &Machine, error: OpenError, bound: &transport::Bound) -> eyre::Report {
     match error {
-        OpenError::Unreachable(failure) => {
-            hint(unreached(target, eyre::Report::new(failure)), bound)
-        }
+        OpenError::Unreachable(failure) => hint(
+            machine,
+            unreached(machine, eyre::Report::new(failure)),
+            bound,
+        ),
         other => escaped_report(other.into()),
     }
 }
 
 /// The error for a machine the dial did not reach: the connect's cause chain under `could not reach
-/// <target>`. The chain can carry the peer's text (the reason it gave for closing), so it prints through
-/// the escaper; the target is this machine's own word for the peer and prints as it is.
-fn unreached(target: &impl core::fmt::Display, error: eyre::Report) -> eyre::Report {
-    eyre::eyre!("could not reach {target}: {}", escaped_report(error))
+/// <machine>`. The chain can carry the peer's text (the reason it gave for closing), so it prints through
+/// the escaper; the label is this machine's own word for the peer and prints as it is.
+fn unreached(machine: &Machine, error: eyre::Report) -> eyre::Report {
+    eyre::eyre!(
+        "could not reach {}: {}",
+        machine.label(),
+        escaped_report(error)
+    )
 }
 
 /// The connector for `service` on `key` presenting `present` in slot 1 and, when given, `membership` in
@@ -235,30 +237,49 @@ async fn read_catalog(reader: impl AsyncRead + Unpin) -> eyre::Result<tunnel::Se
 /// Put the fact the bind mode explains under a reach failure, and the fix under that, so the error says
 /// what happened first and what to do next.
 ///
-/// Shared by every dial's line so a `could not reach` always carries the same remedy. A cause
-/// the person may have set names both its spellings, since they may only ever have set the variable, and
-/// so does a remedy that removes one; a remedy that adds a flag names the flag alone, since a flag beats
-/// its variable.
-pub fn hint(error: eyre::Report, bound: &transport::Bound) -> eyre::Report {
-    // `--local` removes internet discovery and relays. Name the setting as the cause, the hand-fed
-    // address that remains, and the way back to the default bind.
-    let detail = if bound.local {
-        "With --local or SWOOSH_LOCAL, swoosh looks on this network only.\n  Give its address with \
-         --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL."
-            .to_owned()
-    } else {
-        // A dial over n0's resolver needs no extra line: n0 is the default everyone reads about. A dial
-        // through the operator's own does, because iroh's error does not name it, so a resolver that is
-        // down or empty reads as "the machine is offline" with nothing to check. Only the RESOLVER is
-        // named: this node's own relay is not on the path to the machine, since a dial runs through
-        // whatever relay the machine's record names, so naming it would point at the wrong server.
-        match &bound.reach.resolver {
-            transport::Resolver::N0 => return error,
-            transport::Resolver::Custom(url) => format!("resolver asked: {url}"),
+/// Shared by every dial's line so a `could not reach` always carries the same remedy. A cause the person
+/// may have set names both its spellings, since they may only ever have set the variable; a remedy that
+/// adds a flag names the flag alone, since a flag beats its variable.
+pub fn hint(machine: &Machine, unreached: eyre::Report, bound: &transport::Bound) -> eyre::Report {
+    if bound.local {
+        // The cause chain says how the dial failed, which the person cannot act on: the remedy is the
+        // address only the machine itself can list. The chain stays in the log, escaped already.
+        tracing::debug!(error = %format_args!("{unreached:#}"), "a --local dial reached nothing");
+        return local_miss(machine);
+    }
+    // A dial over n0's resolver needs no extra line: n0 is the default everyone reads about. A dial through
+    // the operator's own does, because iroh's error does not name it, so a resolver that is down or empty
+    // reads as "the machine is offline" with nothing to check. Only the RESOLVER is named: this node's own
+    // relay is not on the path to the machine, since a dial runs through whatever relay the machine's
+    // record names, so naming it would point at the wrong server.
+    match &bound.reach.resolver {
+        transport::Resolver::N0 => unreached,
+        // One message rather than a wrapped chain: a wrap prints first, and the fact leads.
+        transport::Resolver::Custom(url) => {
+            eyre::eyre!("{unreached:#}\n  resolver asked: {url}")
         }
-    };
-    // One message rather than a wrapped chain: a wrap prints first, and the fact leads.
-    eyre::eyre!("{error:#}\n  {detail}")
+    }
+}
+
+/// The refusal for a `--local` dial that reached nothing: `--local` drops internet discovery and relays,
+/// so only an address on this network or one given by hand can reach the machine. It names the machine,
+/// where its addresses are listed (on the machine itself, which only a name here can point at), and the
+/// `--peer` form with the whole key, so the line can be completed by pasting one address.
+fn local_miss(machine: &Machine) -> eyre::Report {
+    let on = machine
+        .name()
+        .map_or_else(|| "that machine".to_owned(), ToString::to_string);
+    // The second sentence wraps at its comma: whole, it runs past the screen's 80 columns.
+    eyre::eyre!(
+        "could not reach {label} on this network\n  \
+         With --local or SWOOSH_LOCAL, swoosh looks for it on this network,\n  \
+         or at an address you give.\n  \
+         On {on}, swoosh status lists its addresses under reach.\n  \
+         Add one of those addresses to your command:\n    \
+         --peer {key}=<address>",
+        label = machine.label(),
+        key = machine.key(),
+    )
 }
 
 /// How far a probe of one machine got, ordered by exactly that: no answer, an answer that refused, an
@@ -288,17 +309,17 @@ impl Outcome {
     ///
     /// Non-zero unless the machine answered the probe, and the failing shapes carry DIFFERENT errors so a
     /// failure that was REACHED is never dressed as an addressing problem: an unreachable machine carries
-    /// the bind's reach [`hint`] (under `--local`, the setting named as the cause and the `--peer` remedy),
-    /// while a refusal or a broken probe says which it was and carries none, so a refused stranger never
-    /// sees the `--peer` remedy after it already reached the node.
-    pub fn into_result(
-        self,
-        target: &impl core::fmt::Display,
-        bound: &transport::Bound,
-    ) -> eyre::Result<()> {
+    /// the bind's reach [`hint`] (under `--local`, where the machine lists its addresses and the `--peer`
+    /// form), while a refusal or a broken probe says which it was and carries none, so a refused stranger
+    /// never sees the `--peer` remedy after it already reached the node.
+    pub fn into_result(self, machine: &Machine, bound: &transport::Bound) -> eyre::Result<()> {
         match self {
-            Self::Unreachable => Err(hint(eyre::eyre!("could not reach {target}"), bound)),
-            reached => reached.unbound_result(target),
+            Self::Unreachable => Err(hint(
+                machine,
+                eyre::eyre!("could not reach {}", machine.label()),
+                bound,
+            )),
+            reached => reached.unbound_result(&machine.label()),
         }
     }
 
