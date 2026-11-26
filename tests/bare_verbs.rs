@@ -168,7 +168,7 @@ fn bare_stop_stops_the_resident() {
         if stdout
             .lock()
             .expect("the capture lock")
-            .contains("ctrl-c to stop")
+            .contains("swoosh is serving")
         {
             break;
         }
@@ -185,11 +185,6 @@ fn bare_stop_stops_the_resident() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(socket.exists(), "the resident binds its control socket");
-    let banner = stdout.lock().expect("the capture lock").clone();
-    assert!(
-        !banner.contains('\u{1b}'),
-        "a piped banner is plain: {banner:?}"
-    );
 
     // Bare `status` reads what the running resident serves over the same local socket, and dials nobody.
     let status = swoosh(&scratch, &["status"]);
@@ -272,6 +267,16 @@ fn bare_stop_stops_the_resident() {
     out_reader.join().expect("the stdout reader joins");
     err_reader.join().expect("the stderr reader joins");
     let resident_out = stdout.lock().expect("the capture lock").clone();
+    // Read whole once the resident has exited: a piped banner closes on no line of its own.
+    assert!(
+        resident_out.starts_with("swoosh is serving") && !resident_out.contains('\u{1b}'),
+        "a piped banner is plain: {resident_out:?}"
+    );
+    // Nobody at a pipe can press ctrl-c, so a piped banner never says to.
+    assert!(
+        !resident_out.contains("ctrl-c"),
+        "a piped banner says nothing of ctrl-c: {resident_out:?}"
+    );
     assert!(
         resident_out.contains("node stopped (local request)."),
         "the resident classifies the socket stop as its local end: {resident_out}"
@@ -321,7 +326,7 @@ fn serve_removes_its_runtime_leaf_on_exit() {
     while !stdout
         .lock()
         .expect("the capture lock")
-        .contains("ctrl-c to stop")
+        .contains("swoosh is serving")
     {
         if let Some(status) = child.0.try_wait().expect("poll the resident") {
             panic!(

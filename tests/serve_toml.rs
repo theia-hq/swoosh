@@ -125,8 +125,10 @@ fn swoosh_in(home: &Path, run: &Path, args: &[&str]) -> Output {
         .expect("swoosh runs")
 }
 
-/// Start `swoosh serve <args>` on `home` with `--local`, which reaches no server, and wait for its
-/// banner. Returns the child, the banner, and its stderr lines as they come.
+/// Start `swoosh serve <args>` on `home` with `--local`, which reaches no server, and read its whole
+/// banner. A piped banner says how to stop it on no line, so the run is given a day with `--expires`:
+/// the line that says when it stops closes the banner, piped too. Returns the child, the banner, and its
+/// stderr lines as they come.
 fn serve(
     home: &Path,
     run: &Path,
@@ -138,7 +140,7 @@ fn serve(
         Command::new(env!("CARGO_BIN_EXE_swoosh"))
             .arg("--home")
             .arg(home)
-            .args(["serve", "--local"])
+            .args(["serve", "--local", "--expires", "1d"])
             .args(args)
             .env("XDG_RUNTIME_DIR", run)
             .env_remove("SWOOSH_HOME")
@@ -162,7 +164,14 @@ fn serve(
     let mut seen = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut byte = [0u8; 1];
-    while !String::from_utf8_lossy(&seen).contains("ctrl-c to stop") {
+    let closed = |seen: &[u8]| {
+        let seen = String::from_utf8_lossy(seen);
+        seen.contains("swoosh is serving")
+            && seen
+                .rsplit_once("\nServing until ")
+                .is_some_and(|(_, line)| line.ends_with(").\n"))
+    };
+    while !closed(&seen) {
         assert!(
             std::time::Instant::now() < deadline,
             "serve never became ready"

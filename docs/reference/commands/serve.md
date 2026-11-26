@@ -44,6 +44,10 @@ Each file a receive service lands prints one line on stderr, such as
 The key after `from` is the machine that sent the file.
 The sender chooses the name, so control characters in it are shown escaped. If stderr falls behind, some
 lines are dropped and a line says how many.
+The banner gives this machine's name, when it has one, and its key, how peers reach it under `reach`, and what it serves. With
+`--expires` it then says when `serve` stops (`Serving until 15:04 (1h 30m).`). At a terminal, with no service
+manager running `serve`, it ends with `Press ctrl-c to stop.` To start `serve` at login, see
+[Run a node at login](../../use-cases/run-at-login.md).
 `--quiet` (or `SWOOSH_QUIET`) prints no banner, no per-file lines and no `node stopped` line; refusals,
 warnings and the `Stopped by` line still print.
 A raw-stream service (`file:`, `fifo:`, `stdin:`) has no auth of its own, so `--public` refuses it and

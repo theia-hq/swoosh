@@ -86,8 +86,13 @@ fn the_signed_screens_hold_the_law() {
     }
 }
 
+/// A lowercase fact of fixed words, 81 columns: it breaks only the width, since no word is a token alone.
+const WIDE: &str =
+    "a line of fixed words that runs one column past the screen's width, so it breaks.";
+
 #[test]
 fn each_breach_is_caught_by_its_predicate() {
+    assert_eq!(WIDE.chars().count(), 81);
     for (breach, rule) in [
         // `root.rs:97`: two sentences on one line.
         (swoosh::root::OWN_KEY_REVOKED, Rule::TwoSentences),
@@ -102,11 +107,8 @@ fn each_breach_is_caught_by_its_predicate() {
             "Changed your root's passphrase on this machine",
             Rule::SentenceEnd,
         ),
-        // `serve.rs`'s systemd keeper line, 81 columns.
-        (
-            "to keep this machine serving after a reboot: systemctl --user enable --now swoosh",
-            Rule::Width,
-        ),
+        // A fact of 81 columns, words that could have wrapped.
+        (WIDE, Rule::Width),
     ] {
         let caught = read(breach).err().map(|breach| breach.rule);
         assert_eq!(caught, Some(rule), "{breach}");

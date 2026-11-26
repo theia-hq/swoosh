@@ -546,7 +546,6 @@ mod tests {
     use swoosh::{reach, transport};
 
     use super::{Answered, Line, Probe, Refused};
-    use crate::commands::serve::humanize_secs;
 
     /// Probe a session bound by hand, and read the path after the probe from that session, as an own
     /// bind's run reads it.
@@ -555,17 +554,6 @@ mod tests {
             Ok(answered) => answered.line(label, Some(session.conn_info().path)),
             Err(line) => line,
         }
-    }
-
-    /// Uptimes and idle ages render as the coarsest two units, so a status reads at a glance. The
-    /// formatter is shared with the serve banner (`humanize_secs`), so this pins the shape once.
-    #[test]
-    fn uptime_spans_render_coarsest_two_units() {
-        assert_eq!(humanize_secs(0), "0s");
-        assert_eq!(humanize_secs(45), "45s");
-        assert_eq!(humanize_secs(90), "1m 30s");
-        assert_eq!(humanize_secs(2 * 3600 + 14 * 60), "2h 14m");
-        assert_eq!(humanize_secs(3 * 86_400 + 5 * 3600), "3d 5h");
     }
 
     /// A session that answered the dial and then broke: the handshake landed, so it reports a live direct

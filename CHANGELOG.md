@@ -25,6 +25,10 @@ All notable changes to swoosh, newest first.
 - **Colour at a terminal.** `error:` and `warning:` are coloured, and `swoosh serve` prints its title and `serving`
   in bold and `anyone` in colour. `NO_COLOR` or `CLICOLOR=0` gives plain text, as does a pipe or file;
   `CLICOLOR_FORCE` colours a pipe too.
+- **`serve` shows how it is reached.** The banner gives this machine's name, when it has one, and its key, and lists
+  its address on your network (every address under `--local`); `swoosh status` also lists the public, tunnel and
+  this computer addresses the banner can leave out, while it serves. Under `--expires` the banner says when `serve` stops. `serve --verbose` is removed. The
+  page on starting `serve` at login is linked from `serve --help`.
 - **`stop me/<name>` runs through `swoosh serve` too.** It warns when this machine's standing is about to
   expire, and ends on the same lines as the other commands that dial: `swoosh serve` stopping, a `swoosh serve`
   that does not answer, a dial that times out. A dial that times out now reads `could not reach me/nas: it is

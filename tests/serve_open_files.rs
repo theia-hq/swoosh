@@ -1,12 +1,13 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Only Linux shows another process's limit, in `/proc`; macOS shows none, and a `serve` starts no child to
+// read it from.
+#![cfg(target_os = "linux")]
 
 //! A `serve` raises its own open-file limit as it starts, so an Open, which holds two descriptors for its
 //! life, is not refused for want of one at the 256 a macOS process starts with. The compiled binary is
-//! started at a low soft limit and the limit it runs at is read back: on Linux from `/proc`, and on macOS,
-//! which shows no other process's limit, from a child it starts after the raise, the `brew --prefix` a
-//! terminal `serve` asks when it names how to keep serving after a reboot, swapped for a stand-in on
-//! PATH. Only the exact spawned pid is ever signalled.
+//! started at a low soft limit and the limit it runs at is read back from `/proc`. Only the exact spawned
+//! pid is ever signalled.
 
 use core::time::Duration;
 use std::io::Read as _;
@@ -19,12 +20,6 @@ use swoosh::serve::OPEN_FILES;
 /// The soft limit the serve starts at: macOS's own default, below what a serve asks for.
 const LOW: libc::rlim_t = 256;
 
-/// The stand-in `brew`: record the soft open-file limit it inherited, and say this is no brew install.
-const FAKE_BREW: &str = r#"#!/bin/sh
-ulimit -n > "$SWOOSH_TEST_LIMIT_LOG"
-exit 1
-"#;
-
 /// A spawned child killed and reaped on drop, so a failing test never orphans it.
 struct KillOnDrop(Child);
 
@@ -35,7 +30,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// A scratch base removed on drop: a home, a private runtime directory, a bin directory and a log.
+/// A scratch base removed on drop: a home and a private runtime directory.
 struct Scratch {
     base: PathBuf,
 }
@@ -46,14 +41,11 @@ impl Scratch {
 
         let base = std::env::temp_dir().join(format!("sw-nofile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        for dir in ["home", "run", "bin"] {
+        for dir in ["home", "run"] {
             std::fs::create_dir_all(base.join(dir)).expect("scratch dir");
         }
         std::fs::set_permissions(base.join("run"), std::fs::Permissions::from_mode(0o700))
             .expect("0700 run");
-        let brew = base.join("bin").join("brew");
-        std::fs::write(&brew, FAKE_BREW).expect("stand-in brew");
-        std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o755)).expect("0755 brew");
         Self { base }
     }
 
@@ -82,57 +74,20 @@ fn hard_limit() -> libc::rlim_t {
     limit.rlim_max
 }
 
-/// A pseudo-terminal: the controller end, held open, and the end the serve takes as its stderr, so it
-/// reads as started from a terminal.
-fn terminal() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
-    use std::os::fd::FromRawFd as _;
-
-    let (mut controller, mut follower) = (0, 0);
-    // SAFETY: both pointers name live `c_int`s for the call to fill; the name, settings and size are
-    // optional and left null.
-    let opened = unsafe {
-        libc::openpty(
-            &mut controller,
-            &mut follower,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        )
-    };
-    assert_eq!(opened, 0, "openpty");
-    // SAFETY: `openpty` succeeded, so both are open descriptors this test now owns alone.
-    unsafe {
-        (
-            std::os::fd::OwnedFd::from_raw_fd(controller),
-            std::os::fd::OwnedFd::from_raw_fd(follower),
-        )
-    }
-}
-
-/// Start `swoosh serve --local` on the scratch home at the [`LOW`] soft limit, with stderr on a
-/// terminal, no service manager in its environment and the stand-in `brew` first on PATH, and wait for
-/// its banner.
-fn serve(scratch: &Scratch, stderr: std::os::fd::OwnedFd) -> KillOnDrop {
+/// Start `swoosh serve --local` on the scratch home at the [`LOW`] soft limit, and wait for its banner.
+fn serve(scratch: &Scratch) -> KillOnDrop {
     use std::os::unix::process::CommandExt as _;
 
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![scratch.path("bin")];
-    paths.extend(std::env::split_paths(&path));
     let mut command = Command::new(env!("CARGO_BIN_EXE_swoosh"));
     command
         .arg("--home")
         .arg(scratch.path("home"))
         .args(["serve", "--local"])
         .env("XDG_RUNTIME_DIR", scratch.path("run"))
-        .env("PATH", std::env::join_paths(paths).expect("PATH"))
-        .env("SWOOSH_TEST_LIMIT_LOG", scratch.path("limit"))
         .env_remove("SWOOSH_HOME")
-        .env_remove("INVOCATION_ID")
-        .env_remove("JOURNAL_STREAM")
-        .env_remove("XPC_SERVICE_NAME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::from(stderr));
+        .stderr(Stdio::null());
     let hard = hard_limit();
     // SAFETY: runs in the forked child before exec and calls only `setrlimit`, which is async-signal-safe,
     // on a value built before the fork.
@@ -153,7 +108,7 @@ fn serve(scratch: &Scratch, stderr: std::os::fd::OwnedFd) -> KillOnDrop {
     let mut seen = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut byte = [0u8; 1];
-    while !String::from_utf8_lossy(&seen).contains("ctrl-c to stop") {
+    while !String::from_utf8_lossy(&seen).contains("swoosh is serving") {
         assert!(Instant::now() < deadline, "serve never became ready");
         if stdout.read(&mut byte).expect("read serve's banner") == 0 {
             panic!("serve exited before it was ready");
@@ -164,8 +119,7 @@ fn serve(scratch: &Scratch, stderr: std::os::fd::OwnedFd) -> KillOnDrop {
 }
 
 /// The soft open-file limit the running serve at `pid` holds.
-#[cfg(target_os = "linux")]
-fn soft_limit(_scratch: &Scratch, pid: u32) -> libc::rlim_t {
+fn soft_limit(pid: u32) -> libc::rlim_t {
     let limits = std::fs::read_to_string(format!("/proc/{pid}/limits")).expect("/proc limits");
     let soft = limits
         .lines()
@@ -177,13 +131,6 @@ fn soft_limit(_scratch: &Scratch, pid: u32) -> libc::rlim_t {
     soft.parse().expect("a number")
 }
 
-/// The soft open-file limit the running serve passed to the `brew` it started after its banner's checks.
-#[cfg(not(target_os = "linux"))]
-fn soft_limit(scratch: &Scratch, _pid: u32) -> libc::rlim_t {
-    let read = std::fs::read_to_string(scratch.path("limit")).expect("serve ran the stand-in brew");
-    read.trim().parse().expect("a number")
-}
-
 /// The soft limit a serve raises itself to.
 fn wanted() -> libc::rlim_t {
     OPEN_FILES.min(hard_limit())
@@ -193,7 +140,6 @@ fn wanted() -> libc::rlim_t {
 fn serve_starts_at_a_raised_open_file_limit() {
     let scratch = Scratch::new();
     assert!(wanted() > LOW, "the hard limit leaves nothing to raise");
-    let (_controller, follower) = terminal();
-    let serve = serve(&scratch, follower);
-    assert_eq!(soft_limit(&scratch, serve.0.id()), wanted());
+    let serve = serve(&scratch);
+    assert_eq!(soft_limit(serve.0.id()), wanted());
 }

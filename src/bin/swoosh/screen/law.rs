@@ -9,11 +9,6 @@ use super::{Shape, WIDTH};
 /// Names that keep their own case after `error:` or `warning:`.
 const NAMES: &[&str] = &["Touch ID"];
 
-/// Lines a later change rewrites, held out of the check a screen gets until then: each is a known breach,
-/// and the check stays on for every other line of its screen.
-pub(crate) const OWED: &[&str] =
-    &["to keep this machine serving after a reboot: systemctl --user enable --now swoosh"];
-
 /// A token this long is a whole key, an invite or a link: a command holding one may run past 80.
 const WHOLE_KEY: usize = 56;
 
