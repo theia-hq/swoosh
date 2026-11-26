@@ -12,6 +12,7 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use super::{NodeClient as _, UidSocket};
 use crate::serve::Resident;
 use crate::serve::control_codec::{ControlError, DisabledList, Request, Response};
+use crate::testkit::{CONTROL_MAGIC, control_frame, control_header};
 
 /// Serializes scratch dir names within this test process; the pid keeps two concurrent runs apart.
 /// Names stay short: the control socket path must fit `sun_path` (104 bytes on macOS).
@@ -49,7 +50,7 @@ fn test_resident(cancel: CancellationToken, home: &Path) -> Resident {
     let home = crate::home::Home::resolve(Some(home.to_owned())).expect("a scratch home");
     Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
-        None,
+        crate::testkit::loopback_source(),
         empty_catalog(),
         crate::serve_toml::LiveServeToml::load(&home).expect("the services off load"),
         cancel,
@@ -892,9 +893,9 @@ async fn stop_response_deadline_includes_prefetch_and_the_entire_frame() {
     let (stream, mut peer) = tokio::io::duplex(64);
     let writer = tokio::spawn(async move {
         assert_eq!(Request::read(&mut peer).await.unwrap(), Request::Stop);
-        for byte in b"SWC2\x03\0\0" {
+        for byte in control_frame(b"\x03\0\0") {
             tokio::time::sleep(core::time::Duration::from_secs(1)).await;
-            if peer.write_all(&[*byte]).await.is_err() {
+            if peer.write_all(&[byte]).await.is_err() {
                 break;
             }
         }
@@ -915,7 +916,7 @@ async fn stop_response_deadline_includes_prefetch_and_the_entire_frame() {
 }
 
 fn detail_frame(tag: u8, payload: &[u8]) -> Vec<u8> {
-    let mut frame = b"SWC2".to_vec();
+    let mut frame = CONTROL_MAGIC.to_vec();
     frame.push(tag);
     frame.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
     frame.extend_from_slice(payload);
@@ -954,7 +955,7 @@ async fn local_detail_success_is_one_request_without_eof_or_second_frame_merge()
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 7];
             stream.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request, b"SWC2\x06\0\0");
+            assert_eq!(request.as_slice(), control_frame(b"\x06\0\0"));
             stream.write_all(&frames).await.unwrap();
             // Keep the response side open until the client drops, proving no EOF wait or retry.
             // Dropping an unread second frame may reset the Unix stream instead of returning EOF.
@@ -1059,7 +1060,7 @@ async fn local_detail_socket_rejects_diagnostic_declarations_without_waiting_for
                 Request::LocalServiceDetail
             );
             stream
-                .write_all(&[b'S', b'W', b'C', b'2', tag, 1, 3])
+                .write_all(&control_header(tag, 0x0103))
                 .await
                 .unwrap();
             let mut extra = [0];
@@ -1127,7 +1128,7 @@ async fn local_detail_diagnostics_are_bounded_exact_utf8_and_not_classified_by_t
         assert!(matches!(detail_read(&detail_frame(tag, &payload)).await,
             Err(ControlError::Protocol(reason)) if reason == "local service detail diagnostic exceeds 256 bytes"));
         // There is no body to read, and allocation at the declared size is forbidden.
-        let header = [b'S', b'W', b'C', b'2', tag, 1, 3];
+        let header = control_header(tag, 0x0103);
         let result = detail_read(&header).await;
         assert!(
             matches!(result, Err(ControlError::Protocol(reason)) if reason == "local service detail diagnostic exceeds 256 bytes")
@@ -1173,7 +1174,7 @@ async fn local_detail_malformed_unexpected_identity_version_and_eof_never_mean_a
         );
     }
     assert!(matches!(
-        detail_read(b"SWC2\x09\x20\x01").await,
+        detail_read(&control_frame(b"\x09\x20\x01")).await,
         Err(ControlError::TooLarge(8193))
     ));
 }
@@ -1198,7 +1199,7 @@ async fn local_detail_write_and_read_deadlines_enclose_the_whole_phase() {
     let writer = tokio::spawn(async move {
         let mut request = [0; 7];
         peer.read_exact(&mut request).await.unwrap();
-        assert_eq!(&request, b"SWC2\x06\0\0");
+        assert_eq!(request.as_slice(), control_frame(b"\x06\0\0"));
         for byte in detail_frame(9, &[0, 0, 0]) {
             if peer.write_all(&[byte]).await.is_err() {
                 break;

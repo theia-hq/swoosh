@@ -118,7 +118,7 @@ fn running_resident(
         std::os::unix::net::UnixListener::bind(base.join("control.sock")).expect("bind the socket");
     let resident = Arc::new(Resident::new(
         NodeId::from_ed25519_secret(&[3u8; 32]),
-        None,
+        swoosh::testkit::loopback_source(),
         ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog"),
         off,
         cancel.clone(),

@@ -135,6 +135,27 @@ async fn a_done_write_that_breaks_still_stops() {
     assert_eq!(handler.source.first(), Some(StopKind::Wire(peer)));
 }
 
+/// A `List` answer is exactly `Done` and then the catalog, byte for byte. This is the network route a
+/// member asks a machine on, so nothing of how the machine is reached may ride it: an appended field of
+/// any kind breaks the equality.
+#[tokio::test]
+async fn list_reply_is_exactly_done_then_the_catalog() {
+    let (first_round, hold) = FirstRound::new();
+    first_round.finished();
+    let handler = Handler::new(hold);
+    let peer = TestNode::seeded(2).verify_key();
+    let mut written = Vec::new();
+    handler
+        .serve
+        .exchange(peer, &mut written, &[Request::List.encode()][..])
+        .await
+        .expect("a list is answered");
+
+    let catalog = handler.serve.catalog.encode().expect("the catalog encodes");
+    assert_eq!(written, [&[Answer::Done.encode()][..], &catalog].concat());
+    assert!(!handler.cancel.is_cancelled(), "a list stops nothing");
+}
+
 /// A `Serve` over an empty catalog and no revocations, with the token and source it stops through.
 struct Handler {
     serve: Serve,

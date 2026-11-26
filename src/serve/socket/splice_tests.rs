@@ -7,28 +7,19 @@ use super::{
     frame_reader, upload,
 };
 use crate::serve::control_codec::MAX_FRAME;
+use crate::testkit::control_header;
 
 /// Header bytes for `tag` declaring `len`.
 fn header(tag: u8, len: u16) -> [u8; HEADER] {
-    let [high, low] = len.to_be_bytes();
-    [b'S', b'W', b'C', b'2', tag, high, low]
+    control_header(tag, len)
 }
 
 #[test]
 fn the_three_frames_have_their_exact_bytes() {
     let one = DataLen::new(1).unwrap();
-    assert_eq!(
-        Frame::Data(one).header(),
-        [0x53, 0x57, 0x43, 0x32, 0x0a, 0x00, 0x01]
-    );
-    assert_eq!(
-        Frame::End.header(),
-        [0x53, 0x57, 0x43, 0x32, 0x0b, 0x00, 0x00]
-    );
-    assert_eq!(
-        Frame::Landed.header(),
-        [0x53, 0x57, 0x43, 0x32, 0x0c, 0x00, 0x00]
-    );
+    assert_eq!(Frame::Data(one).header(), control_header(0x0a, 1));
+    assert_eq!(Frame::End.header(), control_header(0x0b, 0));
+    assert_eq!(Frame::Landed.header(), control_header(0x0c, 0));
     let full = DataLen::new(MAX_FRAME).unwrap();
     assert_eq!(Frame::Data(full).header()[4..], [0x0a, 0x20, 0x00]);
 }

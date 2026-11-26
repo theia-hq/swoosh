@@ -26,6 +26,7 @@ mod definition;
 pub mod lookup;
 mod observing;
 mod opening;
+mod reachable;
 #[cfg(test)]
 #[path = "serve/recv_home_tests.rs"]
 mod recv_home_tests;
@@ -50,8 +51,12 @@ pub use opening::{
     ClientGone, HANGUP_DRAIN, MAX_BEYOND_MAIN, MAX_REACH, OPEN_FILES, Opener, OpenerError, Opens,
     TERMINAL_RETENTION, raise_open_files,
 };
+pub use reachable::{Internet, Lan, Network, Picks, ReachSource, Reachable};
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
+// The control magic, for the testkit's frame builders.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use socket::MAGIC as CONTROL_MAGIC;
 #[cfg(test)]
 pub(crate) use socket::measure_allocations;
 // The general engines (`fetch`, `measure`, `sshh`, `transfer`) are consumed from the services repo, so the

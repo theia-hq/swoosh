@@ -20,7 +20,7 @@ use swoosh::serve::control_codec::{
     DisabledList, LocalServiceSnapshot, Request, Response, ServiceMenu, StatusReply,
 };
 use swoosh::serve_toml::ServeToml;
-use swoosh::testkit::{TestNode, TestRoot};
+use swoosh::testkit::{TestNode, TestRoot, control_frame};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::AsyncWriteExt as _;
@@ -850,7 +850,7 @@ impl Live {
         let status = StatusReply {
             node_id: issuer,
             pid: 1, // Deliberately not the authority used to compare the two exchanges.
-            addr: None,
+            reach: swoosh::testkit::loopback_reach(),
             uptime_secs: 0,
             menu: ServiceMenu {
                 catalog: ServiceCatalog::decode(&0u32.to_be_bytes()).unwrap(),
@@ -897,7 +897,7 @@ fn detail(name: &str, target: &str, refused: bool) -> Vec<u8> {
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {
-    let mut bytes = b"SWC2\x09".to_vec();
+    let mut bytes = control_frame(b"\x09");
     bytes.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(payload);
     bytes
@@ -1185,7 +1185,7 @@ async fn missing_and_failed_live_detail_never_use_saved_targets_or_touch_keys() 
         frame(&[2, 1]),
         frame(&[2, 3]),
         frame(&[0, 0]),
-        b"SWC2\x09\x20\x01".to_vec(),
+        control_frame(b"\x09\x20\x01"),
         b"BAD1".to_vec(),
         detail("demo", "gopher:x", false),
     ] {

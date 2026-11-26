@@ -207,7 +207,7 @@ fn status_of(node_id: NodeId) -> StatusReply {
     StatusReply {
         node_id,
         pid: 1,
-        addr: None,
+        reach: swoosh::testkit::loopback_reach(),
         uptime_secs: 0,
         menu: ServiceMenu {
             catalog: tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),

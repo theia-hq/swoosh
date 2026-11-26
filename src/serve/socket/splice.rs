@@ -1,4 +1,4 @@
-//! What crosses an Open's control connection after Attached: SWC2 frames both ways.
+//! What crosses an Open's control connection after Attached: control frames both ways.
 //!
 //! A unix socket carries no reset, so an end of file says nothing about whether the writer finished or
 //! died. Each direction therefore says it finished: Data frames carry the bytes, and one End frame
@@ -82,7 +82,7 @@ pub(crate) enum Toward {
 /// a diagnostic's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum MalformedFrame {
-    /// The header does not open with `SWC2`.
+    /// The header does not open with this build's magic.
     #[error("splice frame magic is wrong")]
     Magic,
     /// A tag this direction does not carry.

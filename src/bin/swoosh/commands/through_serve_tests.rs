@@ -16,6 +16,7 @@ use swoosh::serve::control_codec::{
     ControlError, DisabledList, OpenRefusal, PathRef, PathReply, PathRequest, PeerRefusal, Request,
     Response, ServiceMenu, StatusReply,
 };
+use swoosh::testkit::{control_frame, control_header};
 use swoosh::transport::ReachArgs;
 
 use super::{Busy, Dial, Moot, Skew, StandingEnded, ThisMachine};
@@ -303,7 +304,7 @@ impl std::io::Write for Unwritable {
 async fn reference() -> PathRef {
     use swoosh::serve::control_codec::Response;
 
-    let mut frame = b"SWC2\x06\x00\x1c\x01".to_vec();
+    let mut frame = control_frame(b"\x06\x00\x1c\x01");
     frame.extend_from_slice(&[7; 16]);
     frame.extend_from_slice(&1_u64.to_be_bytes());
     frame.extend_from_slice(&[0, 0, 0]);
@@ -422,7 +423,7 @@ pub(crate) fn status_of(node_id: NodeId) -> StatusReply {
     StatusReply {
         node_id,
         pid: 1,
-        addr: None,
+        reach: swoosh::testkit::loopback_reach(),
         uptime_secs: 0,
         menu: ServiceMenu {
             catalog: tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),
@@ -810,7 +811,7 @@ async fn through_the_resident(
         swoosh::serve::Opener::new(&peers, &renewal, &served.home, node.node_id()).unwrap();
     let resident = std::sync::Arc::new(swoosh::serve::Resident::new(
         node.node_id(),
-        None,
+        swoosh::testkit::loopback_source(),
         tightbeam::tunnel::ServiceCatalog::decode(&0_u32.to_be_bytes()).unwrap(),
         swoosh::serve_toml::LiveServeToml::load(&served.home).unwrap(),
         CancellationToken::new(),
@@ -1007,14 +1008,14 @@ async fn asking_a_stalled_serve_whether_it_went_is_bounded_and_says_no() {
 }
 
 /// An End frame as the resident reads one: the magic, tag 11 and an empty body (`serve/socket/splice.rs`).
-pub(crate) const END: [u8; 7] = *b"SWC2\x0b\x00\x00";
+pub(crate) const END: [u8; 7] = control_header(0x0b, 0);
 
 /// A Landed frame: tag 12, empty, toward the client only.
-const LANDED: [u8; 7] = *b"SWC2\x0c\x00\x00";
+const LANDED: [u8; 7] = control_header(0x0c, 0);
 
 /// `bytes` as one Data frame, tag 10 (at most a frame's 8 KiB).
 pub(crate) fn data(bytes: &[u8]) -> Vec<u8> {
-    let mut frame = b"SWC2\x0a".to_vec();
+    let mut frame = control_frame(b"\x0a");
     frame.extend_from_slice(&u16::try_from(bytes.len()).unwrap().to_be_bytes());
     frame.extend_from_slice(bytes);
     frame

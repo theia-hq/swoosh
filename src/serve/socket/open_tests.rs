@@ -15,7 +15,7 @@ use crate::serve::control_codec::{
     ControlError, Observation, PathAction, PathRequest, Request, Response,
 };
 use crate::serve::socket::RequestKind;
-use crate::testkit::{TestNode, TestRoot};
+use crate::testkit::{CONTROL_MAGIC, TestNode, TestRoot, control_frame, control_header};
 
 fn peer() -> NodeId {
     TestNode::seeded(0x63).node_id()
@@ -442,7 +442,7 @@ fn protocol_reason(result: Result<Response, ControlError>) -> String {
 }
 
 fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
-    let mut out = b"SWC2".to_vec();
+    let mut out = CONTROL_MAGIC.to_vec();
     out.push(tag);
     out.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
     out.extend_from_slice(body);
@@ -453,7 +453,7 @@ fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
 async fn attached_unknown_is_the_published_bytes() {
     let response = Response::Attached(ConnInfo::default().into());
     let bytes = written(&response).await;
-    assert_eq!(bytes, b"SWC2\x06\x00\x04\x00\x00\x00\x00");
+    assert_eq!(bytes, control_frame(b"\x06\x00\x04\x00\x00\x00\x00"));
     assert_eq!(read_open(&bytes).await.unwrap(), response);
 }
 
@@ -509,7 +509,7 @@ async fn an_observed_attached_carries_its_reference_first() {
     body.extend_from_slice(&1u64.to_be_bytes());
     body.extend_from_slice(&[0, 0, 0]);
     let bytes = frame(6, &body);
-    assert_eq!(&bytes[..7], b"SWC2\x06\x00\x1c");
+    assert_eq!(&bytes[..7], control_frame(b"\x06\x00\x1c"));
     let Response::Attached(attached) = read_open(&bytes).await.unwrap() else {
         panic!("expected attached");
     };
@@ -750,7 +750,7 @@ async fn each_open_reply_is_capped_before_its_body_is_read() {
         (7, MAX_OPEN_REFUSAL),
         (5, MAX_OPEN_ERROR),
     ] {
-        let mut header = b"SWC2".to_vec();
+        let mut header = CONTROL_MAGIC.to_vec();
         header.push(tag);
         header.extend_from_slice(&u16::try_from(cap).unwrap().to_be_bytes());
         assert!(
@@ -777,12 +777,12 @@ async fn an_open_reads_only_attached_refusal_or_error() {
     );
     // Path's replies stay unknown here, as do every other operation's.
     for bytes in [
-        b"SWC2\x08\x00\x04\x00\x00\x00\x00".as_slice(),
-        b"SWC2\x08\x00\x04\x00\x01\x00\x00",
-        b"SWC2\x08\x00\x01\x01",
-        b"SWC2\x04\x00\x03\x00\x01r",
-        b"SWC2\x03\x00\x00",
-        b"SWC2\x09\x00\x00",
+        control_frame(b"\x08\x00\x04\x00\x00\x00\x00").as_slice(),
+        &control_frame(b"\x08\x00\x04\x00\x01\x00\x00"),
+        &control_frame(b"\x08\x00\x01\x01"),
+        &control_frame(b"\x04\x00\x03\x00\x01r"),
+        &control_frame(b"\x03\x00\x00"),
+        &control_frame(b"\x09\x00\x00"),
     ] {
         assert_eq!(
             protocol_reason(read_open(bytes).await),
@@ -806,7 +806,8 @@ async fn the_generic_reader_still_calls_open_replies_unknown() {
 #[tokio::test]
 async fn request_tag_4_is_held_to_its_own_cap_and_path_keeps_the_frame_ceiling() {
     // An Open is declared up to 16384 bytes and refused past it before a byte of the body is read.
-    let mut reader = b"SWC2\x04\x40\x01".as_slice();
+    let frame = control_frame(b"\x04\x40\x01");
+    let mut reader = frame.as_slice();
     let mut observed = None;
     assert!(matches!(
         Request::read_observed(&mut reader, &mut observed).await,
@@ -815,13 +816,13 @@ async fn request_tag_4_is_held_to_its_own_cap_and_path_keeps_the_frame_ceiling()
     assert_eq!(observed, Some(RequestKind::Open));
     // An empty Open is malformed by its grammar, a typed refusal and never a protocol guess.
     assert!(matches!(
-        Request::read(&mut b"SWC2\x04\x00\x00".as_slice()).await,
+        Request::read(&mut control_frame(b"\x04\x00\x00").as_slice()).await,
         Err(ControlError::Open(MalformedOpen::Truncated))
     ));
     // Every other known operation, Path among them, is still held to the frame ceiling on its
     // declaration alone.
     for tag in [1, 2, 3, 5, 6] {
-        let header = [b'S', b'W', b'C', b'2', tag, 0x20, 0x01];
+        let header = control_header(tag, 0x2001);
         let mut reader = header.as_slice();
         assert!(matches!(
             Request::read_observed(&mut reader, &mut None).await,
