@@ -106,6 +106,8 @@ pub async fn fold(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Result<Fo
     let doc = super::verify(bytes, pin)?;
     let held = read_held(&home.devices(), pin);
     seam().await;
+    // No await from here to the end: an exchange's answer is dropped at its bound
+    // ([`crate::sync::ANSWER_WITHIN`]), and only an await before the first write keeps that cut whole.
     let floor = held
         .as_ref()
         .map_or(Epoch::UNVERSIONED, |(held, _)| held.epoch());
@@ -158,6 +160,7 @@ pub async fn fold_fork(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Resu
             return Err(FoldError::NotADevice);
         }
     };
+    // No await from here to the end, as in [`fold`]: a cut at an answer's bound lands before the writes.
     let pin = crate::standing::pin_key(home, pin)?;
     if bytes.len() as u64 > MAX_ROSTER_BLOB {
         return Err(FoldError::TooLarge);

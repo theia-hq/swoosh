@@ -8,6 +8,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll};
 use core::time::Duration;
+use std::io;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -17,14 +18,14 @@ use nauthy::{RevocationId, VerifyKey};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use super::{
-    Answer, Device, Dial as _, EXCHANGE, ExchangeError, REFUSED, SEND_YOURS, Until, answer, digest,
-    exchange, round,
+    AHEAD, ANSWER_WITHIN, AT_ONCE, Answer, Device, Dial as _, EXCHANGE, ExchangeError, REFUSED,
+    Receive, SEND_YOURS, Until, answer, digest, exchange, read_update, read_update_into, round,
 };
 use crate::codec::Id;
 use crate::config;
 use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::home::Home;
-use crate::roster::{Epoch, Folded, Member, RosterDoc, fold};
+use crate::roster::{Epoch, Folded, MAX_ROSTER_BLOB, Member, RosterDoc, fold};
 use crate::testkit::{Loopback, STANDING_UNTIL, TestNode, TestRoot};
 
 /// The root every device here belongs to.
@@ -311,9 +312,10 @@ async fn an_exchange_between_equals_sends_no_update_bytes() {
         inner: near_write,
         count: Arc::clone(&count),
     };
+    let receive = Receive::new();
     let (dialed, answered) = tokio::join!(
         exchange(&desk, reader, writer),
-        answer(&nas, far_read, far_write)
+        answer(&nas, &receive, key(DESK), far_read, far_write)
     );
     answered.unwrap();
     assert_eq!(dialed.unwrap(), Answer::Same);
@@ -368,9 +370,10 @@ async fn an_unpinned_server_never_asks_for_an_update() {
     let (near, far) = tokio::io::duplex(64 * 1024);
     let (near_read, near_write) = tokio::io::split(near);
     let (far_read, far_write) = tokio::io::split(far);
+    let receive = Receive::new();
     let (dialed, answered) = tokio::join!(
         exchange(&desk, near_read, near_write),
-        answer(&bare, far_read, far_write)
+        answer(&bare, &receive, key(DESK), far_read, far_write)
     );
     answered.unwrap();
     assert!(
@@ -1089,9 +1092,10 @@ async fn a_fold_on_network_input_writes_only_what_it_takes() {
     let (near, far) = tokio::io::duplex(64 * 1024);
     let (near_read, near_write) = tokio::io::split(near);
     let (far_read, far_write) = tokio::io::split(far);
+    let receive = Receive::new();
     let (_dialed, answered) = tokio::join!(
         exchange(&desk, near_read, near_write),
-        answer(&nas, far_read, far_write)
+        answer(&nas, &receive, key(DESK), far_read, far_write)
     );
     answered.unwrap();
     assert_eq!(
@@ -1180,5 +1184,245 @@ async fn a_refusal_whose_forks_do_not_pass_reaches_the_dialer_whole() {
         [SEND_YOURS, REFUSED],
         "the answer stands and the stream ends cleanly"
     );
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+/// The request a device holding no update answers with `send yours`: number zero, a digest it does not
+/// hold.
+fn asks_for_mine() -> Vec<u8> {
+    let mut request = vec![EXCHANGE];
+    request.extend_from_slice(&0_u64.to_be_bytes());
+    request.extend_from_slice(&[0x5A; 32]);
+    request
+}
+
+/// The largest length an update can claim, as its frame starts.
+fn largest_length() -> [u8; 4] {
+    u32::try_from(MAX_ROSTER_BLOB).unwrap().to_be_bytes()
+}
+
+/// Answer `home`'s side of one stream from `peer` against `dialer`, which gets the other end, and return
+/// what the answer ended with and when, from the start.
+async fn answered_against<F: Future<Output = ()>>(
+    home: &Home,
+    receive: &Receive,
+    peer: VerifyKey,
+    dialer: impl FnOnce(tokio::io::DuplexStream) -> F,
+) -> (Result<(), ExchangeError>, Duration) {
+    let (near, far) = tokio::io::duplex(64 * 1024);
+    let (far_read, far_write) = tokio::io::split(far);
+    let start = tokio::time::Instant::now();
+    // A dialer that never ends must not end the answer: only the bound does, so it is raced, not joined.
+    let answering = async {
+        let answered = answer(home, receive, peer, far_read, far_write).await;
+        (answered, start.elapsed())
+    };
+    tokio::select! {
+        biased;
+        ended = tokio::time::timeout(ANSWER_WITHIN * 2, answering) => {
+            ended.expect("the answer ran past its bound")
+        }
+        () = dialer(near) => panic!("the dialer ended before the answer"),
+    }
+}
+
+/// A dialer that is asked for its update, claims the largest one, and sends a byte every 5 s, forever;
+/// `held` hears once the answer holds its permit.
+async fn drip(mut near: tokio::io::DuplexStream, held: Option<tokio::sync::oneshot::Sender<()>>) {
+    near.write_all(&asks_for_mine()).await.unwrap();
+    assert_eq!(near.read_u8().await.unwrap(), SEND_YOURS);
+    near.write_all(&largest_length()).await.unwrap();
+    if let Some(held) = held {
+        held.send(()).unwrap();
+    }
+    loop {
+        near.write_all(&[0]).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// An answer to `peer` against [`drip`], holding `peer`'s permit to the bound: returned once it holds it,
+/// as the task that says how it ended.
+async fn holding_permit(
+    home: &Home,
+    receive: &Receive,
+    peer: VerifyKey,
+) -> tokio::task::JoinHandle<(Result<(), ExchangeError>, Duration)> {
+    let (held, holder) = tokio::sync::oneshot::channel();
+    let (home, receive) = (home.clone(), receive.clone());
+    let task = tokio::spawn(async move {
+        answered_against(&home, &receive, peer, |near| drip(near, Some(held))).await
+    });
+    holder.await.unwrap();
+    task
+}
+
+/// One stream from `peer` that sends `request` and reads the first byte of the answer, then ends: what
+/// the answer ended with, and the byte, or nothing for a stream closed unanswered.
+async fn first_byte(
+    home: &Home,
+    receive: &Receive,
+    peer: VerifyKey,
+    request: &[u8],
+) -> (Result<(), ExchangeError>, Vec<u8>) {
+    let (mut near, far) = tokio::io::duplex(64 * 1024);
+    let (far_read, far_write) = tokio::io::split(far);
+    near.write_all(request).await.unwrap();
+    let dialing = async {
+        let mut first = Vec::new();
+        (&mut near).take(1).read_to_end(&mut first).await.unwrap();
+        drop(near);
+        first
+    };
+    tokio::join!(answer(home, receive, peer, far_read, far_write), dialing)
+}
+
+/// Whether `answered` is the bound cutting the answer, at the bound.
+fn cut_at_the_bound(answered: &(Result<(), ExchangeError>, Duration)) -> bool {
+    matches!(&answered.0, Err(ExchangeError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+        && answered.1 >= ANSWER_WITHIN
+        && answered.1 < ANSWER_WITHIN + Duration::from_secs(1)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_exchange_is_dropped_at_the_bound() {
+    let nas = device("answer-silent", NAS).await;
+    // The dialer holds its end open and sends nothing.
+    let answered = answered_against(&nas, &Receive::new(), key(DESK), |near| async move {
+        let _near = near;
+        core::future::pending::<()>().await;
+    })
+    .await;
+    assert!(cut_at_the_bound(&answered), "{answered:?}");
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dripping_exchange_is_dropped_at_the_bound() {
+    let nas = device("answer-drip", NAS).await;
+    // A byte every 5 s is never idle long enough for a bound on each read, so only one on the whole
+    // exchange cuts it.
+    let answered =
+        answered_against(&nas, &Receive::new(), key(DESK), |near| drip(near, None)).await;
+    assert!(cut_at_the_bound(&answered), "{answered:?}");
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_update_is_allocated_only_as_it_arrives() {
+    let (mut near, mut far) = tokio::io::duplex(64 * 1024);
+    near.write_all(&largest_length()).await.unwrap();
+    near.write_all(&[0x5A; 1000]).await.unwrap();
+    // The rest of the claimed bytes never come; the read is cut where it waits for them.
+    let mut steps = Vec::new();
+    let read = tokio::time::timeout(
+        Duration::from_secs(1),
+        read_update_into(&mut far, &mut steps),
+    )
+    .await;
+    assert!(read.is_err(), "the read waits for bytes never sent");
+    assert_eq!(steps.iter().map(Vec::len).sum::<usize>(), 1000);
+    let allocated: usize = steps.iter().map(Vec::capacity).sum();
+    assert!(
+        allocated <= 1000 + AHEAD,
+        "allocated {allocated} for 1000 bytes arrived"
+    );
+    drop(near);
+}
+
+#[tokio::test]
+async fn an_oversize_update_is_refused_before_any_allocation() {
+    let (mut near, mut far) = tokio::io::duplex(64);
+    let past = u32::try_from(MAX_ROSTER_BLOB + 1).unwrap();
+    near.write_all(&past.to_be_bytes()).await.unwrap();
+    drop(near);
+    let mut steps = Vec::new();
+    let read = read_update_into(&mut far, &mut steps).await;
+    assert!(matches!(read, Err(ExchangeError::TooLarge)), "{read:?}");
+    assert_eq!(steps.capacity(), 0, "nothing allocated");
+}
+
+#[tokio::test]
+async fn an_update_larger_than_one_step_arrives_whole() {
+    // A small pipe, so the update arrives in many reads shorter than one step.
+    let (mut near, mut far) = tokio::io::duplex(1024);
+    let sent: Vec<u8> = (0..3 * AHEAD + 7).map(|at| (at % 251) as u8).collect();
+    let sending = async {
+        near.write_all(&u32::try_from(sent.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        near.write_all(&sent).await.unwrap();
+        // The frame after: a read of the update that runs past its length takes it.
+        near.write_all(&[0xEE]).await.unwrap();
+        // Ended, so a read past the frame finds the end rather than waiting.
+        drop(near);
+    };
+    let ((), read) = tokio::join!(sending, read_update(&mut far));
+    assert_eq!(read.unwrap(), sent);
+    assert_eq!(
+        far.read_u8().await.unwrap(),
+        0xEE,
+        "the next frame is unread"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_peer_holding_its_permit_does_not_block_another() {
+    let nas = device("answer-two-peers", NAS).await;
+    let receive = Receive::new();
+    let first = holding_permit(&nas, &receive, key(PHONE)).await;
+    let (_, answered) = first_byte(&nas, &receive, key(LAPTOP), &asks_for_mine()).await;
+    assert_eq!(answered, [SEND_YOURS], "another peer is answered");
+    assert!(cut_at_the_bound(&first.await.unwrap()));
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_busy_peers_second_stream_is_closed_unanswered() {
+    let nas = device("answer-busy-peer", NAS).await;
+    let receive = Receive::new();
+    let first = holding_permit(&nas, &receive, key(DESK)).await;
+    let (busy, answered) = first_byte(&nas, &receive, key(DESK), &asks_for_mine()).await;
+    assert_eq!(answered, b"", "the second stream is not answered");
+    assert!(matches!(busy, Err(ExchangeError::Busy)), "{busy:?}");
+    // Once the bound cuts the first, the peer's permit is free again.
+    assert!(cut_at_the_bound(&first.await.unwrap()));
+    let (_, answered) = first_byte(&nas, &receive, key(DESK), &asks_for_mine()).await;
+    assert_eq!(answered, [SEND_YOURS]);
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_cap_closes_one_peer_more_unanswered() {
+    let nas = device("answer-cap", NAS).await;
+    let receive = Receive::new();
+    let mut held = Vec::new();
+    for seed in 0..u8::try_from(AT_ONCE).unwrap() {
+        held.push(holding_permit(&nas, &receive, key(0x40 + seed)).await);
+    }
+    let (busy, answered) = first_byte(&nas, &receive, key(LAPTOP), &asks_for_mine()).await;
+    assert_eq!(answered, b"", "one peer past the cap is not answered");
+    assert!(matches!(busy, Err(ExchangeError::Busy)), "{busy:?}");
+    for first in held {
+        assert!(cut_at_the_bound(&first.await.unwrap()));
+    }
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_gives_its_permit_back_when_it_returns() {
+    let nas = device("answer-returns", NAS).await;
+    let receive = Receive::new();
+    // Number zero, digest zero: neither side holds an update, and the answer returns `Ok`.
+    let mut none_yet = vec![EXCHANGE];
+    none_yet.extend_from_slice(&0_u64.to_be_bytes());
+    none_yet.extend_from_slice(&[0; 32]);
+    let (returned, _) = first_byte(&nas, &receive, key(DESK), &none_yet).await;
+    returned.unwrap();
+    assert!(receive.take(key(DESK)).is_ok(), "given back on a return");
+    // Asked for its update, the dialer ends instead: the answer fails.
+    let (failed, _) = first_byte(&nas, &receive, key(DESK), &asks_for_mine()).await;
+    assert!(failed.is_err());
+    assert!(receive.take(key(DESK)).is_ok(), "given back on a failure");
     std::fs::remove_dir_all(nas.dir()).unwrap();
 }
