@@ -377,6 +377,29 @@ fn touch_id_is_no_method_off_a_mac() {
     assert!(!refused.to_string().contains("./touch-id"), "{refused}");
 }
 
+/// Where this machine's key opens with `touch-id` too, `root lock touch-id` says the two will share one
+/// finger, and that a dialog's words prove nothing, before anything is asked. Red when that line is dropped.
+#[tokio::test]
+async fn root_lock_touch_id_beside_a_touch_id_key_says_they_share_a_finger() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = scratch("root-lock-touch-id-shared");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    swoosh::identity::make_machine_dir(&home).unwrap();
+    std::fs::write(home.key(), swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE).unwrap();
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut prompt = at_this_mac(swoosh::touch::Touched::Opened(None));
+    let (result, _) = run(&home, None, false, &mut prompt).await;
+    result.unwrap();
+    assert_eq!(
+        prompt.warned(),
+        [
+            swoosh::touch::ROOT_BESIDE_PASSPHRASE,
+            swoosh::touch::SHARED_FINGER
+        ]
+    );
+}
+
 /// `root lock touch-id` says what a new fingerprint does, opens with the passphrase, and proves the new lock
 /// with one touch beside it. Red when the passphrase lock is dropped.
 #[tokio::test]
@@ -396,10 +419,7 @@ async fn root_lock_touch_id_adds_it_beside_the_passphrase() {
     };
     assert!(matches!(
         touch.act,
-        swoosh::touch::TouchAct::BesidePassphrase {
-            then: swoosh::touch::Then::Keep,
-            ..
-        }
+        swoosh::touch::TouchAct::BesidePassphrase { .. }
     ));
     assert_eq!(touch.reason, swoosh::touch::CHECK_ROOT);
     assert_eq!(touch.file.path(), home.root_key());

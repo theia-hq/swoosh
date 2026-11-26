@@ -5,6 +5,9 @@
 //! `above`, `below`, `this line`) points at a line proven to print, or is a known defect owed to a later
 //! change. And style takes only text fixed at build time, so a peer's text can never carry it.
 //!
+//! A third, of the same kind: a lock comes off a key file only where a person asked for that by name, so
+//! every call that takes one off is counted, by file.
+//!
 //! Test files, inline `mod tests` blocks and comments are skipped: only what ships is read.
 
 use std::path::Path;
@@ -141,6 +144,50 @@ fn the_styling_type_takes_only_static_text() {
             !code.contains(".leak(") && !code.contains("::leak"),
             "{file} leaks"
         );
+    }
+}
+
+/// Every call that takes a lock off a key file, by file: each is reached only from a `--remove`. A lock that
+/// came off as a step of adding another (a replace) would be one more here.
+const LOCK_REMOVALS: &[(&str, usize)] = &[
+    // `lock passphrase --remove`, and `lock touch-id --remove` opened by the passphrase.
+    ("identity.rs", 2),
+    // `root lock touch-id --remove`.
+    ("root/lock.rs", 1),
+    // `lock touch-id --remove` opened by the touch itself.
+    ("touch.rs", 1),
+];
+
+#[test]
+fn only_a_removal_takes_a_lock_off() {
+    let mut found: Vec<(String, usize)> = shipped()
+        .into_iter()
+        .map(|(file, text)| {
+            let calls = scan(&text).code.matches("remove_lock(").count();
+            (file, calls)
+        })
+        .filter(|&(_, calls)| calls > 0)
+        .collect();
+    found.sort();
+    let expected: Vec<(String, usize)> = LOCK_REMOVALS
+        .iter()
+        .map(|&(file, calls)| (file.to_owned(), calls))
+        .collect();
+    assert_eq!(found, expected, "a new call that takes a lock off");
+}
+
+/// No act drops a lock as a step of adding another: the type that chose to (`Then`) and the end that said the
+/// drop failed (`HalfDone`) are gone from the lock files, and neither comes back.
+#[test]
+fn no_lock_act_drops_the_other_lock() {
+    for (file, text) in shipped()
+        .into_iter()
+        .filter(|(file, _)| ["identity.rs", "root/lock.rs", "touch.rs"].contains(&file.as_str()))
+    {
+        let code = scan(&text).code;
+        for word in ["Then", "HalfDone"] {
+            assert!(words(&code, word).is_empty(), "{file}: `{word}`");
+        }
     }
 }
 

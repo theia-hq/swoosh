@@ -14,8 +14,8 @@ Commands:
   protect  Set how this identity is protected
 ```
 
-**Things to know.** `swoosh status` says how the key file protects the key on its `lock:` line: `none`, or
-`passphrase` once `swoosh identity protect passphrase` has sealed it.
+**Things to know.** `swoosh status` says how the key is locked on its `key lock:` line: `none`, or each lock
+it has. `swoosh lock` adds a lock or, with `--remove`, takes one off.
 
 - `swoosh identity protect <plain|passphrase>` rewrites the key file under that method; the key does not
   change. On a home with no key it creates one already sealed.

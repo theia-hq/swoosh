@@ -13,8 +13,8 @@ use keystore::{Health, KeyFile, Method, Stored};
 #[cfg(target_os = "macos")]
 use super::Touch;
 use super::{
-    Lines, Route, SSH_VARIABLES, Stopped, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere, Touched,
-    USE_ROOT, changed, open, over_ssh, route,
+    Route, SSH_VARIABLES, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere, Touched, USE_ROOT, open,
+    over_ssh, route,
 };
 use crate::passphrase::Asked;
 use crate::testkit::Counting;
@@ -142,18 +142,12 @@ fn the_key_stores_refusals_read_as_a_touch_ends() {
         path: PathBuf::from("key"),
         source: keystore::TouchIdError::Unavailable,
     };
-    assert!(matches!(
-        Touched::from(Err(Stopped::Touch(unavailable))),
-        Touched::NotHere
-    ));
+    assert!(matches!(Touched::from(Err(unavailable)), Touched::NotHere));
     let unlock = keystore::Error::Unlock {
         path: PathBuf::from("key"),
         method: Method::TouchId,
     };
-    assert!(matches!(
-        Touched::from(Err(Stopped::Touch(unlock))),
-        Touched::Failed(_)
-    ));
+    assert!(matches!(Touched::from(Err(unlock)), Touched::Failed(_)));
     assert!(matches!(Touched::from(Ok(None)), Touched::Opened(None)));
 }
 
@@ -161,10 +155,10 @@ fn the_key_stores_refusals_read_as_a_touch_ends() {
 /// touch's end. Each refusal below carries what the enclave said, built here as the key store lets a
 /// dependent build it, so every arm of the mapping is guarded off a Mac and without a finger.
 fn refused(source: keystore::TouchIdError) -> Touched {
-    Touched::from(Err(Stopped::Touch(keystore::Error::TouchId {
+    Touched::from(Err(keystore::Error::TouchId {
         path: PathBuf::from("key"),
         source,
-    })))
+    }))
 }
 
 /// What the enclave said, for a refusal that must carry it.
@@ -206,42 +200,6 @@ fn an_enclave_failure_reads_as_a_failure_with_its_cause() {
         panic!("{touched:?}");
     };
     assert!(format!("{why:#}").contains("it broke"), "{why:#}");
-}
-
-/// A refusal after the new lock went on reads as half done, never as a touch that did not open, and names
-/// the lock left on and the command that takes it off. Red when the second write's failure is mapped as the
-/// touch's, or the lock left on is not carried.
-#[test]
-fn a_refusal_after_the_new_lock_reads_as_half_done() {
-    let (file, _) = machine("half-done", &DEVICE_PASSPHRASE_AND_TOUCH_ID, false);
-    let lines = Lines::of(Asked::MachineKey, &file, true);
-    for (left, line_1, line_2) in [
-        (
-            Method::Passphrase,
-            "this machine's key has its new touch-id lock, but its passphrase did not come off: ",
-            "to take it off: swoosh lock --remove",
-        ),
-        (
-            Method::TouchId,
-            "this machine's key has its new passphrase, but its touch-id lock did not come off: ",
-            "to take it off: swoosh lock touch-id --remove",
-        ),
-    ] {
-        let unlock = keystore::Error::Unlock {
-            path: PathBuf::from("key"),
-            method: Method::Passphrase,
-        };
-        let touched = Touched::from(Err(Stopped::After(left, unlock)));
-        assert!(
-            matches!(&touched, Touched::HalfDone { left: kept, .. } if *kept == left),
-            "{touched:?}"
-        );
-        let refused = format!("{:#}", changed(touched, &lines).unwrap_err());
-        let lines: Vec<&str> = refused.lines().collect();
-        assert_eq!(lines.len(), 2, "{refused}");
-        assert!(lines[0].starts_with(line_1), "{refused}");
-        assert_eq!(lines[1], line_2, "{refused}");
-    }
 }
 
 /// A live lock at this Mac is touched, and the key it opens is the answer: no passphrase is asked.
@@ -627,7 +585,6 @@ mod hardware_acts {
 
     use super::{PASSPHRASE, Touch, TouchAct, Touched, scratch, secret};
     use crate::passphrase::{Prompt as _, Terminal};
-    use crate::touch::Then;
 
     fn passphrase(text: &str) -> keystore::Passphrase {
         keystore::Passphrase::try_from(zeroize::Zeroizing::new(text.to_owned())).unwrap()
@@ -682,21 +639,8 @@ mod hardware_acts {
         let file = written("hardware-beside-keep", Protection::Passphrase(&under));
         let act = TouchAct::BesidePassphrase {
             current: passphrase(PASSPHRASE),
-            then: Then::Keep,
         };
         assert_eq!(after(&file, act), [Method::Passphrase, Method::TouchId]);
-    }
-
-    #[test]
-    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
-    fn the_terminal_act_replaces_the_passphrase_with_touch_id() {
-        let under = passphrase(PASSPHRASE);
-        let file = written("hardware-beside-drop", Protection::Passphrase(&under));
-        let act = TouchAct::BesidePassphrase {
-            current: passphrase(PASSPHRASE),
-            then: Then::Drop,
-        };
-        assert_eq!(after(&file, act), [Method::TouchId]);
     }
 
     #[test]
@@ -705,20 +649,8 @@ mod hardware_acts {
         let file = touched("hardware-add-keep");
         let act = TouchAct::AddPassphrase {
             new: passphrase(PASSPHRASE),
-            then: Then::Keep,
         };
         assert_eq!(after(&file, act), [Method::TouchId, Method::Passphrase]);
-    }
-
-    #[test]
-    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
-    fn the_terminal_act_replaces_touch_id_with_a_passphrase() {
-        let file = touched("hardware-add-drop");
-        let act = TouchAct::AddPassphrase {
-            new: passphrase(PASSPHRASE),
-            then: Then::Drop,
-        };
-        assert_eq!(after(&file, act), [Method::Passphrase]);
     }
 
     #[test]

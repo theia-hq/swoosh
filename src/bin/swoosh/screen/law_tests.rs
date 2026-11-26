@@ -116,6 +116,22 @@ fn the_local_refusal_holds_the_law() {
     }
 }
 
+/// The lines said before a lock is added beside another, which the library prints as one warning each since
+/// it asks inside itself, held to the law as written: the code's own constants, not a copy of them.
+#[test]
+fn the_lines_before_an_added_lock_hold_the_law() {
+    for notice in [
+        swoosh::touch::BESIDE_TOUCH_ID,
+        swoosh::touch::TOUCH_ID_BESIDE,
+        swoosh::touch::CHANGES_TOUCH_ID,
+        swoosh::touch::EVERY_FINGERPRINT,
+    ] {
+        if let Err(breach) = read(notice) {
+            panic!("{breach}\n{notice}");
+        }
+    }
+}
+
 /// A lowercase fact of fixed words, 81 columns: it breaks only the width, since no word is a token alone.
 const WIDE: &str =
     "a line of fixed words that runs one column past the screen's width, so it breaks.";
