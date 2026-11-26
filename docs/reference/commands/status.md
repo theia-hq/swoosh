@@ -30,6 +30,8 @@ what `swoosh serve` would start. An emptied list says `nothing, even when swoosh
 `serve.toml` cannot be read or its service list is invalid, the row says `unknown`; stderr names the file
 and the reason, and `status` still exits 0. When admitting devices, `admitting root:` and the root key
 follow the service list.
+With `swoosh serve` running here, bare `status` also lists the routes it answers under `internal routes`, and
+who reaches each. It is left out when the serving row says `unknown`.
 
 With a machine, `status` dials it and prints one line. A healthy line has the path and a round-trip time, and
 for one of your own devices ends with what it serves (`; serving: ssh, web`). Otherwise `status` exits non-zero

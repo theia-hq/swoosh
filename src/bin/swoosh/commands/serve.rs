@@ -235,6 +235,24 @@ pub struct ExposeContext {
 /// The refusal for a machine's key typed to `--admit`, through the usage frame so the key is not echoed.
 pub const ADMIT_TAKES_A_ROOT: &str = "--admit takes a root key, not a machine's key";
 
+/// The usage line a refused `serve` claim exits 2 with, when it is a usage error: typed services that cannot
+/// be one list, or a reserved word in a service slot, typed or in `serve.toml`. `None` for every other
+/// refusal, which keeps its own exit.
+pub fn usage_of(report: &eyre::Report) -> Option<String> {
+    if let Some(mistyped) = report.downcast_ref::<swoosh::serve::Mistyped>() {
+        return Some(mistyped.to_string());
+    }
+    if let Some(serving) = report.downcast_ref::<swoosh::serve::ServingError>() {
+        return serving.reserved().map(|_| serving.to_string());
+    }
+    match report.downcast_ref::<swoosh::serve_toml::ServeTomlError>()? {
+        reserved @ swoosh::serve_toml::ServeTomlError::Reserved { .. } => {
+            Some(reserved.to_string())
+        }
+        _ => None,
+    }
+}
+
 /// A key with no `root:` typed to `--admit`: a machine's, which the parse refuses with
 /// [`ADMIT_TAKES_A_ROOT`] instead of clap's frame, which would echo the key.
 #[derive(Debug, thiserror::Error)]
@@ -369,8 +387,12 @@ impl ServeCmd {
         swoosh::serve::Mistyped::check(&self.services)?;
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
         self.normalize_services(&cwd)?;
-        // Additions are typed too, so their grammar is refused before the lock as well.
+        // Additions and exclusions are typed too, so their grammar is refused before the lock as well.
         Started::positional(&self.with, &cwd)?;
+        Started::exclusions(&self.without)?;
+        // A reserved word saved in `serve.toml` is refused here too, reading only, so its refusal creates no
+        // lock and binds nothing; the load after the lock stays the authority for every other refusal.
+        ServeToml::refuse_reserved(home, &cwd)?;
         let root = swoosh::home::runtime_root()?;
         let (lock, listener) = match acquire_single(home, &root).await {
             Ok(held) => held,

@@ -946,8 +946,8 @@ mod tests {
         }
     }
 
-    /// One of your devices' line ends with what it serves, never the node's own routes, and an empty list
-    /// reads `nothing`.
+    /// One of your devices' line ends with what it serves, never the node's own routes nor the block bare
+    /// `status` lists them in, and an empty list reads `nothing`.
     #[tokio::test]
     async fn status_of_your_device_lists_what_it_serves() {
         let line = probe_own(
@@ -960,7 +960,9 @@ mod tests {
         .await
         .to_string();
         assert!(line.ends_with(" ms; serving: web"), "{line}");
+        // The list holds `control.serve` itself, so a dotted name that reached the line would show here.
         assert!(!line.contains("control."), "no internal route: {line}");
+        assert!(!line.contains("internal routes"), "{line}");
 
         let empty = probe_own(
             &ServicesSession {

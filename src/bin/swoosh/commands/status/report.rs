@@ -22,6 +22,9 @@ use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::{Date, Root, RootPlace};
 use swoosh::root_key::RootKey;
 use swoosh::roster::{Member, RevokedDevice};
+use swoosh::serve::{
+    CONTROL_SERVE_SERVICE, LOOKUP_ROOT_SERVICE, RENEWAL_SERVICE, SYNC_SERVICE, control,
+};
 use swoosh::standing::{Standing, StandingError};
 use swoosh::{badge, roster, standing, sync, touch};
 use tightbeam::identity::AsVerifyKey as _;
@@ -99,6 +102,8 @@ pub(crate) struct Report {
     sections: Vec<Section>,
     /// `serving:`; present on every home with a key.
     serving: Option<String>,
+    /// `internal routes:` and a row for each, while a `serve` answers here; empty otherwise.
+    internal: Vec<String>,
     /// The lines that say what to do, last.
     nags: Vec<String>,
     /// What goes to stderr.
@@ -149,6 +154,7 @@ impl Report {
             this_machine: None,
             sections: Vec::new(),
             serving: None,
+            internal: Vec::new(),
             nags: Vec::new(),
             notices: Vec::new(),
         };
@@ -444,7 +450,13 @@ impl Report {
     /// refusals report the file, never a daemon failure; neither changes status's successful exit.
     async fn serving_line(&mut self, home: &Home) -> String {
         match ServiceState::read(home, ReadMode::Membership).await {
-            Ok(state) => serving(&state),
+            Ok(state) => {
+                // Only a `serve` that answered binds the routes; an unknown one is said on `serving:`.
+                if state.resident_present() {
+                    self.internal = internal_routes();
+                }
+                serving(&state)
+            }
             Err(ReadError::Daemon(error)) => self.serving_unknown(&error),
             Err(error) => {
                 self.notices.push(serving_file_notice(home, error));
@@ -461,8 +473,8 @@ impl Report {
     }
 
     /// The report, in blocks a blank line apart, an empty block left out: the key, its lock, the home and
-    /// the root's line (or what this machine is); each section with a row and what is served; the lines that
-    /// say what to do.
+    /// the root's line (or what this machine is); each section with a row and what is served; the internal
+    /// routes a running `serve` answers; the lines that say what to do.
     pub(crate) fn render(&self) -> String {
         let mut head = match &self.key {
             Some((key, methods, touch)) => {
@@ -500,7 +512,7 @@ impl Report {
         }
         body.extend(self.serving.iter().cloned());
 
-        let blocks: Vec<String> = [head, body, self.nags.clone()]
+        let blocks: Vec<String> = [head, body, self.internal.clone(), self.nags.clone()]
             .into_iter()
             .filter(|block| !block.is_empty())
             .map(|block| block.join("\n") + "\n")
@@ -674,6 +686,49 @@ fn serving(state: &ServiceState) -> String {
         (true, _) => format!("serving: {list}"),
         (false, true) => "serving: nothing, even when swoosh serve runs".to_owned(),
         (false, false) => format!("serving: {list}, when swoosh serve runs"),
+    }
+}
+
+/// `internal routes:`: every route a `serve` binds that no entry names, in the table's order, with who
+/// reaches it and what it does. Read from swoosh's own table, never the running node's catalog, so what
+/// each row says it admits is what its bind enforces.
+fn internal_routes() -> Vec<String> {
+    let rows: Vec<[&str; 3]> = control::INTERNAL
+        .iter()
+        .map(|route| [route.name, who(route.admits), what(route.name)])
+        .collect();
+    let width = |column: usize| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let (name, who) = (width(0), width(1));
+    let mut lines = vec!["internal routes:".to_owned()];
+    lines.extend(rows.iter().map(|[a, b, c]| {
+        format!("  {a:<name$}  {b:<who$}  {c}")
+            .trim_end()
+            .to_owned()
+    }));
+    lines
+}
+
+/// Who reaches a route, in words: who its bind admits, never who it answers.
+fn who(admits: control::Admits) -> &'static str {
+    match admits {
+        control::Admits::Devices | control::Admits::DevicesByKey => "your devices",
+        control::Admits::Saved => "your devices, saved machines",
+    }
+}
+
+/// What a route does, in words; empty for a name the table does not hold, which a test refuses.
+fn what(route: &str) -> &'static str {
+    match route {
+        CONTROL_SERVE_SERVICE => "stops it, lists its services",
+        SYNC_SERVICE => "syncs your device list",
+        RENEWAL_SERVICE => "renews your devices",
+        LOOKUP_ROOT_SERVICE => "says which root vouches for it",
+        _ => "",
     }
 }
 

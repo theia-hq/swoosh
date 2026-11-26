@@ -6,9 +6,10 @@ use fetch::OriginAllowlist;
 use nauthy::Service;
 use tightbeam::tunnel::{TargetSpec, TargetSyntaxError};
 
+use crate::names::{NameError, Reserved, ReservedService};
+
 /// Identifies an invalid definition by operand, one-based index, and finite cause. Contains no definition text or underlying parser error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid {operand}service definition at index {index}: {cause}")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefinitionError {
     /// The input list containing the invalid definition.
     pub operand: Operand,
@@ -17,6 +18,37 @@ pub struct DefinitionError {
     /// The finite syntax refusal.
     pub cause: DefinitionCause,
 }
+
+impl DefinitionError {
+    /// The reserved word this definition named, when that is why it was refused.
+    pub fn reserved(&self) -> Option<Reserved> {
+        match self.cause {
+            DefinitionCause::Reserved(reserved) => Some(reserved),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for DefinitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            operand,
+            index,
+            cause,
+        } = self;
+        // A reserved word is the one refusal that names what was typed: the word is one of five fixed ones,
+        // so it holds nothing of the input, and its line is the same in every service slot.
+        if let Some(reserved) = self.reserved() {
+            return ReservedService(reserved).fmt(f);
+        }
+        write!(
+            f,
+            "invalid {operand}service definition at index {index}: {cause}"
+        )
+    }
+}
+
+impl core::error::Error for DefinitionError {}
 
 /// The input list containing the invalid definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +79,9 @@ pub enum DefinitionCause {
     /// Invalid service name.
     #[error("invalid service name")]
     Name,
+    /// A reserved word where the name goes.
+    #[error("{}", ReservedService(*.0))]
+    Reserved(Reserved),
     /// Unsupported target scheme.
     #[error("unsupported target scheme")]
     Scheme,
@@ -140,7 +175,7 @@ impl ValidatedDefinition {
                 _ if entry.starts_with("recv:") => ("recv", entry),
                 _ if entry.contains(':') => return Err(DefinitionCause::Arity),
                 _ => {
-                    let name = crate::names::service(entry).map_err(|_| DefinitionCause::Name)?;
+                    let name = service_name(entry)?;
                     if name.as_str() == "proxy" {
                         return Err(DefinitionCause::Origin);
                     }
@@ -154,7 +189,7 @@ impl ValidatedDefinition {
                 }
             }
         };
-        let name = crate::names::service(name).map_err(|_| DefinitionCause::Name)?;
+        let name = service_name(name)?;
         Self::named(name, target)
     }
 
@@ -310,6 +345,16 @@ fn anchor_receive(path: &Path, cwd: &Path) -> Result<PathBuf, DefinitionCause> {
         std::path::MAIN_SEPARATOR_STR
     };
     Ok(PathBuf::from(format!("{cwd}{separator}{text}")))
+}
+
+/// The service a definition names, through the one name rule; a reserved word keeps which one it was.
+pub(super) fn service_name(text: &str) -> Result<Service, DefinitionCause> {
+    crate::names::service(text).map_err(|error| match error {
+        NameError::ReservedService(ReservedService(reserved)) => {
+            DefinitionCause::Reserved(reserved)
+        }
+        NameError::NotAName(_) | NameError::Reserved(_) => DefinitionCause::Name,
+    })
 }
 
 fn clean(text: &str) -> Result<(), DefinitionCause> {

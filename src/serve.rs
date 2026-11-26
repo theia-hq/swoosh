@@ -78,7 +78,7 @@ pub const SYNC_SERVICE: &str = "control.sync";
 
 /// The pick-up route: every `serve` binds it, proven-only, and hands a device of this root its own newest
 /// standing on it ([`crate::renewal`]), with no token read. Like the update route it is bound by the node,
-/// never named in a `serve` entry, never printed, and dotted, so no name a person types can be it.
+/// never named in a `serve` entry, and dotted, so no name a person types can be it.
 pub const RENEWAL_SERVICE: &str = "control.renewal";
 
 /// The root route: every `serve` binds it, proven-only, and hands a peer this machine saves as one machine
@@ -87,10 +87,6 @@ pub const RENEWAL_SERVICE: &str = "control.renewal";
 /// Like the pick-up route it is bound by the node, never named in a `serve` entry, and dotted, so no name a
 /// person types can be it.
 pub const LOOKUP_ROOT_SERVICE: &str = "lookup.root";
-
-/// The routes a peer reaches proven-only: the transport's proof of its key is all they read, so a stream to
-/// one presents nothing, and never renews this home's standing first.
-pub const PROVEN_ROUTES: [&str; 2] = [RENEWAL_SERVICE, LOOKUP_ROOT_SERVICE];
 
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
 /// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the

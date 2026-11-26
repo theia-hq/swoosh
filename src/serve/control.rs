@@ -24,6 +24,69 @@ pub use serve::{
 };
 pub use sync::Sync;
 
+/// Who a route admits, as its bind enforces it. Who reaches the route, never who gets an answer: a route
+/// may admit a key and then answer it with a miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admits {
+    /// A key holding a live member badge rooted at the pin (`member_service`); a slip is refused.
+    Devices,
+    /// A key the held update lists with a standing not ended, with no badge read (`proven_service`).
+    DevicesByKey,
+    /// A key the held update lists, whatever its standing, or one this home saves as one machine of a
+    /// person (`proven_service`).
+    Saved,
+}
+
+impl Admits {
+    /// Whether a stream to the route presents nothing: the transport's proof of the key is all it reads.
+    pub const fn is_proven(self) -> bool {
+        match self {
+            Self::Devices => false,
+            Self::DevicesByKey | Self::Saved => true,
+        }
+    }
+}
+
+/// A route every `serve` binds and no entry names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Internal {
+    /// The route's name on the wire.
+    pub name: &'static str,
+    /// Who its bind admits.
+    pub admits: Admits,
+}
+
+/// Every internal route, in the order `status` lists them. The one list: a route bound outside it, or a
+/// row with no route, is a test failure, and what `status` says each admits is read from here.
+pub const INTERNAL: [Internal; 4] = [
+    Internal {
+        name: CONTROL_SERVE_SERVICE,
+        admits: Admits::Devices,
+    },
+    Internal {
+        name: SYNC_SERVICE,
+        admits: Admits::Devices,
+    },
+    Internal {
+        name: RENEWAL_SERVICE,
+        admits: Admits::DevicesByKey,
+    },
+    Internal {
+        name: LOOKUP_ROOT_SERVICE,
+        admits: Admits::Saved,
+    },
+];
+
+impl Internal {
+    /// Whether `service` is an internal route a peer reaches proven-only, so a stream to it presents
+    /// nothing and never renews this home's standing first.
+    pub fn is_proven(service: &str) -> bool {
+        INTERNAL
+            .iter()
+            .any(|route| route.name == service && route.admits.is_proven())
+    }
+}
+
 /// Bind `control.serve` ([`CONTROL_SERVE_SERVICE`]) member-only, over the catalog cut here, once, from the
 /// routes `router` holds: call it after every other route and both open overlays are declared, so the
 /// catalog lists them all. `control.serve` lists itself. Returns the catalog for the resident's list, and

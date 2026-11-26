@@ -3725,7 +3725,9 @@ async fn control_round_trip(socket: &Path, request: Request) -> Result<Response,
 /// Both forms use the callable-name rule before a home is read or a process binds anything.
 #[test]
 fn serve_refuses_reserved_bare_names_before_home_writes() {
-    assert_reserved_serve_entries(&["control", "lookup", "CONTROL", "LookUp"]);
+    assert_reserved_serve_entries(&[
+        "control", "lookup", "CONTROL", "LookUp", "me", "Root", "anyone",
+    ]);
 }
 
 #[test]
@@ -3735,6 +3737,9 @@ fn serve_refuses_reserved_explicit_names_before_home_writes() {
         "lookup=ping:",
         "CONTROL=ping:",
         "LookUp=ping:",
+        "me=ping:",
+        "Root=ping:",
+        "anyone=ping:",
     ]);
 }
 
@@ -3793,20 +3798,26 @@ fn assert_reserved_serve_entries(entries: &[&str]) {
             entry,
         ])
         .expect("definition validation occurs after clap without raw operand echo");
+        let word = entry
+            .split_once('=')
+            .map_or(*entry, |(name, _)| name)
+            .to_ascii_lowercase();
         assert!(matches!(
             definition(entry),
             Err(swoosh::serve::DefinitionError {
                 operand: swoosh::serve::Operand::Positional,
                 index: 1,
-                cause: swoosh::serve::DefinitionCause::Name,
-            })
+                cause: swoosh::serve::DefinitionCause::Reserved(reserved),
+            }) if reserved.as_str() == word
         ));
         let output = swoosh_once(&scratch, &["serve", entry]);
         assert_eq!(output.status.code(), Some(2));
         assert!(
             String::from_utf8(output.stderr)
                 .unwrap()
-                .contains("invalid service definition at index 1: invalid service name")
+                .starts_with(&format!(
+                    "error: {word} is reserved; no service can have that name\n"
+                ))
         );
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(
@@ -3822,9 +3833,6 @@ fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
     use swoosh::serve::Mistyped;
 
     for (entry, expected) in [
-        ("Me=ping:", "me=ping:"),
-        ("Root=ping:", "root=ping:"),
-        ("Anyone=ping:", "anyone=ping:"),
         ("Ping", "ping=ping:"),
         ("Speed", "speed=speed:"),
         ("recv:", "recv=recv:"),
@@ -3865,7 +3873,7 @@ fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
             ))
         ));
     }
-    for name in ["me", "root", "anyone", "ssh", "ping", "speed"] {
+    for name in ["ssh", "ping", "speed"] {
         assert!(swoosh::names::service(name).is_ok());
     }
     for entry in ["ssh=sshd:22", "ssh=sshd:+lossy"] {

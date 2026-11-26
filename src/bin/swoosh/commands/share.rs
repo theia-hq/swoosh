@@ -125,26 +125,26 @@ const YOURS: &str = "your devices already reach it.";
 
 /// The first positional: `-`, a path, a `swoosh:` link, or a service name. A path is read here, so the
 /// link it holds never enters argv; text shaped like a link without its prefix refuses naming the prefix.
-fn shared(text: &str) -> Result<Shared, String> {
+/// Every refusal but a service name's is its message alone.
+fn shared(text: &str) -> Result<Shared, Box<dyn core::error::Error + Send + Sync>> {
     if text == "-" {
         return Ok(Shared::Stdin);
     }
     if swoosh::peer::is_path(text) {
         return swoosh::peer::read_link_file(text)
             .map(|(link, _)| Shared::Link(link))
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string().into());
     }
     if swoosh::link::is_prefixed(text) {
         return swoosh::link::parse(text)
             .map(Shared::Link)
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string().into());
     }
     if swoosh::link::looks_bare(text) {
-        return Err(swoosh::link::LinkError::Prefix.to_string());
+        return Err(swoosh::link::LinkError::Prefix.to_string().into());
     }
-    swoosh::names::service(text)
-        .map(Shared::Service)
-        .map_err(|error| error.to_string())
+    // The name error stays typed, so a reserved word reaches its own line rather than clap's frame.
+    Ok(swoosh::names::service(text).map(Shared::Service)?)
 }
 
 /// The second positional: `anyone`, a key, a root's key, `<person>` or `<person>/<name>`. The shape keeps

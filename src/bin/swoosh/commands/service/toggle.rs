@@ -60,8 +60,9 @@ pub enum Slot {
     Invalid,
 }
 
-// A total parser prevents clap from echoing invalid NAME text; here() refuses the categorical result.
-fn slot(text: &str) -> Result<Slot, core::convert::Infallible> {
+// Total but for a reserved word, so clap never echoes invalid NAME text; here() refuses the categorical
+// result. A reserved word is one of five fixed ones, refused at parse with its own line.
+fn slot(text: &str) -> Result<Slot, swoosh::names::ReservedService> {
     // Definitions and URLs must not be retained as machine-shaped operands.
     if text.contains('=')
         || (text.contains(':') && !swoosh::root_key::is_prefixed(text))
@@ -72,7 +73,13 @@ fn slot(text: &str) -> Result<Slot, core::convert::Infallible> {
     if is_machine(text) {
         return Ok(Slot::Machine(text.to_owned()));
     }
-    Ok(swoosh::names::service(text).map_or(Slot::Invalid, Slot::Service))
+    match swoosh::names::service(text) {
+        Ok(service) => Ok(Slot::Service(service)),
+        Err(swoosh::names::NameError::ReservedService(reserved)) => Err(reserved),
+        Err(swoosh::names::NameError::NotAName(_) | swoosh::names::NameError::Reserved(_)) => {
+            Ok(Slot::Invalid)
+        }
+    }
 }
 
 /// What was typed after the service: a machine (`me/nas`), or a second word, which `on` and `off` never

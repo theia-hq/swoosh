@@ -14,7 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::DEFAULT_SERVICES;
-use super::definition::{DefinitionCause, DefinitionError, Operand, ValidatedDefinition};
+use super::definition::{
+    DefinitionCause, DefinitionError, Operand, ValidatedDefinition, service_name,
+};
+use crate::names::{Reserved, ReservedService};
 use crate::serve_toml::ServeToml;
 
 /// Why the services a `serve` starts with could not be settled.
@@ -26,6 +29,9 @@ pub enum ServingError {
     /// The services typed on this command line cannot be one list.
     #[error(transparent)]
     Mistyped(#[from] Mistyped),
+    /// A reserved word typed where a service name goes.
+    #[error(transparent)]
+    Reserved(#[from] ReservedService),
     /// An exclusion name is invalid.
     #[error("--without #{index} is not a valid service name")]
     InvalidExclusion {
@@ -58,6 +64,21 @@ pub enum ServingError {
     },
 }
 
+impl ServingError {
+    /// The reserved word a service slot held, when that is why the services could not be settled.
+    pub fn reserved(&self) -> Option<Reserved> {
+        match self {
+            Self::Definition(error) | Self::Mistyped(Mistyped(error)) => error.reserved(),
+            Self::Reserved(ReservedService(reserved)) => Some(*reserved),
+            Self::InvalidExclusion { .. }
+            | Self::MissingExclusion { .. }
+            | Self::DuplicateExclusion { .. }
+            | Self::ExcludedAddition { .. }
+            | Self::ConflictingAddition { .. } => None,
+        }
+    }
+}
+
 /// Why the services typed on one command line cannot be one list: a usage error, found before anything is read, written or bound.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(transparent)]
@@ -83,11 +104,11 @@ impl Mistyped {
     pub fn check_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), Self> {
         let mut seen = BTreeSet::new();
         for (index, name) in names.into_iter().enumerate() {
-            let name = crate::names::service(name).map_err(|_| {
+            let name = service_name(name).map_err(|cause| {
                 Self(DefinitionError {
                     operand: Operand::Positional,
                     index: index + 1,
-                    cause: DefinitionCause::Name,
+                    cause,
                 })
             })?;
             if !seen.insert(name.to_string()) {
@@ -182,6 +203,28 @@ impl Started {
         )?))
     }
 
+    /// The services `--without` names, each through the one name rule, in order: what a `serve` checks
+    /// before it takes its home, and what [`relative`](Self::relative) removes.
+    ///
+    /// # Errors
+    ///
+    /// [`ServingError::Reserved`] for a reserved word, else [`ServingError::InvalidExclusion`] for the
+    /// first name that is none.
+    pub fn exclusions(names: &[String]) -> Result<Vec<nauthy::Service>, ServingError> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                service_name(name).map_err(|cause| match cause {
+                    DefinitionCause::Reserved(reserved) => {
+                        ServingError::Reserved(ReservedService(reserved))
+                    }
+                    _ => ServingError::InvalidExclusion { index: index + 1 },
+                })
+            })
+            .collect()
+    }
+
     /// Validate the complete saved/default base and operands against the supplied absolute cwd, then select a fixed service list for this invocation without preparing services or changing saved policy.
     ///
     /// # Errors
@@ -214,10 +257,8 @@ impl Started {
             .map(|definition| (definition.name.to_string(), definition.entry()))
             .collect();
         let mut excluded = BTreeSet::new();
-        for (index, name) in exclusions.iter().enumerate() {
+        for (index, name) in Self::exclusions(exclusions)?.into_iter().enumerate() {
             let index = index + 1;
-            let name = crate::names::service(name)
-                .map_err(|_| ServingError::InvalidExclusion { index })?;
             if !excluded.insert(name.to_string()) {
                 return Err(ServingError::DuplicateExclusion { index });
             }

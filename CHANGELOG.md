@@ -197,6 +197,10 @@ All notable changes to swoosh, newest first.
   a fan-out past 100 pipes no longer times out.
 - **`send` waits at most 10 minutes for the receiver to answer each file.** Then it reports
   `the receiver did not answer within 10 minutes; the file may have arrived`. Before, it had no limit.
+- **Bare `status` lists the routes every `serve` answers,** under `internal routes`, with who reaches each, while
+  `serve` runs.
+- **No service can be named `control`, `lookup`, `me`, `root` or `anyone`.** Every command that takes a service
+  name refuses them with exit 2, and so does `serve.toml`, including its `off` list.
 
 ### Fixed
 - **`share` refuses a link to a service whose saved definition is invalid.**

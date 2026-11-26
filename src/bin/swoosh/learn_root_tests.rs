@@ -549,20 +549,15 @@ async fn the_root_route_is_lookup_root() {
             cause: swoosh::serve::DefinitionCause::Name,
         }))
     ));
-    // A toggle's name slot is total in clap for the same reason; the verb refuses it as a usage error.
-    let Some(crate::Command::Service {
-        command: Some(crate::commands::service::ServiceCmd::Off(off)),
-    }) = Cli::try_parse_from(["swoosh", "service", "off", "lookup"])
-        .unwrap()
-        .command
-    else {
-        panic!("service off parses");
-    };
-    assert_eq!(
-        off.here(crate::commands::service::toggle::Way::Off)
-            .unwrap_err()
-            .to_string(),
-        "invalid service name at index 1"
+    // A toggle's name slot refuses a reserved word at parse, with its own line, as a usage error.
+    let error = crate::parse_from(["swoosh", "service", "off", "lookup"])
+        .expect_err("a reserved word is no service");
+    assert_eq!(error.exit_code(), 2);
+    assert!(
+        error
+            .to_string()
+            .starts_with("error: lookup is reserved; no service can have that name\n"),
+        "{error}"
     );
     for argv in [
         vec!["swoosh", "serve", "--public", "lookup.root"],

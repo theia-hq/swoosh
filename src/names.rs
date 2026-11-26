@@ -5,8 +5,8 @@
 //! nothing else is allowed: a name can never hold the invite's `.` separator, a path's `/` or `~`, a
 //! marker's `:`, or whitespace. Internal routes are dotted (`control.serve`), so no typed name can be one.
 //!
-//! Five names are reserved and are never a person or a device: `me`, `root` and `anyone`, and the two
-//! internal route groups, `control` and `lookup`, which are never a typed service either.
+//! Five names are reserved ([`Reserved`]) and are never a person, a device or a service: `me`, `root` and
+//! `anyone`, which address people, and the two internal route groups, `control` and `lookup`.
 
 use core::str::FromStr;
 
@@ -20,8 +20,14 @@ impl Name {
     /// The longest name, in characters (every character is one ASCII byte).
     pub const MAX_LEN: usize = 63;
 
-    /// The names that are never a person or a device.
-    pub const RESERVED: [&'static str; 5] = ["me", "root", "anyone", "control", "lookup"];
+    /// The names that are never a person or a device, spelled as [`Reserved`] spells them.
+    pub const RESERVED: [&'static str; 5] = [
+        Reserved::ALL[0].as_str(),
+        Reserved::ALL[1].as_str(),
+        Reserved::ALL[2].as_str(),
+        Reserved::ALL[3].as_str(),
+        Reserved::ALL[4].as_str(),
+    ];
 
     /// The name, for display and lookup.
     pub fn as_str(&self) -> &str {
@@ -56,12 +62,13 @@ impl Name {
 
 /// Parse a service name a person typed (`serve --public <service>`, `share <service>`, `reach <peer>
 /// <service>`, ...): the one name rule, folded, as the [`Service`] the router and the grant carry. A dotted
-/// internal route (`control.serve`) is never a name, so it can never be typed; nor is a group of them
-/// (`control`, `lookup`), which is no service of its own.
+/// internal route (`control.serve`) is never a name, so it can never be typed; no [`Reserved`] word is a
+/// service either, so a group of internal routes (`control`) or a word that addresses people (`anyone`)
+/// never reads as one.
 pub fn service(text: &str) -> Result<Service, NameError> {
     let name: Name = text.parse()?;
-    if ["control", "lookup"].contains(&name.as_str()) {
-        return Err(NameError::Reserved(name.into()));
+    if let Some(reserved) = Reserved::of(&name) {
+        return Err(NameError::ReservedService(ReservedService(reserved)));
     }
     // Every name is a service (the service alphabet is wider); the fallback keeps this total without a
     // panic path.
@@ -69,6 +76,63 @@ pub fn service(text: &str) -> Result<Service, NameError> {
         .parse()
         .map_err(|_| NameError::NotAName(text.to_owned()))
 }
+
+/// One of the five reserved words. A closed set, so a refusal can carry the word it refused without
+/// holding any text a person typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reserved {
+    /// This person's own devices (`me/laptop`).
+    Me,
+    /// A root's key (`root:ed01…`).
+    Root,
+    /// Everyone, on a link or an open service.
+    Anyone,
+    /// The group of the node's own routes (`control.serve`).
+    Control,
+    /// The group of the route other roots' machines ask (`lookup.root`).
+    Lookup,
+}
+
+impl Reserved {
+    /// Every reserved word, in [`Name::RESERVED`]'s order.
+    pub const ALL: [Self; 5] = [
+        Self::Me,
+        Self::Root,
+        Self::Anyone,
+        Self::Control,
+        Self::Lookup,
+    ];
+
+    /// The word, as it is typed and stored.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Me => "me",
+            Self::Root => "root",
+            Self::Anyone => "anyone",
+            Self::Control => "control",
+            Self::Lookup => "lookup",
+        }
+    }
+
+    /// The reserved word `name` is, if it is one.
+    pub fn of(name: &Name) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|reserved| reserved.as_str() == name.as_str())
+    }
+}
+
+impl core::fmt::Display for Reserved {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A reserved word typed where a service name goes: refused in every service slot, on the command line and
+/// in `serve.toml`, with one line, so one search finds each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{0} is reserved; no service can have that name")]
+pub struct ReservedService(pub Reserved);
 
 impl FromStr for Name {
     type Err = NameError;
@@ -109,6 +173,9 @@ pub enum NameError {
     /// The name is one of the [`RESERVED`](Name::RESERVED), which never name a person or a device.
     #[error("{0} is reserved: pick another name")]
     Reserved(String),
+    /// The name is one of the [`RESERVED`](Name::RESERVED), typed where a service name goes.
+    #[error(transparent)]
+    ReservedService(#[from] ReservedService),
 }
 
 /// The name this machine suggests for itself: its hostname, cut at the first `.`, made a name.
