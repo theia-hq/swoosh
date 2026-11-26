@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use bifrost_mdns::{At, Dialable, Expiring, MdnsError, Missing, Scope};
+use bifrost_mdns::{At, Dialable, Missing};
 use clap::CommandFactory as _;
 use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVE_SERVICE, DEFAULT_SERVICES, ProxyScope, ProxyService, SYNC_SERVICE, Stopped,
-    bind_entry, control, extract_recv_services,
+    CONTROL_SERVE_SERVICE, DEFAULT_SERVICES, Internet, Lan, Picks, ProxyScope, ProxyService,
+    Reachable, SYNC_SERVICE, Stopped, bind_entry, control, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
@@ -33,18 +33,12 @@ use tightbeam::tunnel::{
 };
 
 use super::{
-    Keeper, ReachKind, Serving, banner, expire, keeper_line, off_lines, reach_section, supervised,
-    waiting_warnings,
+    Keeper, ReachRows, Scope, Serving, banner, expire, keeper_line, log_bind, off_lines,
+    supervised, waiting_warnings,
 };
 
 #[path = "serve_relative_tests.rs"]
 mod relative_tests;
-
-/// n0's relay and n0's discovery: the bind every banner test but the reach-flag one is about, and the
-/// state whose lines the docs pin byte for byte.
-fn n0() -> Reach {
-    Reach::default()
-}
 
 /// A service name for a test-built router overlay.
 fn svc(name: &str) -> nauthy::Service {
@@ -72,113 +66,6 @@ fn entry_open(name: &str, kind: TargetKind, metering: Option<Metering>) -> Manif
         metering,
         raw_source: None,
     }
-}
-
-/// The address a test node's ADVERTISEMENT was heard at: what mDNS multicast, which is a separate
-/// fact from what the bind expands to. Deliberately not [`NETWORK_AT`]: one constant standing for
-/// both re-couples the two fixtures the direct lane exists to keep apart, and a test that asserted
-/// the lane reads the bind would pass just as happily if it read the announcement.
-const HEARD_AT: &str = "192.168.1.40:58131";
-
-/// The network address a WILDCARD bind answers on: routable, never loopback, so every rendered
-/// address is one a peer could actually dial.
-const NETWORK_AT: &str = "192.168.1.44:58131";
-
-/// The loopback socket a WILDCARD bind also answers on, on the same port. swoosh has no bind flag, so
-/// every real serve is a wildcard bind and every one of them has this entry.
-const LOOPBACK_AT: &str = "127.0.0.1:58131";
-
-/// The loopback socket a v6 wildcard answers on, at the v6 socket's own port: the whole lane of an
-/// isolated host that binds `[::]` and nothing else. Every fixture for an unread flag read is built
-/// on a bind that expands v6, because the per-address flags are IPv6's own and bifrost narrows that
-/// gap away on a bind that expands no v6 wildcard.
-const LOOPBACK_V6_AT: &str = "[::1]:58569";
-
-/// A globally routable v6 address a wildcard bind answers on, at ITS OWN port. An unnamed dual-stack
-/// bind asks the OS for a v4 socket and a v6only socket separately, so the two families routinely
-/// land on different ephemeral ports: that skew is the shape the lane's port clause exists for, so
-/// the fixture carries it rather than pretending the ports match.
-const INTERNET_AT: &str = "[2605:59c1:18c2:df08:1cc1:8f16:193c:5912]:58569";
-
-/// The widest legal line's address: a v6 with no compressible group and a five-digit port is 47
-/// columns, the most the render can ever be handed.
-const WIDEST_V6_AT: &str = "[2605:59c1:18c2:df08:1cc1:8f16:193c:5912]:65535";
-
-/// The tunnel address a wildcard bind answers on when a point-to-point link is up, and the link it rides.
-const TUNNEL_AT: &str = "100.100.201.59:58131";
-const TUNNEL_LINK: &str = "utun4";
-
-/// A live advertisement other hosts can hear, at one routable address: the ordinary outcome for the banner
-/// tests that are about posture rather than discovery.
-fn heard_on_the_network() -> MdnsState {
-    MdnsState::OnLan(vec![HEARD_AT.parse().expect("valid addr")])
-}
-
-/// What a WILDCARD bind on an ordinary host answers on: the one network address the expansion found,
-/// and the loopback socket the same bind answers on. Independent of mDNS by construction, which is the
-/// whole point: it is the bind expanded through this host's interfaces, not a report of what was
-/// announced.
-///
-/// Handed over OUT of rank order, like every multi-entry fixture here. `FromIterator` sorts, so a
-/// fixture written already sorted proves nothing: the ordering regression it exists to catch would
-/// render correctly anyway.
-fn wildcard_bind() -> Dialable {
-    [
-        at(LOOPBACK_AT, Scope::ThisMachine),
-        at(NETWORK_AT, Scope::Network),
-    ]
-    .into_iter()
-    .collect()
-}
-
-/// The ordinary shape of a real dual-stack host: a globally routable v6, an RFC1918 v4, and the
-/// loopback socket the same bind answers on. The v6 carries its own port, as a real dual-stack bind
-/// does. Shuffled, like every multi-entry fixture here.
-fn dual_stack_bind() -> Dialable {
-    [
-        at(NETWORK_AT, Scope::Network),
-        at(LOOPBACK_AT, Scope::ThisMachine),
-        at(INTERNET_AT, Scope::Internet),
-    ]
-    .into_iter()
-    .collect()
-}
-
-/// A bind on a host with no address of its own: every wildcard bind still answers on loopback, so this
-/// is the smallest set any bind that came up can have.
-fn loopback_bind() -> Dialable {
-    [at(LOOPBACK_AT, Scope::ThisMachine)].into_iter().collect()
-}
-
-/// One entry of a bind's dialable set.
-fn at(socket: &str, scope: Scope) -> At {
-    At {
-        socket: socket.parse().expect("valid addr"),
-        scope,
-    }
-}
-
-/// A bind whose flag read found addresses this host is about to stop answering on and dropped them,
-/// reported by how far each dropped address reached. What is LEFT is `entries`; `dropped` is what is
-/// gone, which is exactly the pair the lane has to decide between saying something and saying
-/// nothing about.
-fn expiring(
-    entries: impl IntoIterator<Item = At>,
-    dropped: impl IntoIterator<Item = Scope>,
-) -> Dialable {
-    let report = Expiring::of(dropped).expect("a drop report is non-empty by construction");
-    Dialable::short(entries, Missing::Expiring(report))
-}
-
-/// The direct lane's address rows, verbatim and with their padding intact. Everything after the
-/// `direct` gloss line: the lane renders last, so it owns the tail of the section.
-fn lane_rows(section: &str) -> Vec<String> {
-    section
-        .lines()
-        .skip_while(|line| !line.starts_with("  direct"))
-        .skip(1)
-        .map(str::to_owned)
-        .collect()
 }
 
 /// The default `swoosh serve` manifest (gated ping + speed + the node's own `control.*` routes), name-sorted as the
@@ -250,20 +137,305 @@ fn serving_block(
     Ok(String::from_utf8(out)?)
 }
 
-/// The banner for key `ed01exampleid`, stopped by ctrl-c, as a pipe reads it.
-fn render_banner(serving: &Serving<'_>, transport: Option<&str>, keeper: Option<&str>) -> String {
+/// The banner for key `ed01exampleid` on a host with [`LAN`] and [`LOOPBACK`], stopped by ctrl-c, as a
+/// pipe reads it.
+fn render_banner(serving: &Serving<'_>, keeper: Option<&str>) -> String {
+    let reach = ReachRows::of(
+        &reachable(Internet::On, Lan::Announced, host(&[LAN, LOOPBACK])),
+        Scope::Banner,
+    );
     let mut out = Vec::new();
     banner(
         "swoosh is serving",
         "ed01exampleid",
+        &reach,
         serving,
-        transport,
         keeper,
         "ctrl-c to stop",
     )
     .write(&mut out)
     .unwrap();
     String::from_utf8(out).unwrap()
+}
+
+/// An address on this network, the reach fixtures' port throughout.
+const LAN: &str = "192.168.1.20:51006";
+/// The loopback address a wildcard bind answers on.
+const LOOPBACK: &str = "127.0.0.1:51006";
+/// A globally routable address, in the documentation range.
+const PUBLIC: &str = "[2001:db8:85a3::8a2e:370:7334]:51006";
+/// An address on a point-to-point link.
+const TUNNEL: &str = "100.101.102.103:51006";
+/// The widest address a row can hold: a v6 with no group to compress and a five-digit port, 47 columns.
+const WIDEST_LAN: &str = "[2605:59c1:18c2:df08:1cc1:8f16:193c:5912]:65535";
+
+/// One entry of a host's expansion, its class read off the address: loopback, a CGNAT tunnel, a
+/// private network address, else the internet.
+fn entry(socket: &str) -> At {
+    let socket: core::net::SocketAddr = socket.parse().expect("a fixture socket");
+    let scope = match socket.ip() {
+        ip if ip.is_loopback() => bifrost_mdns::Scope::ThisMachine,
+        core::net::IpAddr::V4(v4) if v4.octets()[0] == 100 => bifrost_mdns::Scope::Tunnel {
+            link: "utun4".to_owned(),
+        },
+        core::net::IpAddr::V4(v4) if v4.is_private() => bifrost_mdns::Scope::Network,
+        core::net::IpAddr::V6(v6) if v6.segments()[0] == 0x2605 => bifrost_mdns::Scope::Network,
+        _ => bifrost_mdns::Scope::Internet,
+    };
+    At { socket, scope }
+}
+
+/// A host whose interfaces read, answering at `sockets`.
+fn host(sockets: &[&str]) -> Dialable {
+    sockets.iter().copied().map(entry).collect()
+}
+
+/// A host whose interfaces could not be read, answering at only `sockets`.
+fn unread(sockets: &[&str]) -> Dialable {
+    Dialable::short(
+        sockets.iter().copied().map(entry),
+        Missing::Interfaces(io::Error::other("getifaddrs: denied")),
+    )
+}
+
+/// What a running serve answers about a bind on `host`.
+fn reachable(internet: Internet, lan: Lan, host: Dialable) -> Reachable {
+    Reachable {
+        internet,
+        lan,
+        at: Picks::of(&host),
+    }
+}
+
+/// The `reach` block for `reach` under `scope`, written through the screen as a pipe reads it, so the
+/// screen law holds every line of it.
+fn reach_block(reach: &Reachable, scope: Scope) -> String {
+    let mut out = Vec::new();
+    crate::screen::Screen::default()
+        .block(ReachRows::of(reach, scope).block("reach"))
+        .write(&mut out)
+        .expect("a Vec takes the block");
+    String::from_utf8(out).expect("the block is UTF-8")
+}
+
+/// Every reach state the banner can show, named: how the internet and this network read, and the host.
+fn reach_fixtures() -> Vec<(&'static str, Reachable)> {
+    let every = || host(&[LOOPBACK, TUNNEL, PUBLIC, LAN]);
+    vec![
+        (
+            "default, announced",
+            reachable(Internet::On, Lan::Announced, every()),
+        ),
+        (
+            "default, by address only",
+            reachable(Internet::On, Lan::ByAddressOnly, every()),
+        ),
+        (
+            "default, offline",
+            reachable(Internet::On, Lan::Announced, host(&[LOOPBACK])),
+        ),
+        (
+            "default, unread",
+            reachable(Internet::On, Lan::Announced, unread(&[LOOPBACK])),
+        ),
+        (
+            "default, public and tunnel with no network",
+            reachable(
+                Internet::On,
+                Lan::Announced,
+                host(&[LOOPBACK, TUNNEL, PUBLIC]),
+            ),
+        ),
+        (
+            "--local, every class",
+            reachable(Internet::Off, Lan::Announced, every()),
+        ),
+        (
+            "--local, loopback only",
+            reachable(Internet::Off, Lan::ByAddressOnly, host(&[LOOPBACK])),
+        ),
+        (
+            "--local, unread beside a public address",
+            reachable(
+                Internet::Off,
+                Lan::ByAddressOnly,
+                unread(&[PUBLIC, LOOPBACK]),
+            ),
+        ),
+        (
+            "--local, a named bind with no loopback",
+            reachable(Internet::Off, Lan::Announced, host(&[PUBLIC])),
+        ),
+        (
+            "--local, the widest address, by address only",
+            reachable(
+                Internet::Off,
+                Lan::ByAddressOnly,
+                host(&[WIDEST_LAN, LOOPBACK]),
+            ),
+        ),
+    ]
+}
+
+/// The `reach` block reads as ruled: `internet`, then by default only the address on this network, or
+/// the loopback address when there is none. A public or tunnel address never shows by default, since a
+/// banner is pasted into logs and issues; under `--local` every class shows, one row each. A host that
+/// could not read its addresses reads `unknown`, never offline, never by address only, and with no
+/// loopback row beside it.
+#[test]
+fn the_reach_block_reads_as_ruled() {
+    let want = [
+        "reach\n  internet       on\n  this network   192.168.1.20:51006\n",
+        "reach\n  internet       on\n  this network   192.168.1.20:51006, by address only\n",
+        "reach\n  internet       on\n  this computer  127.0.0.1:51006\n",
+        "reach\n  internet       on\n  this network   unknown\n",
+        "reach\n  internet       on\n  this computer  127.0.0.1:51006\n",
+        "reach\n  internet       off (--local)\n  public         [2001:db8:85a3::8a2e:370:7334]:51006\n  this network   192.168.1.20:51006\n  tunnel         100.101.102.103:51006\n  this computer  127.0.0.1:51006\n",
+        "reach\n  internet       off (--local)\n  this computer  127.0.0.1:51006\n",
+        "reach\n  internet       off (--local)\n  public         [2001:db8:85a3::8a2e:370:7334]:51006\n  this network   unknown\n",
+        "reach\n  internet       off (--local)\n  public         [2001:db8:85a3::8a2e:370:7334]:51006\n",
+        // One column past 80 on one line, so the row stacks: the address and its gloss stay whole.
+        "reach\n  internet       off (--local)\n  this network\n    [2605:59c1:18c2:df08:1cc1:8f16:193c:5912]:65535, by address only\n  this computer  127.0.0.1:51006\n",
+    ];
+    let fixtures = reach_fixtures();
+    assert_eq!(fixtures.len(), want.len());
+    for ((name, reach), want) in fixtures.iter().zip(want) {
+        assert_eq!(reach_block(reach, Scope::Banner), want, "{name}");
+    }
+}
+
+/// The banner's rows are every class's rows less the hidden ones, through one function: under `--local`
+/// the banner already shows every class, so the two are the same bytes; by default, every class adds
+/// only the public, tunnel and loopback rows, and the rows both show read the same.
+#[test]
+fn the_banner_rows_are_the_all_rows_less_the_hidden_ones() {
+    for (name, reach) in reach_fixtures() {
+        let banner = reach_block(&reach, Scope::Banner);
+        let all = reach_block(&reach, Scope::All);
+        if reach.internet == Internet::Off {
+            assert_eq!(banner, all, "{name}");
+            continue;
+        }
+        let shown: Vec<&str> = banner.lines().collect();
+        let mut extra = all.lines().filter(|line| !shown.contains(line));
+        assert!(
+            extra.all(|line| ["  public ", "  tunnel ", "  this computer "]
+                .iter()
+                .any(|label| line.starts_with(label))),
+            "{name}: {all}"
+        );
+        let both: Vec<&str> = all.lines().filter(|line| shown.contains(line)).collect();
+        assert_eq!(both, shown, "{name}: the shared rows, in the same order");
+    }
+}
+
+/// Every reach line holds the screen law with no exemption: each fixture, in both scopes, is written
+/// through the screen, whose `write` holds every line to case, period and width under test and panics
+/// on a breach; this row adds that no reach line is one the law excuses.
+#[test]
+fn the_reach_block_holds_the_law() {
+    for (name, reach) in reach_fixtures() {
+        for scope in [Scope::Banner, Scope::All] {
+            let block = reach_block(&reach, scope);
+            for line in block.lines() {
+                assert!(
+                    !crate::screen::law::OWED.contains(&line),
+                    "{name}: {line:?} is excused"
+                );
+            }
+        }
+    }
+}
+
+/// A log line, captured.
+struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the capture lock")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `log_bind` writes, at every level, for one bind.
+fn bind_log(dialable: &Dialable, mdns: &MdnsState, reach: &Reach, local: bool) -> String {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = std::sync::Arc::clone(&log);
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || LogCapture(std::sync::Arc::clone(&writer)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        log_bind(dialable, mdns, reach, local);
+    });
+    String::from_utf8(log.lock().expect("the capture lock").clone()).expect("utf-8")
+}
+
+/// The bind's log carries causes and class names, never an address: no host address, no announced
+/// address, and no URL of a relay or resolver the person runs. Each degraded cause still reaches it.
+#[test]
+fn the_bind_log_names_causes_and_no_address() {
+    let own = Reach {
+        relay: RelayHome::Custom("https://relay.example.net".parse().expect("a relay url")),
+        resolver: Resolver::Custom("https://pkarr.example.net".parse().expect("a resolver url")),
+    };
+    // A public and a tunnel address, with the network class gone to expiry.
+    let expiring = Dialable::short(
+        [entry(PUBLIC), entry(TUNNEL), entry(LOOPBACK)],
+        Missing::Expiring(
+            bifrost_mdns::Expiring::of([bifrost_mdns::Scope::Network]).expect("a drop"),
+        ),
+    );
+    let unchecked = Dialable::short([entry(PUBLIC), entry(LOOPBACK)], Missing::Flags);
+    let logs = [
+        bind_log(&expiring, &MdnsState::LoopbackOnly, &own, false),
+        bind_log(
+            &unchecked,
+            &MdnsState::BrowseOnly(bifrost_mdns::MdnsError::NoAddrs),
+            &own,
+            false,
+        ),
+        bind_log(
+            &host(&[PUBLIC, LAN, LOOPBACK]),
+            &MdnsState::OnLan(vec![LAN.parse().expect("an address")]),
+            &own,
+            false,
+        ),
+    ];
+    let all = logs.concat();
+    for word in all.split(|c: char| c.is_whitespace() || c == '"' || c == ',' || c == '=') {
+        let word = word.trim_matches(|c: char| c == '.' || c == ';');
+        assert!(
+            word.parse::<core::net::IpAddr>().is_err()
+                && word.parse::<core::net::SocketAddr>().is_err(),
+            "an address in the log: {word:?}\n{all}"
+        );
+    }
+    assert!(!all.contains("example.net"), "a URL in the log:\n{all}");
+    for cause in [
+        "only expiring addresses reach this class",
+        "class=Network",
+        "mDNS on this host only",
+        "could not check for expiry",
+        "finding peers, not announcing you",
+        "resolver=\"custom\"",
+        "relay=\"custom\"",
+    ] {
+        assert!(all.contains(cause), "{cause:?} is logged:\n{all}");
+    }
+    assert!(
+        !logs[2].contains("WARN"),
+        "a clean bind warns nothing:\n{}",
+        logs[2]
+    );
 }
 
 #[test]
@@ -274,21 +446,12 @@ fn the_banner_frames_selection_actual_targets_and_how_to_stop() {
         Some(&swoosh::serve::Started::Default),
         &manifest,
     );
-    // The stop line is a block of its own, a blank line under `serving`.
+    // `reach` sits under the key, with its values in the key's column; the stop line is a block of its
+    // own, a blank line under `serving`.
     assert_eq!(
-        render_banner(&serving, None, None),
-        "swoosh is serving\n\n  key            ed01exampleid\n\nserving\n  selection  default services\n  ping       your devices  ping:\n  speed      your devices  speed:\n\nctrl-c to stop\n"
+        render_banner(&serving, None),
+        "swoosh is serving\n\n  key            ed01exampleid\n\nreach\n  internet       on\n  this network   192.168.1.20:51006\n\nserving\n  selection  default services\n  ping       your devices  ping:\n  speed      your devices  speed:\n\nctrl-c to stop\n"
     );
-    let transport = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-    let verbose = render_banner(&serving, Some(&transport), None);
-    assert!(verbose.contains("how peers reach you"));
-    assert!(verbose.ends_with("ctrl-c to stop\n"));
-    assert!(!verbose.contains("control."));
 }
 
 #[test]
@@ -434,11 +597,15 @@ fn a_banner_on_a_closed_pipe_is_an_error() {
 
     let manifest = default_manifest();
     let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
+    let reach = ReachRows::of(
+        &reachable(Internet::On, Lan::Announced, host(&[LOOPBACK])),
+        Scope::Banner,
+    );
     let written = banner(
         "swoosh is serving",
         "ed01exampleid",
+        &reach,
         &serving,
-        None,
         None,
         "ctrl-c to stop",
     )
@@ -494,7 +661,7 @@ fn banner_names_the_service_manager_line_when_not_supervised() {
     // The line rides the banner before how to stop.
     let manifest = default_manifest();
     let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
-    let banner = render_banner(&serving, None, Some(systemd));
+    let banner = render_banner(&serving, Some(systemd));
     assert!(
         banner.ends_with(&format!("{systemd}\nctrl-c to stop\n")),
         "{banner}"
@@ -725,992 +892,6 @@ fn a_public_route_cannot_arm_an_uncapped_diagnostic() {
         .public([ping])
         .expose()
         .expect("the capped engine is openable");
-}
-
-/// The reach section flips the local line to a next-step down-state when mDNS is unavailable, and a
-/// direct-only node prints a `direct` channel whose addresses each sit on their own line.
-#[test]
-fn the_reach_section_handles_blocked_mdns_and_the_direct_lane() {
-    let blocked = reach_section(
-        ReachKind::Internet,
-        &MdnsState::Blocked,
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(blocked.contains("off; mDNS unavailable here"), "{blocked}");
-    assert!(
-        blocked.contains("over the internet"),
-        "the down-state says what to do instead: {blocked}"
-    );
-
-    let direct_only = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(
-        !direct_only
-            .lines()
-            .any(|line| line.starts_with("  internet")),
-        "a direct-only node shows no internet channel: {direct_only}"
-    );
-    assert!(direct_only.contains("direct"), "{direct_only}");
-    assert!(
-        direct_only.contains("hand a peer one of these:"),
-        "{direct_only}"
-    );
-    assert!(
-        direct_only.contains(NETWORK_AT) && !direct_only.contains(HEARD_AT),
-        "the lane hands over what the BIND answers on, never what mDNS announced: {direct_only}"
-    );
-
-    // A bind on a host with no address of its own still has one: loopback, which is what a second node
-    // on this machine dials. The lane says so, scope-marked.
-    let local = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::LoopbackOnly,
-        &n0(),
-        &loopback_bind(),
-    );
-    assert!(local.contains("mDNS on this host only"), "{local}");
-    assert!(local.contains("hand a peer this address:"), "{local}");
-    assert!(
-        local.contains(&format!("{LOOPBACK_AT}  (this machine)")),
-        "the one address it has is loopback, and the mark says who it reaches: {local}"
-    );
-}
-
-/// THE defect this lane's source change exists to kill. On a network that blocks multicast the mDNS
-/// report is `Blocked`, and the lane used to read that report, so it handed the operator loopback alone
-/// while the host's network addresses were exactly as dialable as ever. The lane reads the BIND now, so
-/// a blocked advertisement costs the operator nothing but the advertisement.
-#[test]
-fn a_blocked_advertisement_still_hands_over_the_hosts_network_addresses() {
-    let section = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &wildcard_bind(),
-    );
-
-    assert!(
-        section.contains("off; mDNS unavailable here, so hand a peer the address below"),
-        "the local lane still reports the blocked announcement: {section}"
-    );
-    assert!(
-        section.contains("  direct   hand a peer one of these:\n"),
-        "and the lane still offers every address the bind answers on: {section}"
-    );
-    assert_eq!(
-        lane_rows(&section),
-        [
-            format!("           {NETWORK_AT}  (this network)"),
-            format!("           {LOOPBACK_AT}     (this machine)"),
-        ],
-        "the network address a peer on another host dials leads, whatever mDNS did: {section}"
-    );
-}
-
-/// A point-to-point link (utun, tun, wg, a tailnet) is handed over and MARKED. The socket answers there,
-/// and for a direct-only bind it is the one address that can reach a peer off this LAN, so dropping it
-/// would hide the most useful line; leading with it, or leaving it bare, would invite a paste to a peer
-/// that is not on that link and cannot route to it. It sits below the network address, marked by its
-/// CLASS and never by the link it rides, and never goes on the mDNS wire.
-#[test]
-fn a_tunnel_address_is_handed_over_marked_and_below_the_network_one() {
-    // Shuffled: the order below is the expansion's, established by `FromIterator`, not this array's.
-    let bind: Dialable = [
-        at(LOOPBACK_AT, Scope::ThisMachine),
-        at(
-            TUNNEL_AT,
-            Scope::Tunnel {
-                link: TUNNEL_LINK.to_owned(),
-            },
-        ),
-        at(NETWORK_AT, Scope::Network),
-    ]
-    .into_iter()
-    .collect();
-
-    let section = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &n0(), &bind);
-
-    assert_eq!(
-        lane_rows(&section),
-        [
-            format!("           {NETWORK_AT}    (this network)"),
-            format!("           {TUNNEL_AT}  (this tunnel)"),
-            format!("           {LOOPBACK_AT}       (this machine)"),
-        ],
-        "network first, then the address the overlay answers on, then loopback: {section}"
-    );
-    assert!(
-        !section.contains(TUNNEL_LINK),
-        "the OS's name for the link never reaches the screen, so a screenshot names no VPN \
-         vendor and no employer: {section}"
-    );
-    assert!(
-        !section.contains("tailnet") && !section.contains("internet"),
-        "and the mark claims nothing about what the link joins: {section}"
-    );
-}
-
-/// The widest class, and the one that leads a real banner. `the internet` CLASSIFIES: it says who can
-/// route to this address, which is a fact about the address and the only fact this host has. It does
-/// not predict. The lane renders only for a bind with no relay and no NAT traversal, so a global v6
-/// behind the default-deny inbound firewall a consumer router and macOS both ship is the common case,
-/// and a mark that promised the peer would get through would be falsified by a firewall on an
-/// ordinary host.
-#[test]
-fn the_widest_class_says_who_can_route_to_the_address_and_promises_nothing() {
-    let section = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &n0(),
-        &dual_stack_bind(),
-    );
-
-    assert_eq!(
-        lane_rows(&section),
-        [
-            format!("           {INTERNET_AT}  (the internet)"),
-            format!("           {NETWORK_AT}                               (this network)"),
-            format!("           {LOOPBACK_AT}                                  (this machine)"),
-        ],
-        "the globally routable address leads, and every class says how far it goes: {section}"
-    );
-    assert!(
-        !section.contains("anywhere"),
-        "the mark classifies the address and never promises a path to it: {section}"
-    );
-}
-
-/// ONE LINE PER CLASS, and the v4 leads the class that has one. The expansion below is what a
-/// wifi+ethernet+VPN host reports, and it offers three decisions dressed as six rows: a peer is on
-/// this network, on a link, or on this machine. A second address in the same class is noise rather
-/// than a choice, so it does not render, and a second TUNNEL is the same one decision under a second
-/// name. v4 leads because it is the address a peer can paste anywhere.
-#[test]
-fn the_lane_renders_one_line_per_class_and_the_v4_leads_its_class() {
-    let bind: Dialable = [
-        at("[::1]:58131", Scope::ThisMachine),
-        at(
-            TUNNEL_AT,
-            Scope::Tunnel {
-                link: TUNNEL_LINK.to_owned(),
-            },
-        ),
-        at(
-            "[fd7a:115c:a1e0:ab12:4843:cd96:6265:c95f]:58131",
-            Scope::Network,
-        ),
-        at(LOOPBACK_AT, Scope::ThisMachine),
-        at(
-            "10.0.8.2:58131",
-            Scope::Tunnel {
-                link: "wg-acmecorp".to_owned(),
-            },
-        ),
-        at(NETWORK_AT, Scope::Network),
-    ]
-    .into_iter()
-    .collect();
-
-    let section = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &n0(), &bind);
-
-    assert_eq!(
-        lane_rows(&section),
-        [
-            format!("           {NETWORK_AT}    (this network)"),
-            format!("           {TUNNEL_AT}  (this tunnel)"),
-            format!("           {LOOPBACK_AT}       (this machine)"),
-        ],
-        "six entries, three decisions, and the v4 of each class: {section}"
-    );
-    assert!(
-        !section.contains("wg-acmecorp") && !section.contains("more"),
-        "the second link is the same decision, dropped rather than tallied: {section}"
-    );
-}
-
-/// A dual-stack bind names no address, so the OS hands it a v4 socket and a v6only socket with a port
-/// each, and the lane then renders two addresses whose ports differ. A bare difference invites an
-/// operator to read the port off the line above the address they copied; suppressing the v6 is worse,
-/// since on a global-v6 / RFC1918-v4 host it is the ONLY globally routable address they have. So the
-/// gloss carries one clause, and only when the rendered rows actually disagree: a v4-only host, and
-/// any same-port bind, render byte-identically to a lane that never heard of ports.
-#[test]
-fn the_lane_says_the_port_rides_the_address_only_when_the_ports_differ() {
-    let skewed = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &n0(),
-        &dual_stack_bind(),
-    );
-    assert!(
-        skewed.contains("  direct   hand a peer one of these (each address has its own port):\n"),
-        "the rows disagree on the port, so the gloss says the port comes with the address: {skewed}"
-    );
-    assert!(
-        skewed.lines().all(|line| line.chars().count() <= 80),
-        "the clause stays inside the 80-column bound: {skewed}"
-    );
-
-    // The same three classes on one shared port: the clause must not fire, or every v4-only host
-    // pays for a skew it does not have.
-    let shared: Dialable = [
-        at(LOOPBACK_AT, Scope::ThisMachine),
-        at(
-            "[2605:59c1:18c2:df08:1cc1:8f16:193c:5912]:58131",
-            Scope::Internet,
-        ),
-        at(NETWORK_AT, Scope::Network),
-    ]
-    .into_iter()
-    .collect();
-    let level = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &n0(),
-        &shared,
-    );
-    assert!(
-        level.contains("  direct   hand a peer one of these:\n"),
-        "one port across the rendered rows is the ordinary gloss, unchanged: {level}"
-    );
-}
-
-/// A bind that expanded to nothing states that, rather than rendering a header over an empty list.
-/// Unreachable on any bind that came up (a bound socket answers at loopback at the very least), which
-/// is exactly why it is pinned: the arm exists so the lane can never print a promise it has no line
-/// to keep.
-#[test]
-fn a_bind_with_no_address_says_so_rather_than_rendering_a_header_over_nothing() {
-    let nothing: Dialable = core::iter::empty().collect();
-
-    let section = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &nothing);
-
-    assert!(
-        section.contains("  direct   no address to hand over\n"),
-        "the lane states the outcome without narrating its own implementation: {section}"
-    );
-    assert!(
-        lane_rows(&section).is_empty(),
-        "and prints no row under it: {section}"
-    );
-}
-
-/// The 80-column bound holds BY CONSTRUCTION, with nothing measured at runtime. Every term of the
-/// widest line is fixed: the gloss column, the widest legal socket (a v6 with no compressible group
-/// and a five-digit port, 47 columns), the two-space mark gutter, and the widest mark. The lane used
-/// to measure itself here because the tunnel mark carried the OS's name for the link and could
-/// overflow on a legal `IFNAMSIZ` name; with the name gone the arithmetic IS the proof, and an
-/// over-budget fallback would be unreachable code.
-#[test]
-fn the_widest_line_the_lane_can_render_is_the_static_bound() {
-    // Every term written exactly once, so the bound is derived here rather than typed twice:
-    // `  direct   ` IS the gloss column the rows indent to.
-    let bound =
-        "  direct   ".len() + WIDEST_V6_AT.chars().count() + 2 + "(the internet)".chars().count();
-    assert!(
-        bound <= 80,
-        "the whole of the lane fits an 80-column terminal: {bound}"
-    );
-
-    // The widest address the render can be handed, in the class carrying the widest mark, beside a
-    // link whose name could never have fitted: not bounded by `IFNAMSIZ` (a Windows adapter name),
-    // and carrying a control character that would move the terminal's cursor instead of printing.
-    // Neither is guarded against any more, because neither reaches the screen.
-    let bind: Dialable = [
-        at(
-            TUNNEL_AT,
-            Scope::Tunnel {
-                link: "Local Area Connection\u{7}".to_owned(),
-            },
-        ),
-        at(WIDEST_V6_AT, Scope::Internet),
-    ]
-    .into_iter()
-    .collect();
-
-    let rows = lane_rows(&reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &bind,
-    ));
-    assert_eq!(
-        rows.iter().map(|row| row.chars().count()).max(),
-        Some(bound),
-        "the widest line the lane can render is the static bound: {rows:?}"
-    );
-    assert!(
-        rows[1].ends_with("  (this tunnel)"),
-        "the tunnel mark is fixed-width like every other: {rows:?}"
-    );
-    assert!(
-        !rows[1].contains("Local") && !rows[1].contains('\u{7}'),
-        "and the banner carries no externally sourced string at all, whole or truncated: {rows:?}"
-    );
-}
-
-/// The interface read failed, so the list is SHORT and the lane says so. A wildcard bind still answers
-/// on loopback whatever `getifaddrs` did, so without this the lane renders a lone
-/// `127.0.0.1  (this machine)` under the ordinary gloss and asserts this host is loopback-only when
-/// the truth is that nothing could be read. That is the same silent degradation the bind-truth change
-/// removed one layer down, and it must not be reintroduced one layer up.
-#[test]
-fn a_failed_interface_read_says_the_list_is_short_and_why() {
-    let cause = || Missing::Interfaces(io::Error::from(io::ErrorKind::PermissionDenied));
-
-    let one = Dialable::short([at(LOOPBACK_AT, Scope::ThisMachine)], cause());
-    let section = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &one);
-    assert!(
-        section
-            .contains("  direct   could not read this host's addresses; only this one is known:\n"),
-        "the cause, then the bound: the row no longer asserts the host is loopback-only: {section}"
-    );
-    assert_eq!(
-        lane_rows(&section),
-        [format!("           {LOOPBACK_AT}  (this machine)")],
-        "and the address it does know is still handed over, marked: {section}"
-    );
-
-    // Reachable only through a concrete bind, which swoosh has no flag for today; it is one match
-    // arm, and an arm nothing renders is an arm that quietly goes missing.
-    let many = Dialable::short(
-        [
-            at(LOOPBACK_AT, Scope::ThisMachine),
-            at(NETWORK_AT, Scope::Network),
-        ],
-        cause(),
-    );
-    let plural = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &many);
-    assert!(
-        plural.contains("  direct   could not read this host's addresses; only these are known:\n"),
-        "{plural}"
-    );
-
-    // The errno belongs in the log: it is unbounded, and this lane has exactly 80 columns.
-    for section in [&section, &plural] {
-        assert!(
-            !section.contains("permission denied") && !section.contains("interface"),
-            "the gloss carries the why an operator acts on, never the cause's own text: {section}"
-        );
-        assert!(
-            section.lines().all(|line| line.chars().count() <= 80),
-            "and stays inside the 80-column bound: {section}"
-        );
-    }
-}
-
-/// A drop that EMPTIED a reach class is the one an operator has to hear about. Where that class's
-/// row used to be the lane now says nothing, and silence reads as "this host has none" rather than
-/// "this host is losing them": the same silent degradation a failed interface read causes, one cause
-/// over. `expiring` is the word that moves the reader from reconfigure to wait-or-renew, and the
-/// gloss names the missing class with the ROW's own mark, so the reader matches the absent line
-/// against the marks still on screen by literal compare.
-///
-/// ONE arm, whatever the row count: `what is left:` is count-free, so the same string is correct
-/// over one row and over many. Both counts are pinned here because the string must READ right at
-/// both even though nothing branches on it any more.
-#[test]
-fn a_drop_that_empties_a_class_says_which_class_is_expiring() {
-    // This host's only globally routable address expired: the internet class had a row, and has
-    // none. The rows left are shuffled, like every multi-entry fixture here.
-    let left = || {
-        [
-            at(LOOPBACK_AT, Scope::ThisMachine),
-            at(NETWORK_AT, Scope::Network),
-        ]
-    };
-    let section = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &expiring(left(), [Scope::Internet]),
-    );
-    assert!(
-        section.contains("  direct   only expiring addresses reach the internet; what is left:\n"),
-        "the class that went is the fact, and the rows left are the bound: {section}"
-    );
-    let untouched: Dialable = left().into_iter().collect();
-    assert_eq!(
-        lane_rows(&section),
-        lane_rows(&reach_section(
-            ReachKind::DirectOnly,
-            &MdnsState::Blocked,
-            &n0(),
-            &untouched
-        )),
-        "and the gloss is the ONLY thing the drop changes: {section}"
-    );
-
-    // ONE row left, the same string: `what is left:` promises no count, so the arm that dissolved
-    // the singular/plural split still reads correctly here. The dropped address is never named: it
-    // is the RFC 8981 temporary address privacy addressing exists to keep unpublished, so printing
-    // it would defeat the drop.
-    let alone = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &expiring([at(LOOPBACK_AT, Scope::ThisMachine)], [Scope::Network]),
-    );
-    assert!(
-        alone.contains("  direct   only expiring addresses reach this network; what is left:\n"),
-        "{alone}"
-    );
-    assert_eq!(
-        lane_rows(&alone),
-        [format!("           {LOOPBACK_AT}  (this machine)")],
-        "{alone}"
-    );
-
-    // The class only a CLASS question can catch. A tunnel scope carries the link it rides, and the
-    // link's only address is the one that expired, so no surviving row can be read for the name a
-    // question phrased as `Tunnel { link }` would need. The arm has to fire off the class alone,
-    // which is the whole of the fix, and nothing else here reaches it.
-    let tunnel_gone = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &expiring(
-            left(),
-            [Scope::Tunnel {
-                link: TUNNEL_LINK.to_owned(),
-            }],
-        ),
-    );
-    assert!(
-        tunnel_gone
-            .contains("  direct   only expiring addresses reach this tunnel; what is left:\n"),
-        "the overlay this host had an address on is a class that lost its only row: {tunnel_gone}"
-    );
-    assert!(
-        !tunnel_gone.contains(TUNNEL_LINK),
-        "and the link the dropped address rode is never named, like the address itself: \
-         {tunnel_gone}"
-    );
-
-    for rendered in [&section, &alone, &tunnel_gone] {
-        assert!(
-            rendered.lines().all(|line| line.chars().count() <= 80),
-            "the widest of the three arms stays inside the 80-column bound: {rendered}"
-        );
-    }
-}
-
-/// Several classes emptied at once, and the lane has ONE gloss to spend: it names the
-/// highest-ranked of them. The rank is how far a class reaches without the peer first joining
-/// something, so the class whose absence costs the operator most is the one the gloss is spent on.
-/// A laptop that wakes with its SLAAC globals deprecated and its overlay down loses both at once,
-/// and `the internet` is the loss that changes what the operator can do.
-#[test]
-fn several_classes_emptied_at_once_name_the_highest_ranked() {
-    // Dropped OUT of rank order, so an arm that reported whichever class came first would name the
-    // tunnel: the order is the report's, not this array's.
-    let losing = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &expiring(
-            [
-                at(LOOPBACK_AT, Scope::ThisMachine),
-                at(NETWORK_AT, Scope::Network),
-            ],
-            [
-                Scope::Tunnel {
-                    link: TUNNEL_LINK.to_owned(),
-                },
-                Scope::Internet,
-            ],
-        ),
-    );
-
-    assert!(
-        losing.contains("  direct   only expiring addresses reach the internet; what is left:\n"),
-        "the widest-reaching class that lost its row is the one the gloss names: {losing}"
-    );
-    assert!(
-        !losing.contains("this tunnel"),
-        "and the lane spends exactly one gloss, never a list: {losing}"
-    );
-}
-
-/// A drop every class SURVIVED says nothing at all. The lane renders one line per class, so a second
-/// address in a class that still has a row was never going to be on screen: the count of what went
-/// is a fact no operator acts on, and an arm that fires on every laptop that has ever slept is noise
-/// in a glance rather than a signal. Byte-identical to a clean read, which is what this pins.
-#[test]
-fn a_drop_every_class_survived_says_nothing() {
-    let entries = || {
-        [
-            at(NETWORK_AT, Scope::Network),
-            at(LOOPBACK_AT, Scope::ThisMachine),
-            at(INTERNET_AT, Scope::Internet),
-        ]
-    };
-    // A second global v6 expired while the stable one stayed: the internet class still has its row.
-    let dropped = expiring(entries(), [Scope::Internet, Scope::Internet]);
-    let clean: Dialable = entries().into_iter().collect();
-
-    assert_eq!(
-        reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &dropped),
-        reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &clean),
-        "a drop no class felt renders exactly as a clean read does"
-    );
-}
-
-/// The per-address flags could not be read AT ALL, so the list is WHOLE and unchecked rather than
-/// short: every row still dials, and the only thing nobody can vouch for is how long it will keep
-/// dialing. That makes the caveat a parenthetical instead of a lead, and `could not check` is the
-/// exact misread killer, because the danger is an operator who believes we checked. A sandbox that
-/// refuses the flags socket is the live trigger, and it leaves one of these rows possibly holding an
-/// RFC 8981 temporary address.
-///
-/// Both lanes here expand IPv6, because that is the only kind of bind this caveat can reach. The
-/// flags are IPv6's own (only IPv6 has the temporary-address mechanism they report), so bifrost
-/// narrows the gap away on a bind that expands no v6 wildcard: a v4-only fixture would pin a render
-/// no bind can produce.
-#[test]
-fn unreadable_flags_caveat_the_instruction_without_shortening_the_list() {
-    let one = Dialable::short([at(LOOPBACK_V6_AT, Scope::ThisMachine)], Missing::Flags);
-    let section = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &one);
-    assert!(
-        section.contains("  direct   hand a peer this address (could not check for expiry):\n"),
-        "the instruction stays whole and only durability is hedged: {section}"
-    );
-    assert_eq!(
-        lane_rows(&section),
-        [format!("           {LOOPBACK_V6_AT}  (this machine)")],
-        "and the row is still handed over, marked: {section}"
-    );
-
-    let many = Dialable::short(
-        [
-            at(LOOPBACK_V6_AT, Scope::ThisMachine),
-            at(INTERNET_AT, Scope::Internet),
-        ],
-        Missing::Flags,
-    );
-    let plural = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &many);
-    assert!(
-        plural.contains("  direct   hand a peer one of these (could not check for expiry):\n"),
-        "{plural}"
-    );
-
-    for rendered in [&section, &plural] {
-        assert!(
-            !rendered.contains("only") && !rendered.contains("known"),
-            "nothing is missing from this list, so nothing claims the list is short: {rendered}"
-        );
-        assert!(
-            rendered.lines().all(|line| line.chars().count() <= 80),
-            "and it stays inside the 80-column bound: {rendered}"
-        );
-    }
-}
-
-/// ONE clause per lane, loudest first. Two conditions can hold at once, and the lane has one gloss
-/// to spend: a caveat about expiry outranks the port skew, because every row already prints its own
-/// port and the reader loses nothing by missing that clause, while a class that went missing is
-/// invisible unless the gloss says so.
-#[test]
-fn the_loudest_clause_wins_when_two_conditions_hold() {
-    // Flags unreadable AND the rendered rows disagree on the port: arm 4 over arm 5.
-    let unchecked = Dialable::short(
-        [
-            at(NETWORK_AT, Scope::Network),
-            at(LOOPBACK_AT, Scope::ThisMachine),
-            at(INTERNET_AT, Scope::Internet),
-        ],
-        Missing::Flags,
-    );
-    let caveated = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &unchecked,
-    );
-    assert!(
-        caveated.contains("  direct   hand a peer one of these (could not check for expiry):\n")
-            && !caveated.contains("its own port"),
-        "the unchecked list is the louder fact, and the ports speak for themselves: {caveated}"
-    );
-
-    // A drop emptied a class AND the rows left disagree on the port: arm 3 over arm 5.
-    let short = expiring(
-        [
-            at(LOOPBACK_AT, Scope::ThisMachine),
-            at(INTERNET_AT, Scope::Internet),
-        ],
-        [Scope::Network],
-    );
-    let losing = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &short);
-    assert!(
-        losing.contains("  direct   only expiring addresses reach this network; what is left:\n")
-            && !losing.contains("its own port"),
-        "a class that went missing outranks a skew every row answers for itself: {losing}"
-    );
-}
-
-/// A default internet bind discloses that it publishes its addresses PUBLICLY, in the same breath it
-/// discloses the mDNS announcement. Every serving iroh node publishes an address record keyed by its node
-/// id, so anyone holding the key reads those addresses from a public service without ever dialing: a
-/// larger disclosure than the LAN broadcast the `local` line has always named. A banner that told an
-/// operator about the small one and stayed quiet about the large one was the bug.
-#[test]
-fn a_default_internet_bind_discloses_its_public_address_records() {
-    let section = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(
-        section.contains(
-            "  records    n0's public discovery: your addresses, for anyone with your key\n"
-        ),
-        "the default bind names the consequence, not the record format: {section}"
-    );
-    assert!(
-        section.contains("(mDNS)"),
-        "the LAN disclosure still rides the local line: {section}"
-    );
-
-    // One line, no wider than the widest line the banner already prints: the disclosure rides the
-    // existing budget rather than setting a new one.
-    let widest_other = section
-        .lines()
-        .filter(|line| !line.contains("records"))
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
-    let records: Vec<&str> = section
-        .lines()
-        .filter(|line| line.contains("records"))
-        .collect();
-    assert_eq!(records.len(), 1, "the disclosure is ONE line: {section}");
-    assert!(
-        records[0].chars().count() <= widest_other,
-        "the disclosure stays inside the banner's width budget ({widest_other}): {section}"
-    );
-
-    // A direct-only bind publishes no record at all, so it must still say nothing: the line is a fact
-    // about this bind, never a blanket warning.
-    let direct = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(
-        !direct.contains("records"),
-        "a bind that publishes nothing discloses nothing: {direct}"
-    );
-}
-
-/// The reach section under the reach states an operator can be in. Naming either half prints BOTH lines,
-/// so the half that is still n0's is said out loud (the split is the whole point of running one of the
-/// two), and a bind on n0's two services renders the section unchanged, byte for byte, because the docs
-/// pin those lines.
-#[test]
-fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
-    let relay: RelayHome =
-        RelayHome::Custom("https://relay.example".parse().expect("a valid relay url"));
-    let resolver: Resolver = Resolver::Custom(
-        "https://dns.example/pkarr"
-            .parse()
-            .expect("a valid resolver url"),
-    );
-
-    let n0_only = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(
-        !n0_only.contains("relay"),
-        "n0's relays are the documented default and add no line: {n0_only}"
-    );
-
-    let resolver_only = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &Reach {
-            relay: RelayHome::N0,
-            resolver: Resolver::clone(&resolver),
-        },
-        &wildcard_bind(),
-    );
-    assert!(
-        resolver_only.contains(
-            "  records    https://dns.example/pkarr: your addresses, for anyone with your key\n"
-        ),
-        "{resolver_only}"
-    );
-    assert!(
-        resolver_only.contains("  relay      n0's public relays\n"),
-        "naming one half says which half is still n0's: {resolver_only}"
-    );
-
-    let relay_only = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &Reach {
-            relay: RelayHome::clone(&relay),
-            resolver: Resolver::N0,
-        },
-        &wildcard_bind(),
-    );
-    assert!(
-        relay_only.contains("  relay      https://relay.example/\n"),
-        "{relay_only}"
-    );
-    assert!(
-        relay_only.contains(
-            "  records    n0's public discovery: your addresses, for anyone with your key\n"
-        ),
-        "a relay of your own leaves finding a peer to n0, and the split is said out loud: {relay_only}"
-    );
-
-    let paired = Reach {
-        relay: relay.clone(),
-        resolver: resolver.clone(),
-    };
-    let both = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &paired,
-        &wildcard_bind(),
-    );
-    assert!(
-        both.contains(
-            "  records    https://dns.example/pkarr: your addresses, for anyone with your key\n"
-        ) && both.contains("  relay      https://relay.example/\n"),
-        "{both}"
-    );
-    assert!(
-        !both.contains("n0"),
-        "nothing is n0's when both halves are yours: {both}"
-    );
-
-    // A direct-only bind uses neither server, so naming one must not make the banner claim it. Without
-    // this a `--local --relay` banner could advertise a relay the bind will never reach through.
-    let direct = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &paired,
-        &wildcard_bind(),
-    );
-    assert!(
-        !direct.contains("records") && !direct.contains("relay"),
-        "a direct-only bind names neither server even when both are set: {direct}"
-    );
-}
-
-/// A disabled discovery says so plainly: the transport block reports mDNS unavailable in both the
-/// local and the default (internet) glosses, never the `automatic; ... mDNS` lines it prints when the
-/// layer is live. Under direct-only the down-state points at the direct lane unconditionally, because
-/// that lane always renders and always carries at least the bind's loopback address.
-#[test]
-fn a_disabled_discovery_says_so_plainly() {
-    for reach in [ReachKind::Internet, ReachKind::DirectOnly] {
-        let banner = reach_section(reach, &MdnsState::Blocked, &n0(), &loopback_bind());
-        assert!(
-            banner.contains("off; mDNS unavailable here"),
-            "a disabled discovery renders the off-state for {reach:?}: {banner}"
-        );
-        assert!(
-            !banner.contains("automatic; local mDNS")
-                && !banner.contains("automatic; your devices just need the key (mDNS)"),
-            "a disabled discovery never claims the live mDNS glosses: {banner}"
-        );
-    }
-
-    // mDNS never started, and the lane does not depend on it: this host has nothing but loopback, so
-    // that is what the lane hands over, and the down-state points at it rather than asking the operator
-    // to find a hint they were never given.
-    let blocked = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &loopback_bind(),
-    );
-    assert!(
-        blocked.contains("hand a peer the address below"),
-        "the down-state points at the lane that always renders: {blocked}"
-    );
-    assert!(
-        blocked.contains(&format!("{LOOPBACK_AT}  (this machine)")),
-        "and the lane below it carries that address, scope-marked: {blocked}"
-    );
-    assert!(
-        !blocked.contains("a peer needs a direct address hint"),
-        "the fork that asked for a hint is gone: {blocked}"
-    );
-}
-
-/// An advertisement other hosts can hear names the addresses it went out on, each on its own copy-clean
-/// line, so an operator can hand one straight to a peer that cannot hear multicast.
-#[test]
-fn an_advertised_node_names_the_addresses_it_is_heard_at() {
-    let section = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(section.contains("(mDNS), announced at:"), "{section}");
-    assert!(
-        section.lines().any(|line| line.trim() == HEARD_AT),
-        "each published address is bare on its own line: {section}"
-    );
-    assert!(
-        !section.contains("LAN"),
-        "the banner states the addresses it observed and promises no reach: {section}"
-    );
-}
-
-/// THE defect the direct lane exists to kill. swoosh has no bind flag, so every bind is wildcard, and a
-/// wildcard bind's dial hint is rewritten to loopback by the transport; reading that hint as the set to
-/// hand over filtered the ONLY lane that carries an address out of every direct-only banner, for a
-/// transport with no relay and no NAT traversal. The lane renders the bind's DIALABLE set, off-host
-/// addresses first and loopback last under its scope mark, and the `local` lane keeps its outcome
-/// sentence alone so one banner holds one address list.
-#[test]
-fn a_wildcard_direct_bind_hands_over_its_dialable_addresses() {
-    let section = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-
-    assert!(
-        section.contains("  direct   hand a peer one of these:\n"),
-        "a direct-only bind always renders the lane that hands an address over: {section}"
-    );
-    assert_eq!(
-        lane_rows(&section),
-        [
-            format!("           {NETWORK_AT}  (this network)"),
-            format!("           {LOOPBACK_AT}     (this machine)"),
-        ],
-        "off-host first at the gloss column, loopback last and scope-marked: {section}"
-    );
-
-    // One banner, one address list: the announced set is a subset of the lane above, so repeating it on
-    // the local lane would ask the operator which of two lists to take an address from.
-    assert!(
-        !section.contains("announced at:"),
-        "the local lane drops its address list under direct-only: {section}"
-    );
-    assert_eq!(
-        section.matches(NETWORK_AT).count(),
-        1,
-        "each address is named exactly once: {section}"
-    );
-
-    // The standing width: every line fits an 80-column terminal, the mark included.
-    assert!(
-        section.lines().all(|line| line.chars().count() <= 80),
-        "the lane stays inside the 80-column bound: {section}"
-    );
-
-    // A bind on a host with no address of its own hands over the one address it does have, rather than
-    // rendering a header over nothing.
-    let alone = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::LoopbackOnly,
-        &n0(),
-        &loopback_bind(),
-    );
-    assert!(
-        alone.contains("  direct   hand a peer this address:\n"),
-        "the lane renders whatever the bind has: {alone}"
-    );
-    assert!(
-        !alone.contains(NETWORK_AT),
-        "and never an address this bind does not answer on: {alone}"
-    );
-}
-
-/// A loopback-only advertisement is invisible to every other host while looking live from the inside, so
-/// the lane says whose machine it covers and names the next step, and prints no address (a loopback
-/// address names the DIALER's own machine, so it is not one to hand over).
-#[test]
-fn a_loopback_only_advertisement_says_this_host_only_and_asks_for_a_hint() {
-    let section = reach_section(
-        ReachKind::Internet,
-        &MdnsState::LoopbackOnly,
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(section.contains("mDNS on this host only"), "{section}");
-    assert!(
-        section.contains("a direct address hint"),
-        "the degraded lane names the next step: {section}"
-    );
-    assert!(
-        !section.contains("automatic; your devices just need the key (mDNS)"),
-        "a loopback-only advertisement never claims the live gloss: {section}"
-    );
-}
-
-/// A node that browses without advertising hears peers and is heard by none, which resolves exactly like a
-/// live advertisement from the inside, so the lane says both halves and carries the cause.
-#[test]
-fn a_browse_only_node_says_it_is_not_announcing_and_names_the_cause() {
-    let section = reach_section(
-        ReachKind::Internet,
-        &MdnsState::BrowseOnly(MdnsError::NoAddrs),
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(
-        section.contains("finding peers, not announcing you"),
-        "{section}"
-    );
-    assert!(
-        section.contains("no local addresses to advertise"),
-        "the lane carries the cause of the empty advertisement: {section}"
-    );
-    assert!(
-        !section.contains("automatic; your devices just need the key (mDNS)"),
-        "a node announcing nothing never claims the live gloss: {section}"
-    );
-}
-
-/// A local/direct-only node never promises the internet, and no surface says LAN until the same-host
-/// mDNS advertisement defect lands: the mDNS lane is labelled `local` and glossed `local mDNS`. The
-/// mapping takes the bind mode, so a `--local` node renders as direct-only.
-#[test]
-fn a_local_bind_is_direct_only_and_never_says_lan() {
-    assert_eq!(
-        ReachKind::of(true),
-        ReachKind::DirectOnly,
-        "a --local node has no internet channel"
-    );
-    assert_eq!(ReachKind::of(false), ReachKind::Internet);
-
-    let section = reach_section(
-        ReachKind::DirectOnly,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-    );
-    assert!(
-        section.contains("automatic; local mDNS, or direct, no NAT traversal"),
-        "a direct-only bind glosses the local mDNS lane and the no-NAT limit: {section}"
-    );
-    assert!(section.contains("local"), "{section}");
-    assert!(!section.contains("internet"), "{section}");
-    assert!(
-        !section.contains("LAN"),
-        "no surface says LAN until the same-host advertise fix lands: {section}"
-    );
 }
 
 /// Every graceful-stop reason reports a distinct, non-empty line, so a CI action log (a CI teardown)
@@ -2964,11 +2145,10 @@ fn serve_never_opens_root_key() {
 }
 
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
-/// the same key `status --key` prints, never a fresh key per run. The transport block (`--verbose`) also
-/// prints only addresses a peer could dial: never the unspecified socket, and loopback only under the mark that
-/// says it reaches a peer on this machine. Its local gloss reports the advertisement that actually
-/// happened: one of the started outcomes, or the off-state when the run warned mDNS could not start
-/// (read off the same run's stderr).
+/// the same key `status --key` prints, never a fresh key per run. Its `reach` block, with no flag, prints
+/// only addresses a peer could dial, never the unspecified socket, and the loopback one under `this
+/// computer`. Its network row reports the advertisement that actually happened, read off the same run's
+/// stderr.
 #[test]
 fn serve_local_keeps_the_persisted_key_across_two_runs() {
     let scratch = ProcessScratch::new("local-key");
@@ -3001,7 +2181,7 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
         command
             .arg("--home")
             .arg(&scratch.home_dir)
-            .args(["serve", "--local", "--verbose", "--expires", "1s"])
+            .args(["serve", "--local", "--expires", "1s"])
             .env("XDG_RUNTIME_DIR", &scratch.xdg)
             // Surface the composition seam's own warning, so the test can hold the banner to the
             // discovery state the SAME run reported instead of assuming which way the box went.
@@ -3031,50 +2211,29 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
             !stdout.contains("[::]"),
             "the banner never hands out an unspecified wildcard hint: {stdout}"
         );
-        if stderr.contains("mDNS discovery unavailable") {
+        // With no internet channel the row says so, and every class this host has shows: a wildcard
+        // bind always answers on loopback, so that row is always there.
+        assert!(
+            stdout.contains("\nreach\n  internet       off (--local)\n"),
+            "serve --local run {run} reads its internet channel off: {stdout}"
+        );
+        assert!(
+            stdout.contains("\n  this computer  127.0.0.1:"),
+            "serve --local run {run} names the address a peer on this machine dials: {stdout}"
+        );
+        // The network row reads what the same run's advertisement managed: a run that warned mDNS
+        // could not start is reached on this network by address only.
+        if stderr.contains("mDNS discovery unavailable")
+            && let Some(row) = stdout
+                .lines()
+                .find(|line| line.starts_with("  this network   "))
+                .filter(|row| !row.ends_with(" unknown"))
+        {
             assert!(
-                stdout.contains("off; mDNS unavailable here"),
-                "serve --local run {run} warned mDNS was unavailable, so the banner says so: {stdout}"
-            );
-        } else {
-            // Which outcome a real run gets depends on the host's interfaces, so the assertion is that the
-            // line is one of the three the advertisement can produce, never an assumed reach.
-            assert!(
-                stdout.contains("automatic; local mDNS, or direct, no NAT traversal")
-                    || stdout.contains("mDNS on this host only")
-                    || stdout.contains("finding peers, not announcing you"),
-                "serve --local run {run} started mDNS, so the banner renders the outcome it observed: {stdout}"
+                row.ends_with(", by address only"),
+                "serve --local run {run} warned mDNS was unavailable: {stdout}"
             );
         }
-        // The CHANNEL, not the word: a global v6 on this host renders a `(the internet)` mark on
-        // the direct lane, which says how far ONE address reaches and claims no relayed channel.
-        assert!(
-            !stdout.lines().any(|line| line.starts_with("  internet")),
-            "serve --local run {run} has no internet channel: {stdout}"
-        );
-        assert!(
-            !stdout.contains("LAN"),
-            "serve --local run {run} says no LAN until the two-host proof lands: {stdout}"
-        );
-        assert!(
-            !stdout.contains("reachable on this machine only"),
-            "the scope claim the dial hints could not back is gone for every bind: {stdout}"
-        );
-        // A direct-only bind has no relay and no NAT traversal, so the banner owes it an address: the
-        // one every wildcard bind always has is loopback, printed under the mark that says who it
-        // reaches. The mark is what the bind can back, unlike the old blanket scope claim above.
-        assert!(
-            stdout.contains("127.0.0.1"),
-            "a direct-only bind hands over the address a peer on this machine dials: {stdout}"
-        );
-        // The mark, never its padding: the column is widened by whatever addresses THIS host has,
-        // so a container with `lo`+`eth0` and a loopback-only runner each pad it differently and an
-        // assertion on the spacing is an assertion about the machine, not about the render. The
-        // alignment is pinned in the fixture tests above, where the input is known.
-        assert!(
-            stdout.contains("(this machine)"),
-            "and marks whose machine that address reaches: {stdout}"
-        );
     }
 }
 

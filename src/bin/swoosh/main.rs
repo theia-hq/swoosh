@@ -1213,9 +1213,9 @@ impl Run {
     }
 
     /// Attach the composed [`transport::Reach`] to the `serve` verb (a no-op for every other verb), so
-    /// its banner names the relay it offers and the resolver it publishes to instead of promising n0's.
+    /// its log names the relay it offers and the resolver it publishes to instead of promising n0's.
     /// Called at the iroh arm only, beside [`attach_mdns`](Self::attach_mdns): every other bind leans on
-    /// neither, and its banner says the same thing it always did.
+    /// neither.
     fn attach_bound_reach(self, bound: &transport::Reach) -> Self {
         match self {
             Self::Serve(cmd) => Self::Serve(cmd.with_bound_reach(transport::Reach::clone(bound))),
@@ -2592,6 +2592,16 @@ mod tests {
             Cli::try_parse_from(["swoosh", "contact", "rm", "alice", "--local"]).is_err(),
             "`contact rm` binds no transport"
         );
+    }
+
+    /// `serve` shows how it is reached by default, so it has no `--verbose`: the flag is refused at parse
+    /// like any unknown one, with no stub and no alias. `ping -v` is its own flag and stays.
+    #[test]
+    fn serve_has_no_verbose_flag() {
+        let error = Cli::try_parse_from(["swoosh", "serve", "--verbose"])
+            .expect_err("serve takes no verbose flag");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        Cli::try_parse_from(["swoosh", "ping", "alice", "-v"]).expect("ping -v parses");
     }
 
     /// The bind's one mechanism is constructor selection: `--local` picks the persisted-minimal iroh
