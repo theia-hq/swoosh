@@ -60,7 +60,7 @@ use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Router};
 
 use crate::commands::service::Running;
-use crate::commands::service_rows::{self, Row};
+use crate::screen::{Block, Cell, Screen};
 
 /// Be a node: publish these services behind your gate, then stay reachable.
 #[derive(Debug, Args)]
@@ -695,7 +695,7 @@ impl ServeCmd {
         enabled.serving(&started);
         let off = enabled.off();
         for name in names.iter().filter(|name| off.contains(*name)) {
-            eprint!("{}", off_lines(name));
+            off_lines(name).write(&mut std::io::stderr())?;
         }
 
         // ONE expansion of this bind, read by both the control socket's status address and the transport
@@ -755,21 +755,21 @@ impl ServeCmd {
                 std::io::stderr().is_terminal(),
                 Keeper::here,
             );
-            print!(
-                "{}",
-                render_banner(
-                    if self.reach.local {
-                        "swoosh is serving, on this network only"
-                    } else {
-                        "swoosh is serving"
-                    },
-                    &addr.node.to_string(),
-                    &serving_block(&started, enabled.saved_services().as_ref(), &manifest)?,
-                    transport.as_deref(),
-                    keeper,
-                    &stop_line,
-                )
-            );
+            let key = addr.node.to_string();
+            let serving = Serving::of(&started, enabled.saved_services().as_ref(), &manifest);
+            banner(
+                if self.reach.local {
+                    "swoosh is serving, on this network only"
+                } else {
+                    "swoosh is serving"
+                },
+                &key,
+                &serving,
+                transport.as_deref(),
+                keeper,
+                &stop_line,
+            )
+            .write(&mut std::io::stdout())?;
         }
 
         // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
@@ -911,101 +911,95 @@ fn service_pairs(entries: &[String]) -> impl Iterator<Item = (&str, &str)> {
     entries.iter().filter_map(|entry| entry.split_once('='))
 }
 
-fn serving_block(
-    started: &Started,
-    saved: Option<&Started>,
-    manifest: &[ManifestEntry],
-) -> eyre::Result<String> {
-    use std::collections::BTreeMap;
-    use std::io::Write as _;
-
-    let entries = started.entries();
-    // A home that never saved a list holds no saved services, so its defaults are never shown as saved.
-    let saved_entries = saved
-        .filter(|saved| !matches!(saved, Started::Default))
-        .map(Started::entries);
-    let bound: BTreeMap<_, _> = service_pairs(&entries).collect();
-    let saved_targets: Option<BTreeMap<_, _>> = saved_entries
-        .as_ref()
-        .map(|entries| service_pairs(entries).collect());
-    let selection = match started {
-        Started::Named(_) => "this run only (not saved)",
-        Started::Adjusted(_) => "saved services, adjusted for this run",
-        Started::Resumed(_) => "saved services",
-        Started::Default => "default services",
-    };
-    let mut out = Vec::new();
-    let mut rows = Vec::new();
-    for (name, target) in service_pairs(&entries) {
-        let open = manifest
-            .iter()
-            .any(|entry| entry.name == name && entry.posture == Posture::Open);
-        rows.push(Row {
-            name,
-            audience: if open { "anyone" } else { "your devices" },
-            target,
-        });
-        if let Some(target) = saved_targets
-            .as_ref()
-            .and_then(|saved| saved.get(name))
-            .filter(|saved| **saved != target)
-        {
-            rows.push(Row {
-                name,
-                audience: "saved for bare start",
-                target,
-            });
-        }
-    }
-    if let Some(saved_entries) = &saved_entries {
-        for (name, target) in
-            service_pairs(saved_entries).filter(|(name, _)| !bound.contains_key(name))
-        {
-            rows.push(Row {
-                name,
-                audience: "saved for bare start",
-                target,
-            });
-        }
-    }
-    let differs = saved_targets.as_ref().is_some_and(|saved| *saved != bound);
-    let names = service_rows::label_width(&rows)
-        .max("selection".len())
-        .max(if differs { "saved services".len() } else { 0 });
-    writeln!(out, "serving")?;
-    serving_fact(&mut out, "selection", selection, names)?;
-    service_rows::render_aligned(&rows, names, &mut out)?;
-    if differs {
-        serving_fact(
-            &mut out,
-            "saved services",
-            "apply to the next bare or --with/--without serve",
-            names,
-        )?;
-    }
-    if bound.is_empty() {
-        writeln!(
-            out,
-            "Serving nothing.\nTo save a service for a bare start:\n  swoosh service add <service>"
-        )?;
-    }
-    Ok(String::from_utf8(out)?)
+/// The services this run binds beside the saved list, as the banner's `serving` block shows them.
+struct Serving<'m> {
+    selection: &'static str,
+    /// This run's services, `name=target`.
+    bound: Vec<String>,
+    /// The saved list, when this home saved one.
+    saved: Option<Vec<String>>,
+    manifest: &'m [ManifestEntry],
 }
 
-/// Metadata shares the service label column, falling back to the same stacked fixed-word layout.
-fn serving_fact(
-    out: &mut impl std::io::Write,
-    label: &str,
-    value: &'static str,
-    names: usize,
-) -> std::io::Result<()> {
-    if 4 + names + value.len() <= 80 {
-        writeln!(out, "  {label:names$}  {value}")
-    } else {
-        writeln!(out, "  {label}")?;
-        let mut line = service_rows::StateLine { out, column: 0 };
-        line.words(value)?;
-        line.finish()
+impl<'m> Serving<'m> {
+    fn of(started: &Started, saved: Option<&Started>, manifest: &'m [ManifestEntry]) -> Self {
+        let selection = match started {
+            Started::Named(_) => "this run only (not saved)",
+            Started::Adjusted(_) => "saved services, adjusted for this run",
+            Started::Resumed(_) => "saved services",
+            Started::Default => "default services",
+        };
+        Self {
+            selection,
+            bound: started.entries(),
+            // A home that never saved a list holds no saved services, so its defaults are never shown as
+            // saved.
+            saved: saved
+                .filter(|saved| !matches!(saved, Started::Default))
+                .map(Started::entries),
+            manifest,
+        }
+    }
+
+    /// Each bound service with its audience, a saved target that differs right under it, then the saved
+    /// services this run does not bind.
+    fn block(&self) -> Block<'_> {
+        use std::collections::BTreeMap;
+
+        let bound: BTreeMap<_, _> = service_pairs(&self.bound).collect();
+        let saved: Option<BTreeMap<_, _>> = self
+            .saved
+            .as_ref()
+            .map(|entries| service_pairs(entries).collect());
+        let saved_for_bare = |name, target| {
+            [
+                Cell::Token(name),
+                Cell::Word("saved for bare start"),
+                Cell::Token(target),
+            ]
+        };
+        let mut block =
+            Block::titled("serving").row([Cell::Word("selection"), Cell::Word(self.selection)]);
+        for (name, target) in service_pairs(&self.bound) {
+            let open = self
+                .manifest
+                .iter()
+                .any(|entry| entry.name == name && entry.posture == Posture::Open);
+            let audience = if open {
+                Cell::Risk("anyone")
+            } else {
+                Cell::Word("your devices")
+            };
+            block = block.row([Cell::Token(name), audience, Cell::Token(target)]);
+            if let Some(saved) = saved
+                .as_ref()
+                .and_then(|saved| saved.get(name))
+                .filter(|saved| **saved != target)
+            {
+                block = block.row(saved_for_bare(name, saved));
+            }
+        }
+        for (name, target) in self
+            .saved
+            .iter()
+            .flat_map(|entries| service_pairs(entries))
+            .filter(|(name, _)| !bound.contains_key(name))
+        {
+            block = block.row(saved_for_bare(name, target));
+        }
+        if saved.as_ref().is_some_and(|saved| *saved != bound) {
+            block = block.row([
+                Cell::Word("saved services"),
+                Cell::Word("apply to the next bare or --with/--without serve"),
+            ]);
+        }
+        if bound.is_empty() {
+            block = block
+                .text("Serving nothing.".to_owned())
+                .text("To save a service for a bare start:".to_owned())
+                .command("swoosh service add <service>".to_owned());
+        }
+        block
     }
 }
 
@@ -1031,31 +1025,43 @@ fn waiting_warnings(waiting: &swoosh::serve_toml::Waiting) -> String {
 }
 
 /// Keep off notices, including under quiet: temporary selection does not imply enabled service.
-fn off_lines(name: &str) -> String {
-    format!("{name} is off.\nTo turn it on:\n  swoosh service on {name}\n")
+fn off_lines(name: &str) -> Screen<'static> {
+    Screen::default().block(
+        Block::default()
+            .text(format!("{name} is off."))
+            .text("To turn it on:".to_owned())
+            .command(format!("swoosh service on {name}")),
+    )
 }
 
-fn render_banner(
-    title: &str,
-    key: &str,
-    serving: &str,
+/// The banner: its title, this machine's key, what it serves, the reach section under `--verbose`, then
+/// how to keep it serving and how to stop it.
+fn banner<'a>(
+    title: &'static str,
+    key: &'a str,
+    serving: &'a Serving<'_>,
     transport: Option<&str>,
     keeper: Option<&str>,
     stop_line: &str,
-) -> String {
-    let mut out = format!("{title}\n\n  key            {key}\n\n{serving}");
-    if let Some(transport) = transport {
-        out.push('\n');
-        out.push_str(transport);
-        out.push('\n');
-    }
-    if let Some(keeper) = keeper {
-        out.push_str(keeper);
-        out.push('\n');
-    }
-    out.push_str(stop_line);
-    out.push('\n');
-    out
+) -> Screen<'a> {
+    let reach = transport
+        .into_iter()
+        .flat_map(str::lines)
+        .fold(Block::default(), |block, line| block.text(line.to_owned()));
+    let stop = keeper
+        .into_iter()
+        .chain([stop_line])
+        .fold(Block::default(), |block, line| block.text(line.to_owned()));
+    Screen::default()
+        .block(Block::titled(title))
+        .block(
+            Block::default()
+                .column(17)
+                .row([Cell::Word("key"), Cell::Token(key)]),
+        )
+        .block(serving.block())
+        .block(reach)
+        .block(stop)
 }
 
 /// Whether a service manager already runs this `serve`: systemd sets `INVOCATION_ID` or `JOURNAL_STREAM`,

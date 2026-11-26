@@ -40,11 +40,6 @@ use crate::commands::{
 
 mod commands;
 mod decision;
-// Its callers move onto it in the next change, which deletes this.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the screen's callers move onto it next")
-)]
 mod screen;
 
 /// `--home`'s help line, naming the default home of the platform this binary was built for
@@ -383,7 +378,7 @@ async fn main() -> std::process::ExitCode {
 /// A root act's error after it landed: what [`Landed`](commands::through_serve::Landed) on its own lines,
 /// then the error, on `err`, and [`Reported`](commands::through_serve::Reported) for the exit 1. Any other
 /// error is returned as it is, for the composition root to print.
-fn landed_then(report: eyre::Report, err: &mut impl std::io::Write) -> eyre::Report {
+fn landed_then(report: eyre::Report, err: &mut impl screen::Paint) -> eyre::Report {
     use commands::through_serve::{ActLanded, Reported};
 
     match report.downcast::<ActLanded>() {
@@ -396,11 +391,13 @@ fn landed_then(report: eyre::Report, err: &mut impl std::io::Write) -> eyre::Rep
     }
 }
 
-/// Print `report` as a run's error line, its message chain on `err`.
-fn print_error(report: &eyre::Report, err: &mut impl std::io::Write) {
+/// Print `report` as a run's error line, its message chain on `err`, `error:` styled where `err` shows it.
+fn print_error(report: &eyre::Report, err: &mut impl screen::Paint) {
     // Never `eprintln!`, which panics when the write fails: stderr can be a socket whose writing
     // `forward -` has already ended with its stdout, and the run must still exit 1.
-    let _ = writeln!(err, "error: {report:#}");
+    // One write, so a line logged beside it cannot land inside it.
+    let error = screen::Style::ERROR.paint("error:", &*err);
+    let _ = err.write_all(format!("{error} {report:#}\n").as_bytes());
 }
 
 /// Parse `argv`. A `forward` missing only its local end is refused with [`forward::NO_LOCAL_END`], which says
@@ -1373,7 +1370,7 @@ impl Dialing {
         sent: &core::cell::Cell<bool>,
         stdio: impl FnOnce() -> eyre::Result<(commands::connect::Stdin, O)>,
         out: &mut impl std::io::Write,
-        err: &mut impl std::io::Write,
+        err: &mut impl screen::Paint,
     ) -> eyre::Result<()>
     where
         S: swoosh::streams::Observing + Copy + 's,
@@ -1611,7 +1608,7 @@ async fn dial_through_serve<O: commands::connect::Output>(
     asking: learning::Asking,
     stdio: impl FnOnce() -> eyre::Result<(commands::connect::Stdin, O)>,
     out: &mut impl std::io::Write,
-    err: &mut impl std::io::Write,
+    err: &mut impl screen::Paint,
 ) -> eyre::Result<()> {
     use commands::route::Route;
     use commands::through_serve::{Dial, Moot, Skew, Unresponsive};

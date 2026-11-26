@@ -22,6 +22,9 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **Colour at a terminal.** `error:` and `warning:` are coloured, and `swoosh serve` prints its title and `serving`
+  in bold and `anyone` in colour. `NO_COLOR` or `CLICOLOR=0` gives plain text, as does a pipe or file;
+  `CLICOLOR_FORCE` colours a pipe too.
 - **`stop me/<name>` runs through `swoosh serve` too.** It warns when this machine's standing is about to
   expire, and ends on the same lines as the other commands that dial: `swoosh serve` stopping, a `swoosh serve`
   that does not answer, a dial that times out. A dial that times out now reads `could not reach me/nas: it is

@@ -32,6 +32,7 @@ use swoosh::transport::ReachArgs;
 use crate::commands::connect::{ConnectionLost, Machine};
 use crate::commands::machine;
 use crate::commands::route::peer_error;
+use crate::screen::{Paint, Style};
 
 /// A verb's dial, as the resident needs it.
 pub struct Dial<'a> {
@@ -399,7 +400,7 @@ const FAILED_FINISH_GRACE: core::time::Duration = core::time::Duration::from_sec
 pub async fn failed(
     report: eyre::Report,
     observer: impl Follow,
-    err: &mut impl std::io::Write,
+    err: &mut impl Paint,
 ) -> eyre::Report {
     crate::print_error(&report, err);
     match observer.finish_within(FAILED_FINISH_GRACE).await {
@@ -415,7 +416,7 @@ pub async fn failed(
 pub async fn ended(
     ended: eyre::Result<()>,
     observer: impl Follow,
-    err: &mut impl std::io::Write,
+    err: &mut impl Paint,
 ) -> eyre::Result<()> {
     match ended {
         Ok(()) => {
@@ -443,10 +444,7 @@ pub fn log_path(observed: Observed) {
 /// # Errors
 ///
 /// The warning could not be written.
-pub fn final_path(
-    observed: Observed,
-    err: &mut impl std::io::Write,
-) -> std::io::Result<Option<ConnInfo>> {
+pub fn final_path(observed: Observed, err: &mut impl Paint) -> std::io::Result<Option<ConnInfo>> {
     if let Some(earlier) = &observed.earlier {
         tracing::debug!(%earlier, "a sample of the run's path failed");
     }
@@ -454,7 +452,9 @@ pub fn final_path(
         Ok(info) => Ok(Some(info)),
         Err(error) => {
             tracing::debug!(%error, "the run's final path could not be read");
-            writeln!(err, "warning: could not read the path of this run")?;
+            // One write, so a line logged beside it cannot land inside it.
+            let warning = Style::WARNING.paint("warning:", &*err);
+            err.write_all(format!("{warning} could not read the path of this run\n").as_bytes())?;
             Ok(None)
         }
     }

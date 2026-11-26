@@ -8,6 +8,8 @@
 //! The holder sends one line, reads it back, then sends nothing. The link it presents expires and the host
 //! cuts the session within a sweep. The bridge must exit then, not on the holder's next keystroke; the port
 //! stays up, and its next local connection, refused, ends it.
+//!
+//! The same echo shows that `forward -` writes a service's bytes to stdout as they are, escapes included.
 
 use core::time::Duration;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -350,6 +352,23 @@ fn forward_exits_when_the_host_cuts_the_session_while_the_holder_writes_nothing(
     );
 
     ends_at_the_cut(forward, stderr, lapsing.lapses);
+    drop(stdin);
+}
+
+/// `forward -` hands a service's bytes to stdout as they are: an escape sequence in the data is data, never
+/// stripped as a screen line's style is where it does not show.
+#[test]
+fn forward_to_stdout_passes_escape_bytes_unchanged() {
+    let scratch = Scratch::new("raw");
+    let lapsing = lapsing(&scratch);
+    let (mut forward, _stderr) = forward(&scratch, &lapsing, "-");
+
+    let data = "\u{1b}[31mred\u{1b}[0m \u{1b}[2K\u{7}\r\n";
+    let mut stdin = forward.0.stdin.take().expect("piped stdin");
+    stdin.write_all(data.as_bytes()).expect("write to forward");
+    stdin.flush().expect("flush to forward");
+    let stdout: ChildStdout = forward.0.stdout.take().expect("piped stdout");
+    assert_eq!(line_within(stdout, EXPIRES), data);
     drop(stdin);
 }
 

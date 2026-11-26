@@ -261,6 +261,9 @@ impl PathSource for Events {
     }
 }
 
+/// A test writer, so plain: it never shows style.
+impl crate::screen::Paint for Events {}
+
 impl std::io::Write for Events {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut pending = self.pending.borrow_mut();
@@ -282,6 +285,9 @@ impl std::io::Write for Events {
 
 /// A stdout whose every write fails, as a closed pipe's does.
 pub(crate) struct Unwritable;
+
+/// A test writer, so plain: it never shows style.
+impl crate::screen::Paint for Unwritable {}
 
 impl std::io::Write for Unwritable {
     fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {

@@ -36,6 +36,7 @@ use swoosh::transport::{self, ReachArgs};
 
 use crate::commands::route::Route;
 use crate::commands::{machine, through_serve};
+use crate::screen::Paint;
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
@@ -106,7 +107,7 @@ impl PingCmd {
         machine: &Machine,
         admitted: Admitted<'s>,
         out: &mut impl Write,
-        err: &mut impl Write,
+        err: &mut impl Paint,
     ) -> eyre::Result<()> {
         // Main: the held session the rest of this home's traffic rides to the machine, so the round trip
         // and the path are the ones that traffic gets.
@@ -183,7 +184,7 @@ impl PingCmd {
         machine: &Machine,
         stopped: impl AsyncFnOnce() -> Option<eyre::Report>,
         out: &mut impl Write,
-        err: &mut impl Write,
+        err: &mut impl Paint,
     ) -> eyre::Result<()> {
         let label = machine.label();
         let report = if self.verbose {

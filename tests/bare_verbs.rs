@@ -143,6 +143,9 @@ fn bare_stop_stops_the_resident() {
         .args(["serve", "--local"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -182,6 +185,11 @@ fn bare_stop_stops_the_resident() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(socket.exists(), "the resident binds its control socket");
+    let banner = stdout.lock().expect("the capture lock").clone();
+    assert!(
+        !banner.contains('\u{1b}'),
+        "a piped banner is plain: {banner:?}"
+    );
 
     // Bare `status` reads what the running resident serves over the same local socket, and dials nobody.
     let status = swoosh(&scratch, &["status"]);

@@ -33,8 +33,8 @@ use tightbeam::tunnel::{
 };
 
 use super::{
-    Keeper, ReachKind, expire, keeper_line, reach_section, render_banner, serving_block,
-    supervised, waiting_warnings,
+    Keeper, ReachKind, Serving, banner, expire, keeper_line, off_lines, reach_section, supervised,
+    waiting_warnings,
 };
 
 #[path = "serve_relative_tests.rs"]
@@ -237,25 +237,47 @@ fn update_route(router: Router) -> Router {
         .expect("the update route binds")
 }
 
-#[test]
-fn the_banner_frames_selection_actual_targets_and_how_to_stop() {
-    let serving = serving_block(
-        &swoosh::serve::Started::Default,
-        Some(&swoosh::serve::Started::Default),
-        &default_manifest(),
-    )
-    .unwrap();
-    let banner = render_banner(
+/// The `serving` block as a pipe reads it.
+fn serving_block(
+    started: &swoosh::serve::Started,
+    saved: Option<&swoosh::serve::Started>,
+    manifest: &[ManifestEntry],
+) -> eyre::Result<String> {
+    let mut out = Vec::new();
+    crate::screen::Screen::default()
+        .block(Serving::of(started, saved, manifest).block())
+        .write(&mut out)?;
+    Ok(String::from_utf8(out)?)
+}
+
+/// The banner for key `ed01exampleid`, stopped by ctrl-c, as a pipe reads it.
+fn render_banner(serving: &Serving<'_>, transport: Option<&str>, keeper: Option<&str>) -> String {
+    let mut out = Vec::new();
+    banner(
         "swoosh is serving",
         "ed01exampleid",
-        &serving,
-        None,
-        None,
+        serving,
+        transport,
+        keeper,
         "ctrl-c to stop",
+    )
+    .write(&mut out)
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn the_banner_frames_selection_actual_targets_and_how_to_stop() {
+    let manifest = default_manifest();
+    let serving = Serving::of(
+        &swoosh::serve::Started::Default,
+        Some(&swoosh::serve::Started::Default),
+        &manifest,
     );
+    // The stop line is a block of its own, a blank line under `serving`.
     assert_eq!(
-        banner,
-        "swoosh is serving\n\n  key            ed01exampleid\n\nserving\n  selection  default services\n  ping       your devices  ping:\n  speed      your devices  speed:\nctrl-c to stop\n"
+        render_banner(&serving, None, None),
+        "swoosh is serving\n\n  key            ed01exampleid\n\nserving\n  selection  default services\n  ping       your devices  ping:\n  speed      your devices  speed:\n\nctrl-c to stop\n"
     );
     let transport = reach_section(
         ReachKind::Internet,
@@ -263,14 +285,7 @@ fn the_banner_frames_selection_actual_targets_and_how_to_stop() {
         &n0(),
         &wildcard_bind(),
     );
-    let verbose = render_banner(
-        "swoosh is serving",
-        "ed01exampleid",
-        &serving,
-        Some(&transport),
-        None,
-        "ctrl-c to stop",
-    );
+    let verbose = render_banner(&serving, Some(&transport), None);
     assert!(verbose.contains("how peers reach you"));
     assert!(verbose.ends_with("ctrl-c to stop\n"));
     assert!(!verbose.contains("control."));
@@ -347,6 +362,25 @@ fn serving_rows_keep_bound_only_and_adjacent_saved_alternatives() {
         .collect();
     assert_eq!(columns.len(), 6);
     assert!(columns.iter().all(|column| *column == 18), "{out}");
+    // At a terminal `anyone` is styled as a risk, and nothing else in the block but its title.
+    let mut terminal = anstream::AutoStream::always(Vec::new());
+    crate::screen::Screen::default()
+        .block(Serving::of(&started, Some(&saved), &manifest).block())
+        .write(&mut terminal)
+        .unwrap();
+    let styled = String::from_utf8(terminal.into_inner()).unwrap();
+    let risk = clap::builder::styling::Style::new()
+        .bold()
+        .fg_color(Some(clap::builder::styling::AnsiColor::Yellow.into()));
+    let title = clap::builder::styling::Style::new().bold();
+    assert!(
+        styled.contains(&format!("{risk}anyone{risk:#}")),
+        "{styled}"
+    );
+    let unstyled = styled
+        .replacen(&format!("{title}serving{title:#}"), "serving", 1)
+        .replacen(&format!("{risk}anyone{risk:#}"), "anyone", 1);
+    assert_eq!(unstyled, out, "{styled}");
     let unavailable = serving_block(&started, None, &manifest).unwrap();
     assert!(!unavailable.contains("saved for bare start"));
     assert!(!unavailable.contains("saved services  apply"));
@@ -379,6 +413,40 @@ fn serving_rows_escape_complete_targets_and_stack_without_splitting() {
     assert!(empty.contains(
         "Serving nothing.\nTo save a service for a bare start:\n  swoosh service add <service>\n"
     ));
+}
+
+/// A service saved but off says so and names the command that turns it on, each on its own line.
+#[test]
+fn an_off_service_names_the_command_that_turns_it_on() {
+    let mut out = Vec::new();
+    off_lines("web").write(&mut out).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "web is off.\nTo turn it on:\n  swoosh service on web\n"
+    );
+}
+
+/// A banner that cannot be written, as to a pipe its reader closed, is an error for `serve` to exit 1 on,
+/// never a panic.
+#[test]
+fn a_banner_on_a_closed_pipe_is_an_error() {
+    use crate::commands::through_serve::tests::Unwritable;
+
+    let manifest = default_manifest();
+    let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
+    let written = banner(
+        "swoosh is serving",
+        "ed01exampleid",
+        &serving,
+        None,
+        None,
+        "ctrl-c to stop",
+    )
+    .write(&mut Unwritable);
+    assert_eq!(
+        written.map_err(|error| error.kind()).unwrap_err(),
+        io::ErrorKind::BrokenPipe
+    );
 }
 
 /// The line that says how to keep this machine serving prints only where no service manager runs it and
@@ -424,14 +492,9 @@ fn banner_names_the_service_manager_line_when_not_supervised() {
         "no terminal: no line"
     );
     // The line rides the banner before how to stop.
-    let banner = render_banner(
-        "swoosh is serving",
-        "ed01exampleid",
-        "serving\n  selection  default services\n",
-        None,
-        Some(systemd),
-        "ctrl-c to stop",
-    );
+    let manifest = default_manifest();
+    let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
+    let banner = render_banner(&serving, None, Some(systemd));
     assert!(
         banner.ends_with(&format!("{systemd}\nctrl-c to stop\n")),
         "{banner}"
