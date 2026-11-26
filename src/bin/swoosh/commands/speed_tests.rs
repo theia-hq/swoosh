@@ -124,7 +124,7 @@ async fn a_refused_speed_to_your_device_names_the_cause() {
         .into_iter()
         .map(|request| request.service)
         .collect();
-    assert_eq!(asked, ["speed", "control.services"]);
+    assert_eq!(asked, ["speed", "control.serve"]);
     assert_eq!(peer.dials(), 2, "its own connection, then the follow-up's");
     // The follow-up's session was held on Main: a Main open after the run rides it.
     let own = swoosh::streams::OwnBind::new(

@@ -49,9 +49,9 @@ use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, InstanceLock, ProxyScope, RecvService,
-    Resident, ServiceList, SingleError, Started, StopKind, StopSource, Stopped, acquire_single,
-    bind_entry, bind_recv, classify_stop, control, extract_recv_services, refuse_recv_into_home,
+    Activity, BoundTargets, InstanceLock, ProxyScope, RecvService, Resident, SingleError, Started,
+    StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv, classify_stop, control,
+    extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -594,9 +594,9 @@ impl ServeCmd {
         // The served names in the order the person gave them, for the banner and the per-service lines:
         // read from every entry, before the proxy and receive services were pulled out.
         let names = started.names();
-        // Every node answers its own `control.serve` and member-only `control.services`, always, whatever
-        // else it serves: the node-lifecycle control surface is part of being a node, not a service the
-        // operator opts into. Both are MEMBER-only (`.member_service` below): the gate admits a family
+        // Every node answers its own `control.serve`, always, whatever else it serves: the node-lifecycle
+        // control surface is part of being a node, not a service the operator opts into. It is MEMBER-only
+        // (`.member_service` in `control::bind_serve`): the gate admits a family
         // badge or a service slip, and the route's access floor then refuses anything that is not a
         // whole-node member BEFORE any `Response::Ok`, so a delegate holding a `control.serve` slip cannot
         // stop the node.
@@ -650,19 +650,14 @@ impl ServeCmd {
             .public(public)
             .public_unsafe(self.public_unsafe.clone());
         // `control.serve` cuts the served catalog ONCE, here, after every other route and both overlays,
-        // for its own list, the `control.services` read handler AND the control socket read to serve. It
-        // lists itself. A stop on it waits for the first sync round, and is refused to a key the gate's
-        // own revocations now hold, so a device revoked by that round cannot stop this machine on a stream
-        // it opened before the round ended.
+        // for its own list AND the control socket read to serve. It lists itself. A stop on it waits for
+        // the first sync round, and is refused to a key the gate's own revocations now hold, so a device
+        // revoked by that round cannot stop this machine on a stream it opened before the round ended.
         let (router, catalog, first_round) = control::bind_serve(
             router,
             cancel.clone(),
             std::sync::Arc::clone(&stop_source),
             &cut,
-        )?;
-        let router = router.member_service(
-            CONTROL_SERVICES_SERVICE.parse()?,
-            ServiceList::new(catalog.clone()),
         )?;
         // The live oracle as it is: a remote stop's hold is `control.serve`'s own, read per request.
         let exposer = router

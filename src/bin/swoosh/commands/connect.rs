@@ -1599,7 +1599,7 @@ pub(crate) mod tests {
             .into_iter()
             .map(|request| request.service)
             .collect();
-        assert_eq!(asked, ["ssh", "control.services"]);
+        assert_eq!(asked, ["ssh", "control.serve"]);
         assert_eq!(
             peer.dials(),
             2,

@@ -54,7 +54,7 @@ pub struct Resident {
     node_id: NodeId,
     /// The bound address, when the transport hands one out.
     addr: Option<SocketAddr>,
-    /// The served catalog snapshot (the same snapshot `run_serve` cuts for `control.services`).
+    /// The served catalog snapshot (the same snapshot `run_serve` cuts for `control.serve`'s list).
     catalog: ServiceCatalog,
     /// The services off, read live: the same instance the gate asks per stream, there through the first
     /// round's hold.

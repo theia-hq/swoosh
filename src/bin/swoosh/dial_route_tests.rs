@@ -1070,8 +1070,9 @@ fn a_stalled_serve_ends_a_send_of_many_files_once() {
     });
 }
 
-/// A device's list of what it serves, naming `entries`, as `control.services` answers it.
-pub(crate) fn catalog_of(entries: &[&str]) -> Vec<u8> {
+/// A device's answer to a list request on `control.serve`: `Done`, then its list of what it serves,
+/// naming `entries`.
+pub(crate) fn list_answer(entries: &[&str]) -> Vec<u8> {
     let gate = nauthy::Gate::rooted(
         TestRoot::seeded(7).verify_key(),
         nauthy::Denylist::load(std::env::temp_dir().join("swoosh-dialroute-no-revocations"))
@@ -1081,17 +1082,19 @@ pub(crate) fn catalog_of(entries: &[&str]) -> Vec<u8> {
     for entry in entries {
         router = swoosh::serve::bind_entry(router, entry, [0u8; 32], &[]).unwrap();
     }
-    router
-        .catalog(Some(
-            swoosh::serve::CONTROL_SERVICES_SERVICE.parse().unwrap(),
-        ))
-        .encode()
-        .unwrap()
+    let mut answer = vec![swoosh::serve::control::Answer::Done.encode()];
+    answer.extend(
+        router
+            .catalog(Some(swoosh::serve::CONTROL_SERVE_SERVICE.parse().unwrap()))
+            .encode()
+            .unwrap(),
+    );
+    answer
 }
 
 /// Through `serve`, `ping` and `speed` refused `NotAdmitted` by one of your devices ask it why: one
-/// `control.services` Open on Main, apart from the verb's own (Isolated for `speed`), and the refusal
-/// carries the diagnosis. To a contact's machine there is no follow-up.
+/// `control.serve` Open on Main carrying a list request and its End, apart from the verb's own (Isolated
+/// for `speed`), and the refusal carries the diagnosis. To a contact's machine there is no follow-up.
 #[test]
 fn a_refused_ping_through_serve_names_the_cause() {
     on_a_big_stack(async || {
@@ -1114,7 +1117,7 @@ fn a_refused_ping_through_serve_names_the_cause() {
             let resident = routed(
                 &mut served,
                 |service| match service {
-                    "control.services" => Reply::Exchange(catalog_of(&["ping"])),
+                    "control.serve" => Reply::Exchange(list_answer(&["ping"])),
                     _ => Reply::Refuse(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
                 },
                 &rig,
@@ -1130,8 +1133,19 @@ fn a_refused_ping_through_serve_names_the_cause() {
                 .collect();
             assert_eq!(
                 heard,
-                [(argv[0], lane), ("control.services", OpenLane::Main)],
+                [(argv[0], lane), ("control.serve", OpenLane::Main)],
                 "{argv:?}"
+            );
+            let [why] = opens_of(&events, "control.serve")[..] else {
+                panic!("one follow-up: {argv:?}");
+            };
+            let mut upload = crate::commands::through_serve::tests::data(&[
+                swoosh::serve::control::Request::List.encode(),
+            ]);
+            upload.extend_from_slice(&crate::commands::through_serve::tests::END);
+            assert_eq!(
+                why.upload, upload,
+                "the follow-up asks for the list: {argv:?}"
             );
         }
 
@@ -1150,7 +1164,7 @@ fn a_refused_ping_through_serve_names_the_cause() {
         assert!(
             !opens(&events)
                 .iter()
-                .any(|open| open.service == "control.services"),
+                .any(|open| open.service == "control.serve"),
             "no follow-up to a contact"
         );
     });

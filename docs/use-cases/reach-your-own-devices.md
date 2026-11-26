@@ -58,9 +58,8 @@ how peers reach you
 
 serving
   family-gated   your devices + peers you've granted
-    ping        round-trip probe
-    speed       throughput test
-    control.*   node control (never public)
+    ping    round-trip probe
+    speed   throughput test
 
 ctrl-c to stop
 ```

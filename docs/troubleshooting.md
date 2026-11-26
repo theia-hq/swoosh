@@ -7,13 +7,15 @@ and says why, rather than reporting a healthy-looking result.
 
 ```
 desk: reached, but the probe failed (read frame: stream: peer went away)
+nas: reached, but the probe failed (it sent an unknown reply to the list request)
+nas: reached, but the probe failed (it ended the list request without an answer)
 nas: reached, but the probe went unanswered (1 sent, 0 back)
 Error: desk: reached, but the probe failed
 ```
 
-The dial landed and the exchange did not finish. Two shapes: the first names what broke, the second means
-the probe went out and nothing came back. Either way the node is up enough to answer a dial and not up
-enough to answer a service, which is usually a service task that died while the node kept running.
+The dial landed and the exchange did not finish. Two shapes: a `failed` line names what broke, and an `unanswered` line
+means the probe went out and nothing came back. Either way the node is up enough to answer a dial and not up enough to
+answer a service, which is usually a service task that died while the node kept running.
 
 These are not healthy lines and they do not hold the exit code green. Neither reports a round-trip time,
 because nothing was measured; the path estimate the transport keeps is not a measurement of your probe.

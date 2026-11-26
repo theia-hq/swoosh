@@ -22,8 +22,6 @@ how peers reach you
              192.168.x.x:58131
 
 serving
-  family-gated   your devices + peers you've granted
-    control.*   node control (never public)
   public !   anyone, unauthenticated
     ping    round-trip probe
     speed   throughput test
@@ -47,7 +45,7 @@ ed01hcq6balrlxwa
 
 - **You must name the services.** There is no `all` or `*`.
 - **Not every service opens.** A keyless shell ([`sshd:`](../reference/services.md#sshd)) has no
-  public form. `control.serve` never opens: only your own devices can stop the machine.
+  public form. `control.serve` never opens: only your own devices can stop the machine or list what it serves.
 - **Public streams share a node-wide pool of four.** Four connected public streams fill it, on any mix
   of public services; each holds its slot until its stream ends, even if idle. A fifth public dial is
   refused until a slot frees, and gated services are outside the pool. A raw stream opened with

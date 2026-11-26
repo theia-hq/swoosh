@@ -388,7 +388,7 @@ mod tests {
             .into_iter()
             .map(|request| request.service)
             .collect();
-        assert_eq!(asked, ["ping", "control.services"]);
+        assert_eq!(asked, ["ping", "control.serve"]);
     }
 
     /// A machine that echoes every probe at once, on the one stream it hands out, or fails that stream

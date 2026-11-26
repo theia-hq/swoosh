@@ -16,10 +16,15 @@ use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{Cap, Revocation};
 use swoosh::home::{Home, HomeWrite};
-use swoosh::serve::{Resident, ServiceList};
+use swoosh::serve::Resident;
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::testkit::TestRoot;
-use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router, ServiceCatalog};
+use tightbeam::open_policy::Never;
+use tightbeam::tunnel::{
+    self, BoxRead, BoxWrite, CancellationToken, Connector, Exposer, Handler, Router, ServeError,
+    Served, ServiceCatalog,
+};
+use tokio::io::AsyncWriteExt as _;
 
 /// The byte the signet's fixed key is seeded with; its ed25519 public half is the signet the family gate
 /// trusts.
@@ -50,18 +55,33 @@ impl Drop for Scratch {
 /// The service the gate serves and a test turns off: a name as `service off` stores one.
 const GATED: &str = "files";
 
+/// A gated route that ends its stream cleanly with nothing sent: these proofs read only whether a stream
+/// is admitted.
+struct Admits;
+
+impl Handler for Admits {
+    type Exposure = Never;
+
+    async fn serve(
+        &self,
+        _served: Served<Self>,
+        mut writer: BoxWrite,
+        _reader: BoxRead,
+    ) -> Result<(), ServeError> {
+        writer.shutdown().await?;
+        Ok(())
+    }
+}
+
 /// The exposer a resident serves from: one gated read under the service name [`GATED`], the enabled
-/// oracle `off` on `<home>/serve.toml`, and the revocations in `<home>/revoked`. Built through the same `resolve_gate` +
-/// handler the product path injects.
+/// oracle `off` on `<home>/serve.toml`, and the revocations in `<home>/revoked`. Built through the same `resolve_gate` the
+/// product path resolves.
 fn build_exposer(home: &Home, enabled: LiveServeToml) -> Exposer {
     let signet = TestRoot::seeded(SIGNET).node_id();
     let denylist = swoosh::revoked::open(home).expect("the revocations load");
     let gate = tunnel::resolve_gate(Some(signet), denylist).expect("the family gate resolves");
     Router::new(gate)
-        .service(
-            GATED.parse().expect("a name"),
-            ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
-        )
+        .service(GATED.parse().expect("a name"), Admits)
         .expect("the gated route binds")
         .expose()
         .expect("the resident exposer assembles")
@@ -419,12 +439,7 @@ async fn a_shorter_revoked_never_unrevokes_live() {
                     .await
                     .expect("the gate serve builds");
             let exposer = Router::new(gate)
-                .service(
-                    GATED.parse().expect("a name"),
-                    ServiceList::new(
-                        ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog"),
-                    ),
-                )
+                .service(GATED.parse().expect("a name"), Admits)
                 .expect("the gated route binds")
                 .expose()
                 .expect("the exposer assembles")

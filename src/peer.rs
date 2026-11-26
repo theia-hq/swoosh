@@ -565,7 +565,8 @@ impl Machine {
 /// for the key dialed, so two forms of one machine are one kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// One of your devices (`me/<name>`): it answers you `control.services`, which tells a refusal's cause.
+    /// One of your devices (`me/<name>`): it lists what it serves to you on `control.serve`, which tells a
+    /// refusal's cause.
     Yours,
     /// Typed as a link: the refusal may be the link's.
     Link,

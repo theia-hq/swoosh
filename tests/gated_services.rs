@@ -2,63 +2,54 @@
 // test-attributed functions); panicking on failed test setup is exactly the intent.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! The node-lifecycle READ, end to end over the in-process transport: the proof that `control.services`
-//! rides the family gate, so a MEMBER can read a gated node's served list but a STRANGER cannot.
+//! A node's served list, end to end over the in-process transport: a MEMBER asking `control.serve` for its
+//! list reads exactly the services the node serves, each with its gate posture.
 //!
-//! `control.services` is one more member-only service, assembled through the SAME `ServiceList` handler the
-//! `swoosh serve` product path injects (not a hand-rolled near-copy), over the SAME `Router::catalog`
-//! snapshot `serve` cuts, and declared member-only exactly as `serve` declares it. Three things are proven:
-//!
-//! 1. `control.services`: a MEMBER reaching the member-only service reads the self-delimiting catalog blob,
-//!    decodes it, and sees exactly the served names with their gate posture (every service gated here).
-//! 2. A STRANGER's `control.services` is refused LOUDLY at the gate (a typed error, never a silent empty
-//!    read), so the service menu never leaks to a non-member.
-//! 3. A DELEGATE's `control.services` slip is refused LOUDLY at the route's member floor BEFORE
-//!    `Response::Ok` (the gate grants the slip, the floor refuses it), so the menu does not leak either.
+//! The node is assembled through the SAME `control::bind_serve` the `swoosh serve` product path calls, over
+//! the SAME `Router::catalog` snapshot it cuts. Who may ask, and every other answer of the route, are
+//! `gated_serve`'s.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a membership badge binds to whatever
 //! id the mem transport proves for the dialer (the same accommodation `gated_stop` documents): the badge is
-//! signed here bound to the member's mem node id, proving the GATE admits a signet-rooted bound badge and
-//! refuses a non-signet one, the load-bearing stranger case for a read.
+//! signed here bound to the member's mem node id.
 
 use core::time::Duration;
+use std::sync::Arc;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::Denylist;
-use swoosh::serve::{CONTROL_SERVICES_SERVICE, ServiceList};
-use swoosh::testkit::TestRoot;
-use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, Posture, Router, ServiceCatalog,
-};
-use tokio::io::AsyncReadExt as _;
+use swoosh::home::Home;
+use swoosh::serve::control::{self, Answer};
+use swoosh::serve::{CONTROL_SERVE_SERVICE, StopSource};
+use swoosh::testkit::{TestNode, TestRoot};
+use tightbeam::tunnel::{CancellationToken, Connector, Exposer, Posture, Router, ServiceCatalog};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// The byte the signet's fixed key is seeded with; its ed25519 public half is the signet the family gate
 /// trusts.
 const SIGNET: u8 = 7;
 
-/// The services this proof's node serves, beyond the always-on `control.services` read itself. Raw socket
-/// forwards (a real served kind that needs no injected handler), so the exposer builds from just the
-/// `control.services` handler while the catalog still lists these by name: the read reflects what the node
-/// serves, not what the test happened to register.
+/// The services this proof's node serves, beyond its own `control.serve`. Raw socket forwards (a real
+/// served kind that needs no injected handler), so the exposer builds from just `control.serve` while the
+/// catalog still lists these by name: the list reflects what the node serves, not what the test happened
+/// to register.
 const SERVED: [&str; 3] = [
     "web=tcp:127.0.0.1:8080",
     "db=tcp:127.0.0.1:5432",
     "api=tcp:127.0.0.1:9000",
 ];
 
-/// An ADMITTED member reaching `control.services` reads the node's served list: it decodes the catalog blob
-/// and sees exactly the served names, each `gated` on this gated node.
+/// An ADMITTED member asking `control.serve` for its list reads the node's served list: `Done`, then a
+/// catalog naming exactly the served names and `control.serve`, each `gated` on this gated node.
 #[tokio::test]
-async fn a_member_reads_a_gated_nodes_services_over_control_services() {
+async fn a_member_reads_a_gated_nodes_services_over_control_serve() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let host = Node::new(MemTransport::bind(), NoDiscovery);
             let host_id = host.node_id();
             let cancel = CancellationToken::new();
-            let exposer = build_exposer().await;
+            let (exposer, home) = build_exposer().await;
             let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
 
             // A member: a badge the signet signed, rooted at the trusted signet and bound to the member's
@@ -67,31 +58,34 @@ async fn a_member_reads_a_gated_nodes_services_over_control_services() {
             let badge = signet_badge(SIGNET, member.node_id());
             let session = Connector::to_node(
                 host_id,
-                CONTROL_SERVICES_SERVICE.parse().unwrap(),
+                CONTROL_SERVE_SERVICE.parse().unwrap(),
                 Some(badge.parse().unwrap()),
             )
             .open_service(&member)
             .await
-            .expect("member reaches control.services");
-            let (send, mut recv) = session
+            .expect("member reaches control.serve");
+            let (mut send, mut recv) = session
                 .open_bi()
                 .await
-                .expect("a member is admitted at the gated control.services read");
-            // The read sends nothing; drop the write half so the handler's write completes (the client verb
-            // does exactly this).
-            drop(send);
-
-            let mut bytes = Vec::new();
-            recv.read_to_end(&mut bytes)
+                .expect("a member is admitted at control.serve");
+            send.write_all(&[control::Request::List.encode()])
                 .await
-                .expect("read the catalog blob");
-            let catalog = ServiceCatalog::decode(&bytes).expect("the served catalog decodes");
+                .unwrap();
+            send.shutdown().await.unwrap();
+
+            let mut answer = Vec::new();
+            recv.read_to_end(&mut answer)
+                .await
+                .expect("read the list's answer");
+            let (code, blob) = answer.split_first().expect("an answer byte");
+            assert_eq!(*code, Answer::Done.encode());
+            let catalog = ServiceCatalog::decode(blob).expect("the served catalog decodes");
 
             let names: Vec<&str> = catalog.entries().map(|entry| entry.name.as_str()).collect();
             assert_eq!(
                 names,
-                ["api", "control.services", "db", "web"],
-                "the read returns exactly the served names, name-sorted"
+                ["api", "control.serve", "db", "web"],
+                "the list is exactly the served names, name-sorted"
             );
             assert!(
                 catalog
@@ -100,131 +94,43 @@ async fn a_member_reads_a_gated_nodes_services_over_control_services() {
                 "every service on a gated node reports the gated posture: {catalog:?}"
             );
 
-            // Stop the node so the test ends.
+            // Stop the node so the test ends, and remove the gate's scratch home.
             drop(recv);
             run.abort();
+            let _ = std::fs::remove_dir_all(home.dir());
         })
         .await;
 }
 
-/// A STRANGER (a badge rooted at a key the gate has never seen) is refused at `control.services`, LOUDLY: a
-/// typed stream error, never a silent empty read. The service menu never leaks to a non-member.
-#[tokio::test]
-async fn a_stranger_is_refused_at_control_services() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let host = Node::new(MemTransport::bind(), NoDiscovery);
-            let host_id = host.node_id();
-            let cancel = CancellationToken::new();
-            let exposer = build_exposer().await;
-            let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
-
-            // A stranger: a self-signed badge rooted at a RANDOM key the gate never trusts.
-            let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-            let badge = signet_badge(3, stranger.node_id());
-            let session =
-                Connector::to_node(host_id, CONTROL_SERVICES_SERVICE.parse().unwrap(), Some(badge.parse().unwrap()))
-                    .open_service(&stranger)
-                    .await
-                    .expect("the base connect lands; the gate refuses per-stream");
-            let refused = session.open_bi().await;
-            assert!(
-                matches!(
-                    refused,
-                    Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
-                ),
-                "a stranger's control.services must be refused at the gate, not admitted: {refused:?}"
-            );
-
-            run.abort();
-        })
-        .await;
-}
-
-/// A DELEGATE (a slip the signet signed for `control.services`, bound to the delegate's proven mem id) is
-/// refused at the member floor BEFORE `Response::Ok`: the gate grants the slip and the route's member-only
-/// floor turns that admission into the same uniform typed refusal a gate miss gives, so the menu never
-/// leaks to a delegate.
-#[tokio::test]
-async fn a_control_services_slip_is_refused_before_ok() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let host = Node::new(MemTransport::bind(), NoDiscovery);
-            let host_id = host.node_id();
-            let cancel = CancellationToken::new();
-            let exposer = build_exposer().await;
-            let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
-
-            let delegate = Node::new(MemTransport::bind(), NoDiscovery);
-            let slip = TestRoot::seeded(SIGNET)
-                .bound_slip(
-                    &CONTROL_SERVICES_SERVICE.parse().unwrap(),
-                    delegate.node_id().verify_key().expect("a usable key"),
-                    nauthy::Request::expires_in(Duration::from_secs(300)),
-                )
-                .unwrap();
-            let session = Connector::to_node(
-                host_id,
-                CONTROL_SERVICES_SERVICE.parse().unwrap(),
-                Some(slip),
-            )
-            .open_service(&delegate)
-            .await
-            .expect("the base connect lands; the gate decides per-stream");
-            let refused = session.open_bi().await;
-            assert!(
-                matches!(
-                    refused,
-                    Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
-                ),
-                "a control.services slip must be refused pre-Ok as not admitted: {refused:?}"
-            );
-
-            run.abort();
-        })
-        .await;
-}
-
-/// Assemble a gated exposer serving `control.services` (over the served menu) rooted at the signet, through
-/// the SAME `ServiceList` handler + `Router::catalog` snapshot the product `serve` path builds, and with
-/// the SAME member-only declaration `serve` makes. The catalog is cut from the route table, exactly as
-/// `run_serve` does.
-async fn build_exposer() -> Exposer {
-    let signet = TestRoot::seeded(SIGNET).node_id();
-    let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
-    // The served menu is raw socket forwards (no injected handler), so the route table holds them plus the
-    // `control.services` read handler over the catalog snapshot.
+/// Assemble a gated exposer rooted at the signet serving the raw forwards and `control.serve`, bound through
+/// the SAME `control::bind_serve` the product `serve` path calls, which cuts the catalog from the route
+/// table exactly as `run_serve` does. The scratch home the gate reads is the caller's to remove.
+async fn build_exposer() -> (Exposer, Home) {
+    let (gate, cut, home) = swoosh::testkit::admitting(
+        TestRoot::seeded(SIGNET).node_id(),
+        TestNode::seeded(SIGNET + 2).node_id(),
+    )
+    .await;
     let mut router = Router::new(gate);
     for entry in SERVED {
         router = router.parse(&[entry.to_owned()]).unwrap();
     }
-    let catalog = router.catalog(Some(CONTROL_SERVICES_SERVICE.parse().unwrap()));
-    router
-        .member_service(
-            CONTROL_SERVICES_SERVICE.parse().unwrap(),
-            ServiceList::new(catalog),
-        )
-        .unwrap()
-        .expose()
-        .unwrap()
+    let (router, _catalog, _first_round) = control::bind_serve(
+        router,
+        CancellationToken::new(),
+        Arc::new(StopSource::new()),
+        &cut,
+    )
+    .unwrap();
+    (router.expose().unwrap(), home)
 }
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):
-/// the shape a signet holder self-signs and `mint` mints for a device. Rooted at the signet it admits; rooted
-/// at a stranger key it is refused. Signed here (not via invite/join) so it binds to the mem proven id.
+/// the shape a signet holder self-signs and `mint` mints for a device. Signed here (not via invite/join) so
+/// it binds to the mem proven id.
 fn signet_badge(signer: u8, bound: NodeId) -> String {
     TestRoot::seeded(signer)
         .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
-}
-
-/// An empty revocation denylist: this proof exercises membership admission, not revocation, so the gate
-/// loads from a path that does not exist (an absent file is an empty set).
-async fn empty_denylist() -> Denylist {
-    let path = std::env::temp_dir().join(format!("swoosh-gated-services-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    Denylist::load(path).unwrap()
 }

@@ -479,7 +479,7 @@ fn a_host_cut_leaves_a_listener_up_on_both_paths() {
         let asked: Vec<&str> = requests.iter().map(|r| r.service.as_str()).collect();
         assert_eq!(
             asked,
-            ["ssh", "ssh", "ssh", "ssh", "control.services"],
+            ["ssh", "ssh", "ssh", "ssh", "control.serve"],
             "one refused pipe, then the follow-up"
         );
         assert_eq!(requests[2].capability.as_deref(), Some(badge.as_str()));
@@ -514,7 +514,7 @@ fn a_host_cut_leaves_a_listener_up_on_both_paths() {
         assert_eq!(err, "");
         assert_eq!(
             services(&heard),
-            ["ssh", "ssh", "ssh", "ssh", "control.services"]
+            ["ssh", "ssh", "ssh", "ssh", "control.serve"]
         );
     });
 }
@@ -723,7 +723,7 @@ fn a_port_closes_before_its_ending_asks_why() {
                 tokio::net::TcpStream::connect(local).await.is_err(),
                 "the port closed before the question"
             );
-            assert_eq!(*opened.borrow(), ["ssh", "control.services"]);
+            assert_eq!(*opened.borrow(), ["ssh", "control.serve"]);
             answer.notify_one();
             core::future::pending::<()>().await;
         })

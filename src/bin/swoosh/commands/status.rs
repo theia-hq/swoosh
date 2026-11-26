@@ -9,10 +9,10 @@
 //! bouncing off a relay? This dials the one machine the argument resolves to, runs one probe for a live
 //! RTT, then reads the session's best-effort [`conn_info`](bifrost::Session::conn_info) for the path
 //! (direct vs relayed) and remote address, and prints one line. The probe is chosen from the peer before
-//! the dial: one of your devices (`me/<name>`) is asked for what it serves over `control.services`, which
-//! every serving node binds and only your devices reach, so one call gives the reach, the round trip and the
-//! list; any other machine (a contact, a key, a link) is asked a measure ping, and `control.services` is
-//! never asked of it. The path is read AFTER the probe
+//! the dial: one of your devices (`me/<name>`) is asked for its list of what it serves over `control.serve`,
+//! which every serving node binds and only your devices reach, so one call gives the reach, the round trip
+//! and the list; any other machine (a contact, a key, a link) is asked a measure ping, and `control.serve`
+//! is never asked of it. The path is read AFTER the probe
 //! so iroh's hole-punch has the round trip to land: a session that connects relayed and upgrades reports
 //! the upgraded path, not the instant-of-connect one. It reports the current path, which can still be
 //! relayed if the upgrade has not completed by then.
@@ -39,11 +39,10 @@ use swoosh::observation::Follow;
 use swoosh::peer::{Kind, Machine, Peer};
 use swoosh::peers::Hints;
 use swoosh::reach;
-use swoosh::serve::CONTROL_SERVICES_SERVICE;
+use swoosh::serve::CONTROL_SERVE_SERVICE;
 use swoosh::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
 use swoosh::streams::{Ask, Observing, Unopened};
 use swoosh::transport::ReachArgs;
-use tokio::io::AsyncWriteExt as _;
 
 use crate::commands::route::Route;
 use crate::commands::{machine, through_serve};
@@ -79,7 +78,7 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
-    /// `status` probes one of your devices' member-only `control.services` and any other peer's
+    /// `status` asks one of your devices' member-only `control.serve` for its list, and any other peer's
     /// family-gated `ping` ([`Probe::of`]), so it presents the member badge rooted at the dialing key (like
     /// `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. A
     /// self-addressing `swoosh:` link-as-peer is threaded INTO the credential so the ONE resolver owns both
@@ -189,22 +188,22 @@ impl StatusCmd {
     }
 }
 
-/// How long one of your devices may take to answer `control.services`, its request and its reply: the
-/// family's patience for one network step, and measure's bound on one ping probe, so both probes give up
-/// on a silent machine alike.
+/// How long one of your devices may take to answer its list on `control.serve`, the request and the reply:
+/// the family's patience for one network step, and measure's bound on one ping probe, so both probes give
+/// up on a silent machine alike.
 const SERVICES_BOUND: Duration = Duration::from_secs(10);
 
 /// What `status` asks a reached device, chosen from the resolved machine's kind before the dial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
-    /// One of your devices: `control.services`, for the reach, the round trip and what it serves.
+    /// One of your devices: its list on `control.serve`, for the reach, the round trip and what it serves.
     Services,
     /// Any other machine: a measure ping.
     Ping,
 }
 
 impl Probe {
-    /// The probe for a machine of `kind`: only your devices are asked `control.services`, however they
+    /// The probe for a machine of `kind`: only your devices are asked `control.serve`, however they
     /// were typed (a name or a key), since the kind is read from the book; a contact's machine, a key no
     /// name holds, or a link is pinged.
     fn of(kind: Kind) -> Self {
@@ -217,7 +216,7 @@ impl Probe {
     /// The service this probe dials.
     fn service(self) -> &'static str {
         match self {
-            Self::Services => CONTROL_SERVICES_SERVICE,
+            Self::Services => CONTROL_SERVE_SERVICE,
             Self::Ping => reach::PING_SERVICE,
         }
     }
@@ -300,12 +299,12 @@ async fn probe<S: Session>(session: &S, asked: Probe, label: &str) -> Result<Ans
     }
 }
 
-/// Ask one of your reached devices what it serves: the one `control.services` read gives the round trip
-/// (the request out, the list back, timed here) and the list. The node's own dotted routes are left out
+/// Ask one of your reached devices what it serves: the one list request on `control.serve` gives the round
+/// trip (the request out, the list back, timed here) and the list. The node's own dotted routes are left out
 /// of the list.
 async fn probe_services<S: Session>(session: &S, label: &str) -> Result<Answered, Line> {
     let asked = tokio::time::Instant::now();
-    let (mut writer, reader) = match session.open_bi().await {
+    let (writer, reader) = match session.open_bi().await {
         Ok(halves) => halves,
         Err(bifrost::Error::Refused(refusal)) => {
             let refused = match refusal {
@@ -316,14 +315,10 @@ async fn probe_services<S: Session>(session: &S, label: &str) -> Result<Answered
         }
         Err(error) => return Err(Line::failed(label, causes(&error))),
     };
-    // The read sends nothing; ending the write half lets the node's reply complete. Ended, not dropped:
-    // through `serve` a half dropped unended reaches the node as a reset.
+    // The request, the answer and the list, as one exchange: its cause is the line's, and a list that is
+    // not one says so in the same words as an unknown code.
     let exchange = async {
-        writer
-            .shutdown()
-            .await
-            .map_err(|error| Line::failed(label, causes(&error)))?;
-        reach::read_catalog(reader)
+        reach::ask_list(writer, reader)
             .await
             .map_err(|error| Line::failed(label, format!("{error:#}")))
     };
@@ -785,15 +780,16 @@ mod tests {
         );
     }
 
-    /// A session that answers its one stream with `reply`: the bytes of a `control.services` reply, or a
-    /// refusal at the stream's open, as a node's gate gives one.
+    /// A session that answers its one stream with `reply`: the bytes of a `control.serve` answer, or a
+    /// refusal at the stream's open, as a node's gate gives one. It answers as the route does: `reply` only
+    /// to a list request, `BadRequest` to any other, and nothing to a stream that ends before its request.
     struct ServicesSession {
         reply: Result<Vec<u8>, bifrost::Refusal>,
     }
 
     impl Session for ServicesSession {
-        type Write = TestWrite<tokio::io::Sink>;
-        /// The reply, written whole and its write end closed, so the read ends where the reply does.
+        type Write = TestWrite<tokio::io::DuplexStream>;
+        /// The answer, written whole and its write end closed, so the read ends where the answer does.
         type Read = tokio::io::DuplexStream;
 
         fn peer(&self) -> NodeId {
@@ -803,13 +799,25 @@ mod tests {
         async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
             match &self.reply {
                 Ok(bytes) => {
-                    use tokio::io::AsyncWriteExt as _;
+                    use swoosh::serve::control::{Answer, Request};
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+                    let (write, mut asked) = tokio::io::duplex(64);
                     let (mut node, read) = tokio::io::duplex(bytes.len().max(1));
-                    node.write_all(bytes)
-                        .await
-                        .map_err(|error| bifrost::Error::Stream(Box::new(error)))?;
-                    Ok((tokio::io::sink().into(), read))
+                    let bytes = bytes.clone();
+                    tokio::spawn(async move {
+                        let mut request = [0u8; 1];
+                        if asked.read_exact(&mut request).await.is_err() {
+                            return;
+                        }
+                        let answer = if Request::decode(request[0]) == Some(Request::List) {
+                            bytes
+                        } else {
+                            vec![Answer::BadRequest.encode()]
+                        };
+                        let _ = node.write_all(&answer).await;
+                    });
+                    Ok((write.into(), read))
                 }
                 Err(refusal) => Err(bifrost::Error::Refused(refusal.clone())),
             }
@@ -837,8 +845,8 @@ mod tests {
         }
     }
 
-    /// The `control.services` reply of a node serving `entries`, its own routes included, as `serve`
-    /// builds it.
+    /// The answer to a list request on `control.serve` of a node serving `entries`: `Done`, then its list,
+    /// its own routes included, as `serve` builds it.
     fn catalog_of(entries: &[&str]) -> Vec<u8> {
         let gate = nauthy::Gate::rooted(
             swoosh::testkit::TestRoot::seeded(7).verify_key(),
@@ -849,22 +857,27 @@ mod tests {
         for entry in entries {
             router = swoosh::serve::bind_entry(router, entry, [0u8; 32], &[]).expect("binds");
         }
-        router
-            .catalog(Some(
-                swoosh::serve::CONTROL_SERVICES_SERVICE
-                    .parse()
-                    .expect("a name"),
-            ))
-            .encode()
-            .expect("a catalog encodes")
+        let mut answer = vec![swoosh::serve::control::Answer::Done.encode()];
+        answer.extend(
+            router
+                .catalog(Some(
+                    swoosh::serve::CONTROL_SERVE_SERVICE
+                        .parse()
+                        .expect("a name"),
+                ))
+                .encode()
+                .expect("a catalog encodes"),
+        );
+        answer
     }
 
-    /// `status me/<name>` asks `control.services`, chosen before the dial; a node that serves only one
-    /// service answers it with the round trip and its list, a healthy line.
+    /// `status me/<name>` asks `control.serve` for its list, chosen before the dial; a node that serves
+    /// only one service answers the list request with the round trip and its list, a healthy line. The
+    /// node answers nothing but a list request, so a probe that asked anything else is no healthy line.
     #[tokio::test]
-    async fn status_of_your_device_probes_the_control_route() {
+    async fn status_of_your_device_asks_list() {
         assert_eq!(Probe::of(Kind::Yours), Probe::Services);
-        assert_eq!(Probe::of(Kind::Yours).service(), "control.services");
+        assert_eq!(Probe::of(Kind::Yours).service(), "control.serve");
         let line = probe_own(
             &ServicesSession {
                 reply: Ok(catalog_of(&["web=echo:"])),
@@ -876,6 +889,61 @@ mod tests {
         assert_eq!(line.outcome(), reach::Outcome::Healthy);
         let text = line.to_string();
         assert!(text.starts_with("me/nas, path: direct, rtt "), "{text}");
+    }
+
+    /// A list request answered with anything but `Done`, or with a list that does not decode, gets the
+    /// failed line with one cause, the list request's unknown reply. One ended before any answer says so
+    /// instead, and a list past the wire's bound keeps its own cause.
+    #[tokio::test]
+    async fn a_list_that_is_not_one_is_an_unknown_reply() {
+        use swoosh::serve::control::Answer;
+
+        let unknown =
+            "me/nas: reached, but the probe failed (it sent an unknown reply to the list request)";
+        let mut not_done = vec![Answer::BadRequest.encode()];
+        not_done.extend_from_slice(&0u32.to_be_bytes());
+        let mut undecodable = vec![Answer::Done.encode()];
+        undecodable.extend_from_slice(&[0, 0, 0, 9]);
+        let mut over_long = vec![Answer::Done.encode()];
+        over_long.resize(
+            usize::try_from(tightbeam::tunnel::MAX_CATALOG_BLOB).expect("fits") + 2,
+            0,
+        );
+        for (what, reply, expected) in [
+            (
+                "BadRequest",
+                vec![Answer::BadRequest.encode()],
+                unknown.to_owned(),
+            ),
+            ("NotYet", vec![Answer::NotYet.encode()], unknown.to_owned()),
+            ("an unknown code", vec![0x7f], unknown.to_owned()),
+            ("a list after another code", not_done, unknown.to_owned()),
+            (
+                "an end before the answer",
+                Vec::new(),
+                "me/nas: reached, but the probe failed (it ended the list request without an answer)"
+                    .to_owned(),
+            ),
+            ("an undecodable list", undecodable, unknown.to_owned()),
+            (
+                "an over-long list",
+                over_long,
+                format!(
+                    "me/nas: reached, but the probe failed (it sent more than a list of services \
+                     can be, so the read stopped at {} bytes)",
+                    tightbeam::tunnel::MAX_CATALOG_BLOB
+                ),
+            ),
+        ] {
+            let line = probe_own(
+                &ServicesSession { reply: Ok(reply) },
+                Probe::Services,
+                "me/nas",
+            )
+            .await;
+            assert_eq!(line.outcome(), reach::Outcome::Failed, "{what}");
+            assert_eq!(line.to_string(), expected, "{what}");
+        }
     }
 
     /// One of your devices' line ends with what it serves, never the node's own routes, and an empty list
@@ -1010,7 +1078,7 @@ mod tests {
         );
     }
 
-    /// One of your devices that takes `control.services` and says nothing holds the probe ten seconds,
+    /// One of your devices that takes `control.serve` and says nothing holds the probe ten seconds,
     /// measure's bound on a ping probe, and reads as an unanswered probe, on both paths.
     #[tokio::test(start_paused = true)]
     async fn a_silent_device_is_unanswered_after_ten_seconds() {
@@ -1110,7 +1178,7 @@ mod tests {
         }
     }
 
-    /// One of your devices that answers `control.services` only once the request's write half has
+    /// One of your devices that answers its list on `control.serve` only once the request's write half has
     /// ended cleanly, as a node behind `serve` sees it: a half dropped unended is a reset, and the node
     /// answers nothing. Unless it `answers`, it takes the request and holds the stream, saying nothing.
     struct AnswersAnEnd {
@@ -1164,7 +1232,7 @@ mod tests {
         }
     }
 
-    /// The `control.services` probe ends its write half before it reads, on both paths, so a node behind
+    /// The list probe ends its write half before it reads, on both paths, so a node behind
     /// `serve` reads a clean end rather than a reset and answers.
     #[tokio::test(start_paused = true)]
     async fn the_services_probe_ends_its_write_half_on_both_paths() {
@@ -1317,7 +1385,7 @@ mod tests {
         );
     }
 
-    /// A machine that is not yours (a contact, a key, a link) keeps the ping probe: `control.services` is
+    /// A machine that is not yours (a contact, a key, a link) keeps the ping probe: `control.serve` is
     /// never asked of it.
     #[test]
     fn status_of_a_contact_keeps_the_ping_probe() {
@@ -1387,7 +1455,7 @@ mod tests {
             .into_iter()
             .map(|request| request.service)
             .collect();
-        assert_eq!(asked, ["control.services"]);
+        assert_eq!(asked, ["control.serve"]);
     }
 
     /// On both probes the access refusal prints its own line and no peer text; every other refusal

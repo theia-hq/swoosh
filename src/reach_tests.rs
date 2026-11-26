@@ -203,16 +203,16 @@ async fn diagnosed(tag: &str, script: Vec<Script>) -> (Option<Diagnosis>, Script
     (found, peer, badge)
 }
 
-// The follow-up to a refused stream asks `control.services` presenting what the refused stream
-// presented, the home's standing: the route is member-only, so a call that presented nothing would
+// The follow-up to a refused stream asks `control.serve` for its list, presenting what the refused
+// stream presented, the home's standing: the route is member-only, so a call that presented nothing would
 // always be refused and the line would wrongly say the device does not count this machine as one of
-// yours.
+// yours. The scripted device answers only a list request, so a diagnosis is the list's.
 #[tokio::test]
-async fn the_follow_up_presents_the_refused_dials_credential() {
+async fn the_follow_up_asks_list() {
     let (found, peer, badge) = diagnosed("slots", vec![Script::Lists(vec!["ping"])]).await;
     assert_eq!(found, Some(Diagnosis::NotListed));
     let [request] = peer.requests().try_into().expect("one call");
-    assert_eq!(request.service, CONTROL_SERVICES_SERVICE);
+    assert_eq!(request.service, CONTROL_SERVE_SERVICE);
     assert_eq!(
         request.capability,
         Some(badge.to_string()),
@@ -285,4 +285,107 @@ async fn only_your_devices_are_asked_why() {
     assert_eq!(diagnose_through(&own, &key, &ssh, None).await, None);
     assert!(peer.requests().is_empty(), "nothing was asked");
     assert_eq!(peer.dials(), 0, "nothing was dialed");
+}
+
+// The list request is the wire byte `1` and this side's end, then the answer: anything but `Done`, or a list
+// that does not decode, is the one unknown reply, and an end before any answer is its own cause; the
+// follow-up reads either as no cause. The writer is lent, not moved, so only `ask_list`'s own shutdown can
+// end the request: a dropped writer would end it too, and prove nothing.
+#[tokio::test]
+async fn a_list_is_asked_and_only_done_answers_it() {
+    use tokio::io::AsyncReadExt as _;
+
+    use crate::serve::control::Answer;
+
+    let asked = |answer: Vec<u8>| async move {
+        let (mut write, mut node_reads) = tokio::io::duplex(64);
+        let (mut node_writes, read) = tokio::io::duplex(64);
+        node_writes
+            .write_all(&answer)
+            .await
+            .expect("the answer fits");
+        drop(node_writes);
+        let listed = ask_list(&mut write, read).await;
+        let mut request = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), node_reads.read_to_end(&mut request))
+            .await
+            .expect("the request was ended while its writer still lives")
+            .expect("the request reads");
+        drop(write);
+        (listed, request)
+    };
+    let mut done = vec![Answer::Done.encode()];
+    done.extend_from_slice(&0u32.to_be_bytes());
+    let (listed, request) = asked(done).await;
+    // The literal wire byte: W1a numbers `List` 1 and `Stop` 2, so a swap of the codes fails here.
+    assert_eq!(request, [1u8], "one list request, then the end");
+    assert_eq!(listed.expect("Done and a list").entries().count(), 0);
+    for (answer, cause) in [
+        (vec![Answer::BadRequest.encode()], UNKNOWN_LIST_REPLY),
+        (vec![Answer::NotYet.encode()], UNKNOWN_LIST_REPLY),
+        (vec![0x7f], UNKNOWN_LIST_REPLY),
+        (
+            vec![Answer::BadRequest.encode(), 0, 0, 0, 0],
+            UNKNOWN_LIST_REPLY,
+        ),
+        (vec![Answer::Done.encode(), 0, 0, 0, 9], UNKNOWN_LIST_REPLY),
+        (Vec::new(), LIST_ENDED),
+    ] {
+        let (listed, _) = asked(answer.clone()).await;
+        let error = listed.expect_err("no list");
+        assert_eq!(format!("{error:#}"), cause, "{answer:?}");
+    }
+}
+
+/// A request half that fails: at the request's write, or at its end once the request is written.
+struct FailingRequest {
+    at_write: bool,
+}
+
+impl tokio::io::AsyncWrite for FailingRequest {
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> core::task::Poll<std::io::Result<usize>> {
+        core::task::Poll::Ready(if self.at_write {
+            Err(tokio::io::Error::new(
+                tokio::io::ErrorKind::BrokenPipe,
+                "the write broke",
+            ))
+        } else {
+            Ok(buf.len())
+        })
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<std::io::Result<()>> {
+        core::task::Poll::Ready(Err(tokio::io::Error::new(
+            tokio::io::ErrorKind::BrokenPipe,
+            "the end broke",
+        )))
+    }
+}
+
+// A list request whose write or end fails is no list: the transport's own cause, never a claim about the
+// machine's answer, and nothing is read after it.
+#[tokio::test]
+async fn a_list_request_that_fails_to_go_keeps_its_cause() {
+    for (at_write, cause) in [(true, "the write broke"), (false, "the end broke")] {
+        let mut done = vec![crate::serve::control::Answer::Done.encode()];
+        done.extend_from_slice(&0u32.to_be_bytes());
+        let error = ask_list(FailingRequest { at_write }, done.as_slice())
+            .await
+            .expect_err("no list");
+        assert_eq!(format!("{error:#}"), cause);
+    }
 }

@@ -739,7 +739,7 @@ fn to_nas() -> (ProxyCmd, Contacts, Machine) {
 
 /// A proxy one of your devices refuses ends with the one dial refusal before any URL is printed or a
 /// listener bound, on both paths: admission is proven on one stream first, and the device is asked why
-/// through the same source, one `control.services` stream on Main. A proxy that skipped the check
+/// through the same source, one `control.serve` stream on Main asking for its list. A proxy that skipped the check
 /// would serve until stopped, so the run is bounded.
 #[test]
 fn a_refused_proxy_names_the_cause_on_both_paths() {
@@ -781,7 +781,7 @@ fn a_refused_proxy_names_the_cause_on_both_paths() {
             .into_iter()
             .map(|request| request.service)
             .collect();
-        assert_eq!(asked, ["proxy", "control.services"]);
+        assert_eq!(asked, ["proxy", "control.serve"]);
 
         let mut served = Served::new("proxy-refused").await;
         let rig = Rig::default();
@@ -789,7 +789,7 @@ fn a_refused_proxy_names_the_cause_on_both_paths() {
             &mut served,
             vec![
                 Answer::Refuse(OpenRefusal::Peer(PeerRefusal::NotAdmitted)),
-                Answer::Exchange(crate::dial_route_tests::catalog_of(&["ping"])),
+                Answer::AfterEnd(crate::dial_route_tests::list_answer(&["ping"])),
             ],
             &rig,
         );
@@ -822,10 +822,7 @@ fn a_refused_proxy_names_the_cause_on_both_paths() {
             .collect();
         assert_eq!(
             asked,
-            [
-                ("proxy", OpenLane::Bulk),
-                ("control.services", OpenLane::Main)
-            ]
+            [("proxy", OpenLane::Bulk), ("control.serve", OpenLane::Main)]
         );
     });
 }
@@ -1039,17 +1036,14 @@ async fn a_requests_own_failure_keeps_the_proxy_up_and_its_502_is_one_line() {
 
 /// A refusal every later request would meet ends the run with its line once the client has its answer:
 /// `NotAdmitted` a `403` as by own bind, an ended standing and the machine being this one a `502`.
-/// `NotAdmitted` then asks the machine why, one `control.services` Open on Main, which its resident holds
+/// `NotAdmitted` then asks the machine why, one `control.serve` Open on Main, which its resident holds
 /// an answer for. The others' residents stop after their one answer, gone as the line is worded, so
 /// their lines carry no remedy the resident would name.
 #[tokio::test]
 async fn a_refusal_every_later_request_would_meet_ends_the_proxy_after_its_answer() {
     use swoosh::serve::control_codec::OpenLane;
 
-    let why = [
-        ("proxy", OpenLane::Bulk),
-        ("control.services", OpenLane::Main),
-    ];
+    let why = [("proxy", OpenLane::Bulk), ("control.serve", OpenLane::Main)];
     for (tag, refusal, status, body, asked, catalog) in [
         (
             "proxy-admitted",
@@ -1057,7 +1051,7 @@ async fn a_refusal_every_later_request_would_meet_ends_the_proxy_after_its_answe
             "HTTP/1.1 403 Forbidden",
             format!("proxy service refused: {}", bifrost::Refusal::NotAdmitted),
             &why[..],
-            Some(crate::dial_route_tests::catalog_of(&["ping"])),
+            Some(crate::dial_route_tests::list_answer(&["ping"])),
         ),
         (
             "proxy-standing",
@@ -1080,7 +1074,7 @@ async fn a_refusal_every_later_request_would_meet_ends_the_proxy_after_its_answe
     ] {
         let expected = refusal.clone();
         let answers = core::iter::once(Answer::Refuse(refusal))
-            .chain(catalog.map(Answer::Exchange))
+            .chain(catalog.map(Answer::AfterEnd))
             .collect();
         let (ended, responses, heard) = proxied(tag, answers, 1).await;
         let heard: Vec<(&str, OpenLane)> = heard

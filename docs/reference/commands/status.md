@@ -37,6 +37,8 @@ and the line reads `unreachable`, a refusal (`reached, but …`), or `reached, b
 unanswered`. The path is read after the probe, so one machine can show `relayed` on one run and `direct` on the
 next. [Why a path changes](../../transports.md#iroh). It works the same through `swoosh serve`. If the path
 cannot be read, the line has no `path:` field, stderr says `warning: could not read the path of this run`,
-and the exit code is unchanged.
+and the exit code is unchanged. One of your devices that answers its list with anything but the list fails
+with `it sent an unknown reply to the list request`, or `it ended the list request without an answer` when it
+sent nothing.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
