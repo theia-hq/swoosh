@@ -146,86 +146,10 @@ fn spawn_serve(
     (child, stderr)
 }
 
-/// The overall deadline bounds channel receives even when the child's pipe stays open and silent.
-fn read_banner(
-    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
-    deadline: Instant,
-) -> (String, String) {
-    let (mut key, mut addr) = (None, None);
-    while key.is_none() || addr.is_none() {
-        assert!(Instant::now() < deadline, "serve never printed its banner");
-        let line = lines
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .expect("serve never printed its banner before the deadline")
-            .expect("read the banner");
-        if key.is_none()
-            && let Some(parsed) = line.strip_prefix("  key  ")
-        {
-            key = Some(parsed.trim().to_owned());
-        }
-        if let Some(found) = line.trim().strip_suffix("(this machine)") {
-            addr = Some(found.trim().to_owned());
-        }
-    }
-    (key.unwrap(), addr.unwrap())
-}
-
-#[test]
-fn readiness_uses_the_key_fact_row_and_keeps_the_loopback_address() {
-    let (sender, lines) = std::sync::mpsc::channel();
-    for line in [
-        "swoosh is serving",
-        "  key            ed01exampleid",
-        "  127.0.0.1:1234 (this machine)",
-    ] {
-        sender.send(Ok(line.to_owned())).unwrap();
-    }
-    assert_eq!(
-        read_banner(lines, Instant::now() + Duration::from_secs(1)),
-        ("ed01exampleid".to_owned(), "127.0.0.1:1234".to_owned())
-    );
-}
-
-#[test]
-fn a_service_named_key_does_not_replace_the_first_key_fact() {
-    let key = bifrost::NodeId::from_ed25519_secret(&[0x11; 32]).to_string();
-    let (sender, lines) = std::sync::mpsc::channel();
-    for line in [
-        format!("  key            {key}"),
-        "  key  your devices  echo:".to_owned(),
-        "  127.0.0.1:1234 (this machine)".to_owned(),
-    ] {
-        sender.send(Ok(line)).unwrap();
-    }
-    assert_eq!(
-        read_banner(lines, Instant::now() + Duration::from_secs(1)),
-        (key, "127.0.0.1:1234".to_owned())
-    );
-}
-
-#[test]
-fn readiness_rejects_colon_records_and_a_silent_open_pipe_is_bounded() {
-    let (sender, lines) = std::sync::mpsc::channel();
-    sender.send(Ok("key: ed01exampleid".to_owned())).unwrap();
-    sender
-        .send(Ok("127.0.0.1:1234 (this machine)".to_owned()))
-        .unwrap();
-    drop(sender);
-    assert!(
-        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_secs(1)))
-            .is_err()
-    );
-    let (_sender, lines) = std::sync::mpsc::channel();
-    assert!(
-        std::panic::catch_unwind(|| read_banner(lines, Instant::now() + Duration::from_millis(10)))
-            .is_err()
-    );
-}
-
 /// Serve `home` with `entries` over iroh with `--local`, and wait for its banner: the key it answers at and its
-/// loopback address, from the transport block `--verbose` adds.
+/// loopback address, from its `reach` block.
 fn serve(home: &Path, entries: &[&str]) -> Served {
-    let (mut child, stderr) = spawn_serve(home, &["--verbose"], entries);
+    let (mut child, stderr) = spawn_serve(home, &[], entries);
     let stdout = child.0.stdout.take().expect("piped stdout");
     // Bound both the wait and queued output; the pipe reader may block, never the deadline owner.
     let (sender, lines) = std::sync::mpsc::sync_channel(16);
@@ -235,7 +159,8 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
             let _ = sender.send(line);
         }
     });
-    let (key, addr) = read_banner(lines, Instant::now() + Duration::from_secs(60));
+    let (key, addr) =
+        swoosh::testkit::banner::read(lines, Instant::now() + Duration::from_secs(60));
     Served {
         child,
         key: key.parse().expect("the banner's key"),
@@ -274,7 +199,7 @@ async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, std::thread::Joi
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     // The reply carries the loopback address the wildcard bind answers on, the one the banner's
-    // `(this machine)` row names.
+    // `this computer` row names.
     let addr = status
         .reach
         .at

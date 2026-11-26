@@ -458,7 +458,7 @@ impl<W: io::Write> StateLine<'_, W> {
 }
 
 #[cfg(test)]
-mod law;
+pub(crate) mod law;
 
 #[cfg(test)]
 #[path = "screen_tests.rs"]

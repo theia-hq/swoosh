@@ -30,14 +30,12 @@
 //! route-table edges, the `control.*` handlers, the control socket) is the library's `serve` module, which
 //! the integration proofs also assemble their nodes from.
 
-use core::net::SocketAddr;
 use core::time::Duration;
-use std::borrow::Cow;
 use std::ffi::OsString;
 use std::io::IsTerminal as _;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
-use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
+use bifrost_mdns::{Dialable, Missing};
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{Gate, Service};
@@ -49,9 +47,10 @@ use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, InstanceLock, Internet, Lan, ProxyScope, ReachSource, RecvService,
-    Resident, SingleError, Started, StopKind, StopSource, Stopped, acquire_single, bind_entry,
-    bind_recv, classify_stop, control, extract_recv_services, refuse_recv_into_home,
+    Activity, BoundTargets, InstanceLock, Internet, Lan, Network, ProxyScope, ReachSource,
+    Reachable, RecvService, Resident, SingleError, Started, StopKind, StopSource, Stopped,
+    acquire_single, bind_entry, bind_recv, classify_stop, control, extract_recv_services,
+    refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -142,9 +141,6 @@ pub struct ServeCmd {
         value_parser = clap::builder::FalseyValueParser::new()
     )]
     pub quiet: bool,
-    /// Also print how peers reach this machine, under the banner.
-    #[arg(long, hide = true, env = "SWOOSH_VERBOSE")]
-    pub verbose: bool,
     /// Serve for this long, then stop (30m, 2h, 1d)
     #[arg(long, value_name = "d")]
     pub expires: Option<Lifetime>,
@@ -173,14 +169,14 @@ pub struct ServeCmd {
     /// discovery). Not a flag: clap skips it, and the root fills it in via
     /// [`with_mdns`](Self::with_mdns) before dispatch, exactly like [`expose`](Self::expose). `serve`
     /// is the one verb that reports discovery, so the tell lives HERE and the reach context stays
-    /// uniform; the transport block reports what started rather than assuming it.
+    /// uniform; the `reach` block reports what started rather than assuming it.
     #[arg(skip)]
     pub mdns: Option<MdnsState>,
     /// The relay and the resolver this bind actually leaned on, attached by the composition root after
     /// it composed them from the flags and the home files. Not a flag: clap skips it, and the root fills
     /// it in via [`with_bound_reach`](Self::with_bound_reach) alongside [`mdns`](Self::mdns). The
     /// default is n0's on both halves, which is what a bind that has no relay or resolver of its own
-    /// (`--local`) leans on, so an un-attached value still tells the banner the truth.
+    /// (`--local`) leans on, so an un-attached value still logs the truth.
     // Boxed for the same reason [`expose`](Self::expose) is: each named half holds a parsed URL, which is
     // large by value, and `Serve(ServeCmd)` is a variant of the clap command enums, so inline this one
     // pair would make that variant tower over the rest (`clippy::large_enum_variant`). A root-attached,
@@ -559,13 +555,13 @@ impl ServeCmd {
     }
 
     /// Attach the live [`MdnsState`] the composition root read off the composed discovery, so the
-    /// transport block reports the discovery that started rather than one it assumed.
+    /// `reach` block and the bind's log report the discovery that started rather than one it assumed.
     pub fn with_mdns(mut self, mdns: MdnsState) -> Self {
         self.mdns = Some(mdns);
         self
     }
 
-    /// Attach the [`Reach`] the composition root composed for this bind, so the transport block names the
+    /// Attach the [`Reach`] the composition root composed for this bind, so the bind's log names the
     /// relay this node offers and the resolver it publishes to rather than promising n0's. Called at the
     /// iroh arm only, beside [`with_mdns`](Self::with_mdns).
     pub fn with_bound_reach(mut self, bound_reach: Reach) -> Self {
@@ -710,6 +706,16 @@ impl ServeCmd {
             Internet::of(self.reach.local),
             Lan::of(mdns),
         );
+        // What the `reach` block leaves out goes to the log once, at bind, quiet or not.
+        log_bind(
+            &Dialable::of(node.bound_sockets()),
+            mdns,
+            &self.bound_reach,
+            self.reach.local,
+        );
+        // The banner reads the same source the status reply does, so the two screens cannot disagree.
+        // Read here, before the resident takes the source, and also where an unreadable host first warns.
+        let shown = reach.reachable();
         let addr = node.local_addr();
         let resident = std::sync::Arc::new(Resident::new(
             addr.node,
@@ -737,14 +743,7 @@ impl ServeCmd {
 
         if !self.quiet {
             let manifest = exposer.manifest();
-            let transport = self.verbose.then(|| {
-                reach_section(
-                    ReachKind::of(self.reach.local),
-                    mdns,
-                    &self.bound_reach,
-                    &Dialable::of(node.bound_sockets()),
-                )
-            });
+            let rows = ReachRows::of(&shown, Scope::Banner);
             let stop_line = match self.expires {
                 Some(lifetime) => format!(
                     "runs for {}, then stops (or ctrl-c)",
@@ -766,8 +765,8 @@ impl ServeCmd {
                     "swoosh is serving"
                 },
                 &key,
+                &rows,
                 &serving,
-                transport.as_deref(),
                 keeper,
                 &stop_line,
             )
@@ -1036,20 +1035,16 @@ fn off_lines(name: &str) -> Screen<'static> {
     )
 }
 
-/// The banner: its title, this machine's key, what it serves, the reach section under `--verbose`, then
-/// how to keep it serving and how to stop it.
+/// The banner: its title, this machine's key, how peers reach it, what it serves, then how to keep it
+/// serving and how to stop it.
 fn banner<'a>(
     title: &'static str,
     key: &'a str,
+    reach: &'a ReachRows,
     serving: &'a Serving<'_>,
-    transport: Option<&str>,
     keeper: Option<&str>,
     stop_line: &str,
 ) -> Screen<'a> {
-    let reach = transport
-        .into_iter()
-        .flat_map(str::lines)
-        .fold(Block::default(), |block, line| block.text(line.to_owned()));
     let stop = keeper
         .into_iter()
         .chain([stop_line])
@@ -1061,9 +1056,136 @@ fn banner<'a>(
                 .column(17)
                 .row([Cell::Word("key"), Cell::Token(key)]),
         )
+        .block(reach.block("reach"))
         .block(serving.block())
-        .block(reach)
         .block(stop)
+}
+
+/// Which of the `reach` rows a screen shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// The banner's: `internet`, the address on this network, and the loopback address when this
+    /// machine has no network address. A banner is pasted into logs and issues, so it
+    /// never shows the public or tunnel address unless `--local` made an address the whole of its reach.
+    Banner,
+    /// Every class this machine has, as `status` lists them on the person's own terminal.
+    All,
+}
+
+/// The `reach` block's rows, from the one [`Reachable`] the banner and the status reply share: a fixed
+/// label, then one value. An address is our own formatting of a `SocketAddr`, so it is a token that is
+/// never styled and never split.
+pub(crate) struct ReachRows(Vec<(&'static str, Value)>);
+
+/// One `reach` row's value.
+enum Value {
+    /// Fixed words.
+    Word(&'static str),
+    /// An address, with its gloss when it has one.
+    Address(String),
+}
+
+impl ReachRows {
+    /// The rows `scope` shows of `reach`, in class order: internet, public, this network, tunnel, this
+    /// computer.
+    pub(crate) fn of(reach: &Reachable, scope: Scope) -> Self {
+        // With no internet channel an address is the whole of how a peer reaches this machine, so a
+        // `--local` banner shows every class, one row each.
+        let every = scope == Scope::All || reach.internet == Internet::Off;
+        let at = &reach.at;
+        let internet = match reach.internet {
+            Internet::On => "on",
+            Internet::Off => "off (--local)",
+        };
+        let mut rows = vec![("internet", Value::Word(internet))];
+        if every && let Some(public) = at.public() {
+            rows.push(("public", Value::Address(public.to_string())));
+        }
+        match at.network() {
+            Network::At(socket) => rows.push((
+                "this network",
+                Value::Address(match reach.lan {
+                    Lan::Announced => socket.to_string(),
+                    Lan::ByAddressOnly => format!("{socket}, by address only"),
+                }),
+            )),
+            // The host could not read its addresses: the row stays, so the screen never reads offline
+            // when the host only could not look. The cause is in the log.
+            Network::Unknown => rows.push(("this network", Value::Word("unknown"))),
+            Network::Nothing => {}
+        }
+        if every && let Some(tunnel) = at.tunnel() {
+            rows.push(("tunnel", Value::Address(tunnel.to_string())));
+        }
+        // By default the loopback address shows only when this machine has no network address, so the
+        // banner still names an address to reach it at. Never beside `unknown`: a loopback row there
+        // would read as the one address the host has, when it only could not look.
+        let shows_computer = match at.network() {
+            Network::Nothing => true,
+            Network::At(_) => every,
+            Network::Unknown => false,
+        };
+        if shows_computer && let Some(computer) = at.computer() {
+            rows.push(("this computer", Value::Address(computer.to_string())));
+        }
+        Self(rows)
+    }
+
+    /// The rows as a block under `title`, their values in column 17 as the head block's are.
+    pub(crate) fn block(&self, title: &'static str) -> Block<'_> {
+        self.0
+            .iter()
+            .fold(Block::titled(title).column(17), |block, (label, value)| {
+                let value = match value {
+                    Value::Word(words) => Cell::Word(words),
+                    Value::Address(address) => Cell::Token(address),
+                };
+                block.row([Cell::Word(label), value])
+            })
+    }
+}
+
+/// Log, once at bind, what the `reach` block leaves out: the degraded causes at `warn` and the channels
+/// at `debug`. Causes and class names only, never an address: a `warn` line reaches the journal of a
+/// supervised run, and an address there is one the person never chose to show. An unreadable host is
+/// not here; [`ReachSource::reachable`] logs it whenever it becomes so.
+fn log_bind(dialable: &Dialable, mdns: &MdnsState, bound_reach: &Reach, local: bool) {
+    match mdns {
+        MdnsState::OnLan(_) | MdnsState::Blocked => {}
+        MdnsState::LoopbackOnly => {
+            tracing::warn!("mDNS on this host only; another host needs a direct address hint");
+        }
+        MdnsState::BrowseOnly(cause) => {
+            tracing::warn!(%cause, "finding peers, not announcing you");
+        }
+    }
+    match dialable.missing() {
+        Missing::Flags => tracing::warn!("could not check for expiry"),
+        Missing::Expiring(dropped) => {
+            // A class whose every address is expiring has no address left to show.
+            for class in dropped
+                .classes()
+                .filter(|class| !dialable.all().iter().any(|at| at.scope.class() == *class))
+            {
+                tracing::warn!(?class, "only expiring addresses reach this class");
+            }
+        }
+        Missing::Nothing | Missing::Interfaces(_) => {}
+    }
+    if local {
+        return;
+    }
+    // Which half is the person's own, never where it is: the URL is in their own flags and files.
+    let resolver = match &bound_reach.resolver {
+        Resolver::N0 => "n0's public discovery",
+        Resolver::Custom(_) => "custom",
+    };
+    tracing::debug!(resolver, "your addresses, for anyone with your key");
+    let relay = match &bound_reach.relay {
+        RelayHome::N0 => "n0's public relays",
+        RelayHome::Custom(_) => "custom",
+    };
+    tracing::debug!(relay, "the relay this machine offers");
 }
 
 /// Whether a service manager already runs this `serve`: systemd sets `INVOCATION_ID` or `JOURNAL_STREAM`,
@@ -1213,344 +1335,6 @@ async fn sync_round(
     let again = round().await;
     tracing::debug!(asked = again.len(), "a sync round finished");
     replies.len() + again.len()
-}
-
-/// How peers reach this node, for the banner's `how peers reach you` section: whether the bind routes
-/// across the internet (an `internet` channel) or is local/direct-only. Read off the SELECTED bind mode
-/// at the composition seam, never inferred from whether hints are present (that would conflate the
-/// channel with the hint state). An enum, not a bool, so a
-/// third reach kind forces a decision here rather than defaulting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReachKind {
-    /// The bind routes across the internet and NATs (not `--local`): a peer reaches this node by the key
-    /// alone.
-    Internet,
-    /// The bind is local/direct-only (`--local`): a peer reaches this node over local mDNS, or by a
-    /// handed-over address.
-    DirectOnly,
-}
-
-impl ReachKind {
-    /// Map the selected bind mode to its reach kind. The one place the bind becomes a reach tell for the
-    /// banner. `--local` drops the internet channel: the minimal bind has no n0 lookup and no relays.
-    fn of(local: bool) -> Self {
-        if local {
-            Self::DirectOnly
-        } else {
-            Self::Internet
-        }
-    }
-}
-
-/// The `how peers reach you` section: one channel per line with a short label column that scans at a glance.
-/// The `internet` channel appears only when the transport routes across the internet; `direct` on every
-/// direct-only bind, because that bind has no relay and no NAT traversal, so an address is the whole of its
-/// reach and a direct-only banner without one hands the operator nothing. "automatic" leads both auto
-/// channels, and the local lane carries the ADVERTISEMENT's own outcome: how far this node was published is a
-/// fact only the advertisement knows, and the dial hints cannot stand in for it (they rewrite a wildcard bind
-/// to loopback, so every bind would read the same whatever it reaches).
-///
-/// ONE address list per banner: under direct-only the addresses live on the `direct` lane, which is the lane
-/// that exists to hand one over, and the `local` lane keeps only its mDNS-outcome sentence.
-// No gloss here names the transport backend: the operator is told how far they can be reached, never which
-// implementation carries it, because the backend is swappable and the reach promise is not.
-fn reach_section(
-    reach: ReachKind,
-    mdns: &MdnsState,
-    bound_reach: &Reach,
-    dialable: &Dialable,
-) -> String {
-    // The lane renders on every direct-only bind, off the BIND's own expansion. Never off `hints()`
-    // (a dial-side convenience that rewrites a wildcard to loopback, which filtered the lane away on
-    // every bind swoosh can make, since there is no bind flag) and never off the mDNS report, which
-    // says how far an ANNOUNCEMENT reached: on a network that blocks multicast that report is empty
-    // while the host's addresses are exactly as dialable as ever.
-    let direct = matches!(reach, ReachKind::DirectOnly);
-    // Where the node's addresses go. EVERY internet bind publishes them, so every internet bind says so:
-    // the default is the one nobody chose, and telling an operator about the mDNS announcement on their
-    // LAN while staying quiet about the public one would disclose the smaller thing and hide the larger.
-    // The line states the CONSEQUENCE rather than the record format, because the operator who needs it is
-    // the one not thinking about DNS at all: their addresses are readable by key, without a dial.
-    let records = (reach == ReachKind::Internet).then(|| match &bound_reach.resolver {
-        Resolver::N0 => {
-            "n0's public discovery: your addresses, for anyone with your key".to_owned()
-        }
-        // The same consequence, said the same way. A custom resolver is not a private one: pkarr records
-        // are readable by anyone holding the key, so naming only the URL here would let the operator who
-        // stood one up read this line as the disclosure going away.
-        Resolver::Custom(url) => format!("{url}: your addresses, for anyone with your key"),
-    });
-    // Which relay this node offers, and only for a node that named one: a bind on n0's relays is the
-    // default every page describes, and it costs the operator nothing they did not already read. Naming
-    // EITHER of the two servers prints this line, because what an operator who runs half of this most
-    // needs to see is which half is still n0's, and a line that is absent says nothing.
-    let split = reach == ReachKind::Internet
-        && (bound_reach.relay != RelayHome::N0 || bound_reach.resolver != Resolver::N0);
-    let relay = split.then(|| match &bound_reach.relay {
-        RelayHome::N0 => "n0's public relays".to_owned(),
-        RelayHome::Custom(url) => url.to_string(),
-    });
-    // Width the label column to the widest channel label actually shown.
-    let mut labels: Vec<&str> = Vec::new();
-    if reach == ReachKind::Internet {
-        labels.push("internet");
-    }
-    if records.is_some() {
-        labels.push("records");
-    }
-    if relay.is_some() {
-        labels.push("relay");
-    }
-    labels.push("local");
-    if direct {
-        labels.push("direct");
-    }
-    let width = labels.iter().map(|l| l.len()).max().unwrap_or(0);
-    let gutter = 3;
-    let gloss_col = 2 + width + gutter;
-
-    let mut out = String::from("how peers reach you\n");
-    if reach == ReachKind::Internet {
-        out.push_str(&reach_line(
-            width,
-            gutter,
-            "internet",
-            "automatic; peers reach you by the key above, even across NATs",
-        ));
-    }
-    // Directly under the internet channel: the two servers that channel runs on, in the order a dial
-    // uses them (find the peer's record, then fall back to its relay).
-    if let Some(records) = &records {
-        out.push_str(&reach_line(width, gutter, "records", records));
-    }
-    if let Some(relay) = &relay {
-        out.push_str(&reach_line(width, gutter, "relay", relay));
-    }
-    // One arm per outcome of the ONE advertise call: a node another host can hear, a node only this host
-    // can, a node that hears but is not heard, and no mDNS at all. The three degraded arms each name the
-    // next step (or the cause), because from the inside they all look identical to a live advertisement.
-    let (local, announced): (String, &[SocketAddr]) = match (mdns, reach) {
-        (MdnsState::OnLan(addrs), ReachKind::Internet) => (
-            "automatic; your devices just need the key (mDNS), announced at:".to_owned(),
-            addrs,
-        ),
-        // The announced set is a subset of the direct lane's below, and one banner carries one address
-        // list: a direct-only node names its addresses once, where a peer is told to take them.
-        (MdnsState::OnLan(_), ReachKind::DirectOnly) => (
-            "automatic; local mDNS, or direct, no NAT traversal".to_owned(),
-            &[],
-        ),
-        (MdnsState::LoopbackOnly, _) => (
-            "mDNS on this host only; another host needs a direct address hint".to_owned(),
-            &[],
-        ),
-        (MdnsState::BrowseOnly(cause), _) => {
-            (format!("finding peers, not announcing you ({cause})"), &[])
-        }
-        (MdnsState::Blocked, ReachKind::Internet) => (
-            "off; mDNS unavailable here, so reach by the key over the internet".to_owned(),
-            &[],
-        ),
-        // The direct lane always renders under direct-only, so the down-state can always point at it:
-        // there is no bind whose banner offers no address to hand over.
-        (MdnsState::Blocked, ReachKind::DirectOnly) => (
-            "off; mDNS unavailable here, so hand a peer the address below".to_owned(),
-            &[],
-        ),
-    };
-    out.push_str(&reach_line(width, gutter, "local", &local));
-    // Each address on its own line, bare and copy-clean (the same standard as the node id), aligned under
-    // the header's gloss column.
-    for addr in announced {
-        out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
-    }
-    if direct {
-        out.push_str(&direct_lane(dialable, width, gutter));
-    }
-    out
-}
-
-/// The `direct` lane: the gloss that says what to DO with the lines, then ONE address per reach class.
-///
-/// A rendering adapter over a type that lives in a lower crate, which is why it is a function and not a
-/// method: the order, the classes and the ports are the expansion's facts, and this only spells them.
-///
-/// ONE LINE PER CLASS, the v4 address where that class has one. An ordinary two-interface laptop
-/// expands to eight entries and a wifi+ethernet+VPN+docker host to fifteen, but they offer at most
-/// FOUR decisions: the peer is out on the internet, on this network, on one named link, or on this
-/// machine. A second address in the same class is noise rather than a choice, so it does not render,
-/// and there is no flag to bring it back. v4 leads its class because it is the address a peer can
-/// paste anywhere.
-///
-/// The ORDER comes from the expansion ([`Dialable::all`]): everything a peer elsewhere can route to
-/// first, then a tunnel address, then loopback last, so the lane can never lead with the one address
-/// that works only for a peer already on this machine.
-///
-/// EVERY line carries a mark, the widest included. A bare line reads as the default and there is no
-/// default: this host cannot know where the operator's peer is, so it states how far each address goes
-/// and leaves the choosing to the one person who does know. After the cap the mark is the ONLY thing
-/// telling two lines apart, which raises its bar rather than lowering it: it CLASSIFIES and never
-/// predicts. `the internet` says who can route to the address, not that a default-deny firewall will
-/// let them through.
-///
-/// The marks align in a column so the classes scan against each other rather than ragged against the
-/// addresses, and the padding sits BEFORE the mark, so a copy that ends at the address is still clean.
-///
-/// The 80-column bound holds BY CONSTRUCTION, with nothing to check at runtime: every term of the
-/// widest line is fixed. The gloss column is 11, the widest legal socket is a v6 with no
-/// compressible group and a five-digit port at 47 (link-locals are filtered one crate down, so no
-/// `%zone` can widen one), the mark gutter is 2, and the widest mark is 14 including its
-/// parentheses. `11 + 47 + 2 + 14 = 74`, which is why no line here measures itself.
-fn direct_lane(dialable: &Dialable, width: usize, gutter: usize) -> String {
-    let gloss_col = 2 + width + gutter;
-    // Same reach class whatever the tunnel's link name: two overlays are two spellings of one
-    // decision, and the cap is one line per DECISION. `class()` rather than `PartialEq`, which
-    // would read `Tunnel { link }` pairs as distinct classes on the strength of the name.
-    let mut chosen: Vec<&At> = Vec::new();
-    for at in dialable.all() {
-        let Some(kept) = chosen
-            .iter_mut()
-            .find(|kept| kept.scope.class() == at.scope.class())
-        else {
-            chosen.push(at);
-            continue;
-        };
-        // v4 wins its class: `Dialable::all` holds interface order within a class, so without this
-        // a host whose v6 happens to enumerate first hands its operator the harder address to paste.
-        if kept.socket.is_ipv6() && at.socket.is_ipv4() {
-            *kept = at;
-        }
-    }
-    // The two ephemeral binds an unnamed dual-stack bind gets are two ports, and the operator has to
-    // take the one that came with the address they picked. Measured over the RENDERED rows, so a
-    // v4-only host and any same-port bind render byte-identically to a lane with no clause.
-    let mixed_ports = chosen
-        .windows(2)
-        .any(|pair| pair[0].socket.port() != pair[1].socket.port());
-    let addrs: Vec<String> = chosen.iter().map(|at| at.socket.to_string()).collect();
-    // One column for the marks, measured over the addresses actually being printed rather than a fixed
-    // budget: an IPv6 line is far wider than an IPv4 one and a fixed column would either waste the
-    // banner's width on every v4-only host or wrap on every v6 one.
-    let addr_col = addrs.iter().map(String::len).max().unwrap_or(0);
-    let rows: Vec<(String, &'static str)> = addrs
-        .into_iter()
-        .zip(&chosen)
-        .map(|(addr, at)| (addr, mark(at.scope.class())))
-        .collect();
-    // The class a drop took the last row of, asked only of a drop report: it is the one fact the
-    // expiring arm renders, and `emptied` is where the whole of that question lives.
-    let emptied = match dialable.missing() {
-        Missing::Expiring(dropped) => emptied(dropped, &chosen),
-        _ => None,
-    };
-    // ONE clause, first match wins, loudest first. The lane carries a single gloss because the
-    // operator gives it a single glance, so the conditions are ranked rather than concatenated: a
-    // list that could not be read outranks one that lost a class, which outranks a list nothing
-    // could be checked against, which outranks a port skew every row already answers for itself.
-    // `Missing::Expiring` and `Missing::Flags` cannot co-occur (nothing is dropped when nothing
-    // was read), so there is no arm for the pair and no order to settle between them.
-    let gloss: Cow<'static, str> = match (dialable.missing(), emptied, rows.len()) {
-        // Unreachable on any bind that came up (a bound socket answers at loopback at the very least),
-        // stated rather than left to render a header over nothing.
-        (_, _, 0) => Cow::Borrowed("no address to hand over"),
-        // The cause, then the bound: without this a lone `127.0.0.1  (this machine)` row asserts
-        // this host is loopback-only when the truth is that nothing could be read. The errno stays
-        // in the log, where it is free to be as long as it likes.
-        (Missing::Interfaces(_), _, 1) => {
-            Cow::Borrowed("could not read this host's addresses; only this one is known:")
-        }
-        (Missing::Interfaces(_), _, _) => {
-            Cow::Borrowed("could not read this host's addresses; only these are known:")
-        }
-        // Only a drop that took a whole class off the screen; see [`emptied`]. ONE arm at any row
-        // count: `what is left:` is count-free, so it is correct over one row and over five, and
-        // the mark is the row's own word, so a reader matches the ABSENT line by literal compare
-        // against the marks that are still on screen.
-        (_, Some(class), _) => Cow::Owned(format!(
-            "only expiring addresses reach {}; what is left:",
-            mark(class)
-        )),
-        // WHOLE and unchecked rather than short, so the instruction stays intact and the caveat is a
-        // parenthetical: every row still dials, and only how long it will keep dialing is unknown.
-        // The misread to kill is an operator who believes we checked.
-        (Missing::Flags, _, 1) => {
-            Cow::Borrowed("hand a peer this address (could not check for expiry):")
-        }
-        (Missing::Flags, _, _) => {
-            Cow::Borrowed("hand a peer one of these (could not check for expiry):")
-        }
-        (_, _, 1) => Cow::Borrowed("hand a peer this address:"),
-        // One rendered row is one port, so the mixed condition cannot hold at one address and the
-        // clause lives on the many arm alone.
-        (_, _, _) if mixed_ports => {
-            Cow::Borrowed("hand a peer one of these (each address has its own port):")
-        }
-        (_, _, _) => Cow::Borrowed("hand a peer one of these:"),
-    };
-    let mut out = reach_line(width, gutter, "direct", &gloss);
-    for (addr, mark) in &rows {
-        // The address leads each line so a copy starts clean, at the gloss column, the same standard the
-        // node id is held to.
-        out.push_str(&format!("{:gloss_col$}{addr:<addr_col$}  ({mark})\n", ""));
-    }
-    out
-}
-
-/// How far a class of address reaches, in the words the banner spells it with.
-///
-/// ONE spelling of each class for the whole lane: the rows carry these, and the expiring gloss
-/// interpolates the same word, so a reader who is told `only expiring addresses reach the internet`
-/// matches that against the row marks by literal compare. Two spellings of `the internet` in one
-/// file would be two strings to keep in step and one of them eventually wrong.
-///
-/// Four marks that read as one family (a determiner and a noun), so the classes scan against each
-/// other, and short on purpose: the widest legal v6 socket is 47 columns and a longer phrasing
-/// wraps. A tunnel is `this tunnel` and does NOT name its link. The cap renders one line per class,
-/// so at most one tunnel row ever appears and the name has no second overlay to tell it apart from:
-/// it was redundant where it informed (the address already said it) and empty where it did not (on
-/// macOS every overlay is `utunN`). Dropping it is also what leaves this banner with NO
-/// externally-sourced string at all, which is why nothing here guards against control characters or
-/// measures a line: there is no longer an input to guard. Re-adding an OS-supplied string here
-/// brings both of those back with it.
-fn mark(class: ScopeClass) -> &'static str {
-    match class {
-        ScopeClass::Internet => "the internet",
-        ScopeClass::Network => "this network",
-        ScopeClass::Tunnel => "this tunnel",
-        ScopeClass::ThisMachine => "this machine",
-    }
-}
-
-/// The reach class that the addresses dropped as expiring took the last row of, if any: the
-/// highest-ranked one when a drop emptied several at once.
-///
-/// The fact an operator can act on is not how MANY addresses went, it is WHICH class went. The
-/// cap already renders one line per class, so a drop a class survived is invisible by design and a
-/// tally of hidden addresses is noise in a glance: that arm would fire on every laptop that has ever
-/// slept and tell its operator nothing to do. A class with no row left is the opposite case, and the
-/// one the lane would otherwise lie about: silence where an address used to be reads as "this host
-/// has none", when the truth is that this host is losing them and may want to wait or renew.
-///
-/// Asked over the classes that actually lost an address, by CLASS and never by scope. A tunnel
-/// scope carries the link it rides, and the link whose only address expired leaves no surviving row
-/// to take that name from, so the drop that most needs saying is the one a question phrased as
-/// `Scope::Tunnel` could not even be formed for. Reading the report's own classes is also what
-/// keeps this honest as the classes change: a sweep of every class written out here answers for the
-/// four that exist today and silently skips the fifth.
-///
-/// The FIRST emptied class is the highest-ranked one, for free: [`Expiring::classes`] yields in
-/// [`ScopeClass`]'s own rank order, so the one gloss the lane can spend goes to the class whose
-/// absence costs the operator most. It can never be all four, because a lane with no rows at all is
-/// the first arm.
-fn emptied(dropped: &Expiring, chosen: &[&At]) -> Option<ScopeClass> {
-    dropped
-        .classes()
-        .find(|class| !chosen.iter().any(|at| at.scope.class() == *class))
-}
-
-/// One `how peers reach you` line: `  <label padded>   <gloss>`.
-fn reach_line(width: usize, gutter: usize, label: &str, gloss: &str) -> String {
-    format!("  {label:<width$}{:gutter$}{gloss}\n", "")
 }
 
 /// Render a count of seconds as a short human span (`5400` -> `1h 30m`, `3600` -> `1h`), so the

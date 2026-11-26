@@ -37,16 +37,6 @@ const NAMED: &[(&str, &str, Kind)] = &[
         ),
     ),
     (
-        "bin/swoosh/commands/serve.rs",
-        "the key above",
-        Kind::Owed("SW2"),
-    ),
-    (
-        "bin/swoosh/commands/serve.rs",
-        "the address below",
-        Kind::Owed("SW2"),
-    ),
-    (
         "bin/swoosh/commands/invite.rs",
         "paste this line",
         Kind::Owed("SW4"),

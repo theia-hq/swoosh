@@ -30,6 +30,7 @@ use crate::serve::{Internet, Lan, ReachSource, Reachable};
 use crate::sync::{Answer, Dial, ExchangeError};
 use crate::touch::{Touch, TouchHere, Touched};
 
+pub mod banner;
 pub mod touch_id;
 
 /// The four bytes that open every control frame this build writes, so a test that hand-builds a frame
