@@ -46,6 +46,9 @@ sshh = { git = "https://github.com/theia-hq/services", rev = "3976209653b33bc356
 tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "c4dff54ba0acbe4563389426b9b450f31512a6ad" }
 transfer = { git = "https://github.com/theia-hq/services", rev = "3976209653b33bc35639035fe7d0e8ef329269a3" }
 
+# Decides, per stream and as clap's own errors do, whether swoosh's own fixed words are styled: plain in
+# a pipe or under `NO_COLOR`. Already in the tree through clap.
+anstream = "1"
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
 blake3 = "1"

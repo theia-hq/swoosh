@@ -1,7 +1,8 @@
-use core::fmt::{self, Write as _};
 use std::io;
 
 use swoosh::escape::EscapedComplete;
+
+pub(super) use crate::screen::{Span, StateLine, width};
 
 /// A service row with an indivisible canonical target.
 pub(super) struct Row<'a> {
@@ -60,90 +61,6 @@ pub(super) fn render_aligned(
         }
     }
     Ok(())
-}
-
-/// Measures escaped scalars, not terminal columns; only ASCII-target rows use compact layout.
-pub(super) fn width(value: impl fmt::Display) -> usize {
-    struct Count(usize);
-    impl fmt::Write for Count {
-        fn write_str(&mut self, text: &str) -> fmt::Result {
-            self.0 += text.chars().count();
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    // The counter cannot fail, and our Display implementations propagate only sink failures.
-    let _ = write!(count, "{value}");
-    count.0
-}
-
-/// Fixed words may wrap individually; complete targets must remain indivisible.
-pub(super) enum Span<'a> {
-    /// A fixed word that may wrap independently.
-    Word(&'static str),
-    /// A complete target that never splits.
-    Target(&'a str),
-}
-
-impl fmt::Display for Span<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Word(word) => f.write_str(word),
-            Self::Target(target) => write!(f, "{}", EscapedComplete(target)),
-        }
-    }
-}
-
-/// Only fixed words may wrap. A target is one span even when it contains ordinary spaces.
-pub(super) struct StateLine<'a, W> {
-    /// The continuation sink.
-    pub(super) out: &'a mut W,
-    /// Escaped scalar count including indentation, not terminal columns; zero means no pending line.
-    pub(super) column: usize,
-}
-
-impl<W: io::Write> StateLine<'_, W> {
-    /// Append fixed words with wrapping.
-    pub(super) fn words(&mut self, words: &'static str) -> io::Result<()> {
-        for word in words.split_ascii_whitespace() {
-            self.span(Span::Word(word))?;
-        }
-        Ok(())
-    }
-
-    /// Append one indivisible span, wrapping first when needed.
-    pub(super) fn span(&mut self, span: Span<'_>) -> io::Result<()> {
-        let ascii = match &span {
-            Span::Word(_) => true,
-            Span::Target(target) => target.is_ascii(),
-        };
-        let size = width(&span);
-        if self.column != 0 && (!ascii || self.column + 1 + size > 80) {
-            self.finish()?;
-        }
-        if self.column == 0 {
-            write!(self.out, "    ")?;
-            self.column = 4;
-        } else {
-            write!(self.out, " ")?;
-            self.column += 1;
-        }
-        write!(self.out, "{span}")?;
-        self.column += size;
-        if !ascii {
-            self.finish()?;
-        }
-        Ok(())
-    }
-
-    /// End a pending line and reset its scalar count.
-    pub(super) fn finish(&mut self) -> io::Result<()> {
-        if self.column != 0 {
-            writeln!(self.out)?;
-        }
-        self.column = 0;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
