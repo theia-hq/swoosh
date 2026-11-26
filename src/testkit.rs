@@ -595,8 +595,13 @@ impl Loopback {
                 None => crate::sync::exchange(&self.home, near_read, near_write).await,
             }
         };
-        let (dialed, answered) =
-            tokio::join!(dialer, crate::sync::answer(server, far_read, far_write));
+        // Permits of this run alone, so whose key takes one does not matter.
+        let receive = crate::sync::Receive::new();
+        let caller = TestNode::seeded(0).verify_key();
+        let (dialed, answered) = tokio::join!(
+            dialer,
+            crate::sync::answer(server, &receive, caller, far_read, far_write)
+        );
         // A server that closes without answering is, to the dialer, one that did not answer.
         answered?;
         dialed

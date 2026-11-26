@@ -26,12 +26,18 @@
 //!
 //! Only a device of a root, one that holds it or not, takes an update. Any other machine answers `same`
 //! with digest zero and never asks for one, so a dialer holding an update never reads that answer as
-//! "holds it". A device that cannot read its own standing closes the stream without answering.
+//! "holds it". A device that cannot read its own standing, or that is already answering that peer or as
+//! many exchanges as it answers at once, closes the stream without answering.
+//!
+//! The answering side bounds what a peer can hold: one exchange per peer and a few in all ([`Receive`]),
+//! the whole of each within [`ANSWER_WITHIN`], and an update's bytes are allocated as they arrive, never on
+//! the length alone.
 
 use core::future::Future;
 use core::time::Duration;
 use std::collections::VecDeque;
 use std::io;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
@@ -54,6 +60,21 @@ use crate::streams::{Ask, Opened, StreamSource, Unopened};
 pub const EACH: Duration = Duration::from_secs(5);
 // A Main open must time out inside the ask that waits on it, or a stalled session is never evicted.
 const _: () = assert!(crate::peers::MAIN_OPEN_TIMEOUT.as_millis() < EACH.as_millis());
+
+/// How long one exchange this machine answers may take, from its request to its last byte. A device
+/// that dials gives up at [`EACH`], so only a stalled or hostile peer meets this bound; without it, a
+/// peer that sends nothing, or a byte at a time, holds the answer and its buffers open for as long as it
+/// likes (item 16, Adversary call 1d).
+pub const ANSWER_WITHIN: Duration = Duration::from_secs(30);
+const _: () = assert!(EACH.as_millis() < ANSWER_WITHIN.as_millis());
+
+/// How much of an update's body is allocated ahead of the bytes that fill it. A length is the peer's
+/// claim, not bytes it has sent, so the buffer grows by at most this much past what has arrived.
+const AHEAD: usize = 64 * 1024;
+
+/// How many exchanges this machine answers at once, over every peer. One per peer keeps a peer from
+/// starving another; a few in all keeps the buffers of a node's answers to a few exchanges' worth.
+const AT_ONCE: usize = 4;
 
 /// How old `synced` may be before a dialing verb exchanges on its connection.
 pub const STALE: Duration = Duration::from_secs(60 * 60);
@@ -117,6 +138,9 @@ pub enum ExchangeError {
     /// The other side sent more than any update can be.
     #[error("the other device sent more than any update can be")]
     TooLarge,
+    /// This machine is already answering another exchange.
+    #[error("this machine is answering another exchange")]
+    Busy,
     /// The update taken could not be folded.
     #[error(transparent)]
     Fold(#[from] FoldError),
@@ -129,6 +153,61 @@ pub enum ExchangeError {
     /// The source gave no stream to the other device; why is kept typed, for the log.
     #[error("no stream to the other device opened")]
     Unopened(Unopened),
+}
+
+/// The receive permits: one exchange answered per peer, and at most [`AT_ONCE`] in all. Each answer takes
+/// its peer's without waiting, after the fixed-size request and before any update is read from disk or the
+/// stream, and holds it until the exchange's buffers are dropped. A stream from a peer already answered,
+/// or past the cap, is closed unanswered, so the streams of a session (up to 256) cost one exchange's
+/// buffers, not one each.
+///
+/// One per peer, not one per node, because the device being revoked is still a member here until the
+/// revocation folds: holding the one permit of every device, it could keep the root's offer of its own
+/// revocation from landing. Keyed by peer, it holds only its own.
+///
+/// Inbound only, by design, where CS1 (section 7.3) shares one permit with the exchanges this machine
+/// dials: a shared permit that never waits makes two devices dialing each other at once each refuse the
+/// other, and every `serve` opens with a round to every device. The exchanges dialed are bounded
+/// already: one at a time to devices this machine chose, each within [`EACH`]. Clones share the permits.
+#[derive(Debug, Clone, Default)]
+pub struct Receive {
+    held: Arc<Mutex<Vec<VerifyKey>>>,
+}
+
+impl Receive {
+    /// Permits none of which is taken.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take `peer`'s permit, or [`ExchangeError::Busy`] while `peer` is answered already or [`AT_ONCE`]
+    /// exchanges are. Never waits: a queue would only move the held buffers into the waiting streams.
+    fn take(&self, peer: VerifyKey) -> Result<Permit, ExchangeError> {
+        // The list is only pushed to and filtered, so one a panic left poisoned is still whole.
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.len() >= AT_ONCE || held.contains(&peer) {
+            return Err(ExchangeError::Busy);
+        }
+        held.push(peer);
+        Ok(Permit {
+            held: Arc::clone(&self.held),
+            peer,
+        })
+    }
+}
+
+/// One peer's taken permit, given back when dropped.
+#[derive(Debug)]
+struct Permit {
+    held: Arc<Mutex<Vec<VerifyKey>>>,
+    peer: VerifyKey,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        held.retain(|peer| *peer != self.peer);
+    }
 }
 
 /// The digest an exchange names `bytes` by: BLAKE3, or all zeros for no update.
@@ -260,9 +339,35 @@ async fn dial_with(
     Ok(answer)
 }
 
-/// Answer one exchange as the server, over an admitted stream of `control.sync`.
+/// Answer one exchange as the server, over an admitted stream of `control.sync` from `peer`, holding its
+/// permit from `receive` and all within [`ANSWER_WITHIN`]. An exchange that fails ends the stream cleanly:
+/// the dialer reads a clean end as no answer, and a writer left unshut reaches it as a reset. The bound
+/// covers that end too, since a peer that withholds credit can stall it.
 pub async fn answer(
     home: &Home,
+    receive: &Receive,
+    peer: VerifyKey,
+    reader: impl AsyncRead + Unpin,
+    mut writer: impl AsyncWrite + Unpin,
+) -> Result<(), ExchangeError> {
+    let answered = tokio::time::timeout(ANSWER_WITHIN, async {
+        let answered = answer_held(home, receive, peer, reader, &mut writer).await;
+        if answered.is_err() {
+            // Best effort, since the failure may have been the stream's own.
+            let _ended = writer.shutdown().await;
+        }
+        answered
+    })
+    .await;
+    // Past the bound the stream is dropped as it is: ending it cleanly is one more wait on the peer.
+    answered.unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut).into()))
+}
+
+/// The exchange [`answer`] bounds.
+async fn answer_held(
+    home: &Home,
+    receive: &Receive,
+    peer: VerifyKey,
     mut reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin,
 ) -> Result<(), ExchangeError> {
@@ -272,6 +377,9 @@ pub async fn answer(
     let theirs = Epoch(reader.read_u64().await?);
     let mut their_digest = [0_u8; 32];
     reader.read_exact(&mut their_digest).await?;
+    // Before the held update, the kept fork or any update from the stream is read: a stream past this
+    // point owns at most one exchange's buffers, and dropping the permit last releases it after them.
+    let _permit = receive.take(peer)?;
     // A machine that is not a device takes nothing and gives nothing, and says so with digest zero. One
     // that cannot read its standing says nothing: the dialer reads the closed stream as no answer.
     let Some(pin) = device_pin(home).await? else {
@@ -388,13 +496,44 @@ async fn write_update(
 
 /// Read an update's length and bytes, refusing one larger than any update can be before it is read.
 async fn read_update(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, ExchangeError> {
+    let mut steps = Vec::new();
+    read_update_into(reader, &mut steps).await?;
+    // Every byte has arrived, so the one copy that joins the steps is the peer's own sending to pay.
+    Ok(steps.concat())
+}
+
+/// [`read_update`] into `steps`, each of at most [`AHEAD`] bytes, allocated only when the one before is
+/// full: a peer that claims the largest length and sends little, or a byte at a time, gets at most
+/// [`AHEAD`] allocated past what has arrived. Steps, not one growing buffer, so the bytes are copied once
+/// at the end rather than at every growth. The caller owns them so a cut read leaves them to be measured.
+async fn read_update_into(
+    reader: &mut (impl AsyncRead + Unpin),
+    steps: &mut Vec<Vec<u8>>,
+) -> Result<(), ExchangeError> {
     let len = u64::from(reader.read_u32().await?);
     if len > MAX_ROSTER_BLOB {
         return Err(ExchangeError::TooLarge);
     }
-    let mut bytes = vec![0_u8; usize::try_from(len).map_err(|_| ExchangeError::TooLarge)?];
-    reader.read_exact(&mut bytes).await?;
-    Ok(bytes)
+    let mut left = usize::try_from(len).map_err(|_| ExchangeError::TooLarge)?;
+    while left > 0 {
+        let size = left.min(AHEAD);
+        let at = steps.len();
+        steps.push(Vec::with_capacity(size));
+        let step = &mut steps[at];
+        while step.len() < size {
+            // `take` keeps the read inside the step, so it never grows past its capacity or reads the
+            // frame after; `size` fits the u32 length read above, so the widening is exact.
+            let read = (&mut *reader)
+                .take((size - step.len()) as u64)
+                .read_buf(step)
+                .await?;
+            if read == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+        }
+        left -= size;
+    }
+    Ok(())
 }
 
 /// Record that an exchange reached another device, now, owner-only through
