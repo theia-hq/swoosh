@@ -40,6 +40,12 @@ use crate::commands::{
 
 mod commands;
 mod decision;
+// Its callers move onto it in the next change, which deletes this.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the screen's callers move onto it next")
+)]
+mod screen;
 
 /// `--home`'s help line, naming the default home of the platform this binary was built for
 /// ([`swoosh::home::Home::resolve`]).

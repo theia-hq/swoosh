@@ -5,8 +5,8 @@ use swoosh::escape::{Escaped, EscapedComplete, EscapedPath};
 use swoosh::home::Home;
 use swoosh::serve::control_codec::ControlError;
 
-use crate::commands::service_rows::{Span, StateLine, width};
 use crate::commands::service_state::{ReadError, ReadMode, ResidentObservation, ServiceState};
+use crate::screen::{Span, StateLine, width};
 
 /// The bare command reads the saved next-start list and one local resident snapshot.
 #[derive(Debug)]
