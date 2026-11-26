@@ -91,7 +91,7 @@ fn serve(home: &Path, run: &Path, args: &[&str]) -> KillOnDrop {
     let mut seen = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut byte = [0u8; 1];
-    while !String::from_utf8_lossy(&seen).contains("ctrl-c to stop") {
+    while !String::from_utf8_lossy(&seen).contains("swoosh is serving") {
         assert!(Instant::now() < deadline, "serve never became ready");
         if stdout.read(&mut byte).expect("read serve's banner") == 0 {
             panic!("serve exited before it was ready");

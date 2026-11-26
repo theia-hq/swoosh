@@ -325,8 +325,28 @@ fn each_internal_row_admits_who_it_says() {
     });
 }
 
+/// The rows of a screen's block titled `title`: the lines under it, up to the blank line.
+fn reach_rows<'s>(screen: &'s str, title: &str) -> Vec<&'s str> {
+    screen
+        .lines()
+        .skip_while(|line| *line != title)
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .collect()
+}
+
+/// Whether `screen` holds the whole block titled `title`: the title, then a blank line after its rows.
+fn reach_closed(screen: &str, title: &str) -> bool {
+    screen
+        .lines()
+        .skip_while(|line| *line != title)
+        .skip(1)
+        .any(str::is_empty)
+}
+
 /// The dotted names the compiled `swoosh serve`'s catalog lists, asked over its control socket, are exactly
-/// the table's: no route bound outside it, and no row without a route.
+/// the table's: no route bound outside it, and no row without a route. Its `status`, asked of the same run,
+/// prints the banner's `reach` rows.
 #[test]
 fn a_running_serve_binds_exactly_the_internal_table() {
     use std::io::{BufRead as _, BufReader};
@@ -364,16 +384,29 @@ fn a_running_serve_binds_exactly_the_internal_table() {
             let _ = sender.send(line);
         }
     });
+    // Ready at the title, which prints only after the bind; then read on to the end of its `reach` block.
     let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
+    let mut banner = String::new();
+    while !banner.contains("swoosh is serving") || !reach_closed(&banner, "reach") {
         let line = lines
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("serve never became ready before the deadline")
             .expect("read the banner");
-        if line.contains("ctrl-c to stop") {
-            break;
-        }
+        banner.push_str(&line);
+        banner.push('\n');
     }
+    // `status` reads the same running serve's reach through its own path: the control socket, then its
+    // report. Under `--local` it prints every class, as the banner does, so the rows are the same.
+    let status = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .arg("--home")
+        .arg(&dir)
+        .arg("status")
+        .env("XDG_RUNTIME_DIR", &run)
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let status = String::from_utf8(status.stdout).unwrap();
 
     let home = Home::resolve(Some(dir)).unwrap();
     // The serve's own runtime root: the per-user temp dir on macOS, `$XDG_RUNTIME_DIR/swoosh` elsewhere.
@@ -395,6 +428,13 @@ fn a_running_serve_binds_exactly_the_internal_table() {
     // Only the one child spawned here is ever signalled.
     drop(serve);
     let _ = std::fs::remove_dir_all(&base);
+
+    let shown = reach_rows(&banner, "reach");
+    assert!(
+        shown.iter().any(|row| row.starts_with("  this computer  ")),
+        "{banner}"
+    );
+    assert_eq!(reach_rows(&status, "reach:"), shown, "{banner}\n{status}");
 
     let mut bound: Vec<String> = menu
         .unwrap()

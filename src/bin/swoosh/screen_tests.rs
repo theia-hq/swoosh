@@ -192,16 +192,22 @@ fn style_reaches_a_terminal_and_never_a_pipe() {
     }
 }
 
-/// The check reads every block a test writes, except a line a later change owes.
+/// The check reads every line of every block a test writes, with no line excused: the 81-column line
+/// the banner once printed is caught like any other breach.
 #[test]
 fn a_screen_a_test_writes_is_held_to_the_law() {
-    let owed = "to keep this machine serving after a reboot: systemctl --user enable --now swoosh";
-    let screen = Screen::default().block(Block::default().text(owed.to_owned()));
-    assert_eq!(written(&screen), format!("{owed}\n"));
-    let breach = Block::default().text("Two sentences. One line.".to_owned());
-    let caught = std::panic::catch_unwind(|| written(&Screen::default().block(breach)));
-    let message = caught.unwrap_err().downcast::<String>().unwrap();
-    assert!(message.contains("TwoSentences"), "{message}");
+    for (line, rule) in [
+        (
+            "to keep this machine serving after a reboot: systemctl --user enable --now swoosh",
+            "Width",
+        ),
+        ("Two sentences. One line.", "TwoSentences"),
+    ] {
+        let breach = Block::default().text(line.to_owned());
+        let caught = std::panic::catch_unwind(|| written(&Screen::default().block(breach)));
+        let message = caught.unwrap_err().downcast::<String>().unwrap();
+        assert!(message.contains(rule), "{message}");
+    }
 }
 
 /// A screen is built whole and written once, styled or not, so an early-closing reader or a line logged

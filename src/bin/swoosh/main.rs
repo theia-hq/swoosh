@@ -90,6 +90,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Serve services on this machine; peers you admit reach them.
+    #[command(after_help = serve::AT_LOGIN)]
     Serve(serve::ServeCmd),
     /// Stop swoosh serve here or on one of your own devices
     Stop(stop::StopCmd),

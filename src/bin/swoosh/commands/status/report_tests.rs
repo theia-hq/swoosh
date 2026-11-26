@@ -14,6 +14,7 @@ use swoosh::grants::{ANYONE, Delegation, GrantKind, GrantRecord};
 use swoosh::home::Home;
 use swoosh::root::Date;
 use swoosh::roster::{Epoch, Member, RevokedDevice, RosterDoc};
+use swoosh::serve::{Internet, Lan, Reachable};
 use swoosh::standing::Standing;
 use swoosh::testkit::{STANDING_UNTIL, TestNode, TestRoot};
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
@@ -1604,6 +1605,7 @@ fn status_tells_a_refusal_from_off() {
         resident: ResidentObservation::Membership(Some((
             catalog(&["old", "ssh", "web"]),
             disabled,
+            swoosh::testkit::loopback_reach(),
         ))),
     };
     let known = DisabledList::Known(vec!["old".to_owned(), "ssh".to_owned(), "web".to_owned()]);
@@ -1955,7 +1957,9 @@ async fn status_lists_internal_routes_while_serving() {
     // The resident binds a dotted name, and it never joins `serving:`: the block is where routes print.
     assert!(!serving_row(&out).contains('.'), "{out}");
     assert!(
-        out.contains(&format!("\nserving: ssh\n\n{BLOCK}\ntwo copies")),
+        out.contains(&format!(
+            "\nserving: ssh\n\nreach:\n  internet       on\n  this computer  127.0.0.1:51006\n\n{BLOCK}\ntwo copies"
+        )),
         "{out}"
     );
     assert_eq!(out.matches("internal routes:").count(), 1, "{out}");
@@ -1975,4 +1979,220 @@ fn every_internal_route_has_its_words() {
         assert!(!super::what(route.name).is_empty(), "{}", route.name);
         assert!(!super::who(route.admits).is_empty(), "{}", route.name);
     }
+}
+
+/// A resident that answers one `status` with `reply`, serving `names`, then is gone: a `StatusReply` with
+/// `reach`, or bytes that are no reply at all.
+fn answer_once(home: &Home, reply: Option<(&[&str], Reachable)>) -> tokio::task::JoinHandle<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use swoosh::serve::control_codec::{DisabledList, Request, Response, ServiceMenu, StatusReply};
+    use tokio::io::AsyncWriteExt as _;
+
+    let socket = home.control_socket().unwrap();
+    let dir = socket.parent().unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(home.serve_lock(), std::process::id().to_string()).unwrap();
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let bytes = reply.map(|(names, reach)| {
+        Response::Status(StatusReply {
+            node_id: TestNode::seeded(OWN).node_id(),
+            pid: std::process::id(),
+            reach,
+            uptime_secs: 0,
+            menu: ServiceMenu {
+                catalog: catalog(names),
+                disabled: DisabledList::Known(vec![]),
+            },
+            warm: vec![],
+        })
+    });
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert!(matches!(
+            Request::read(&mut stream).await.unwrap(),
+            Request::Status
+        ));
+        match bytes {
+            Some(reply) => reply.write(&mut stream).await.unwrap(),
+            None => stream.write_all(b"not a reply").await.unwrap(),
+        }
+        drop(stream);
+        std::fs::remove_file(socket).unwrap();
+    })
+}
+
+/// `status` on a home whose resident answers once with `reply`.
+async fn status_answered(home: &Home, reply: Option<(&[&str], Reachable)>) -> String {
+    let resident = answer_once(home, reply);
+    let out = status(home).await;
+    resident.await.unwrap();
+    out
+}
+
+/// The `reach` rows of a screen: the lines under the title `title`, up to the blank line.
+fn reach_rows<'s>(screen: &'s str, title: &str) -> Vec<&'s str> {
+    screen
+        .lines()
+        .skip_while(|line| *line != title)
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .collect()
+}
+
+/// While a `serve` answers, `status` says how it is reached in a `reach:` block after `serving:` and
+/// before `internal routes:`: every class, one row each, in class order, the loopback address beside a
+/// network address too, with or without `--local`.
+#[tokio::test]
+async fn status_prints_reach_while_serving() {
+    use crate::commands::serve::serve_tests::{LAN, LOOPBACK, PUBLIC, TUNNEL, host, reachable};
+
+    let every = || host(&[LOOPBACK, TUNNEL, PUBLIC, LAN]);
+    let local = home("reach-local");
+    let out = status_answered(
+        &local,
+        Some((&["ssh"], reachable(Internet::Off, Lan::Announced, every()))),
+    )
+    .await;
+    assert!(
+        out.contains(
+            "\nserving: ssh\n\nreach:\n\
+             \x20 internet       off (--local)\n\
+             \x20 public         [2001:db8:85a3::8a2e:370:7334]:51006\n\
+             \x20 this network   192.168.1.20:51006\n\
+             \x20 tunnel         100.101.102.103:51006\n\
+             \x20 this computer  127.0.0.1:51006\n\
+             \ninternal routes:\n"
+        ),
+        "{out}"
+    );
+    let default = home("reach-default");
+    let out = status_answered(
+        &default,
+        Some((
+            &["ssh"],
+            reachable(Internet::On, Lan::ByAddressOnly, every()),
+        )),
+    )
+    .await;
+    assert!(
+        out.contains(
+            "\nserving: ssh\n\nreach:\n\
+             \x20 internet       on\n\
+             \x20 public         [2001:db8:85a3::8a2e:370:7334]:51006\n\
+             \x20 this network   192.168.1.20:51006, by address only\n\
+             \x20 tunnel         100.101.102.103:51006\n\
+             \x20 this computer  127.0.0.1:51006\n\
+             \ninternal routes:\n"
+        ),
+        "{out}"
+    );
+}
+
+/// A home that does not serve prints no `reach:` block: none when no `serve` runs, and none when one is
+/// there and could not be read, which `serving: unknown` says instead.
+#[tokio::test]
+async fn no_resident_no_reach() {
+    let home = home("no-reach");
+    let idle = status(&home).await;
+    assert!(!idle.contains("reach:"), "{idle}");
+    let out = status_answered(&home, None).await;
+    assert_eq!(serving_row(&out), "serving: unknown");
+    assert!(!out.contains("reach:"), "{out}");
+}
+
+/// `status` and the banner print the same rows for the same reach, each through its own path: the banner
+/// through `banner`, and `status` through the status reply on the control socket, the read of it and the
+/// report. Under `--local` they are the same rows; by default `status` adds only the public, tunnel and
+/// loopback rows, and the rows both print read the same, in the same order.
+#[tokio::test]
+async fn status_and_the_banner_print_the_same_rows() {
+    use crate::commands::serve::serve_tests::{banner_for, reach_fixtures};
+
+    for (name, reach) in reach_fixtures() {
+        let at = home("reach-same");
+        let banner = banner_for(&reach);
+        let out = status_answered(&at, Some((&["ping"], reach.clone()))).await;
+        let (shown, listed) = (reach_rows(&banner, "reach"), reach_rows(&out, "reach:"));
+        assert!(!shown.is_empty(), "{name}: {banner}");
+        if reach.internet == Internet::Off {
+            // Every class, less the loopback row the banner keeps from beside `unknown`.
+            let unknown = listed.contains(&"  this network   unknown");
+            let kept: Vec<&str> = listed
+                .iter()
+                .copied()
+                .filter(|line| !(unknown && line.starts_with("  this computer ")))
+                .collect();
+            assert_eq!(kept, shown, "{name}");
+            continue;
+        }
+        let both: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|line| shown.contains(line))
+            .collect();
+        assert_eq!(both, shown, "{name}: the banner's rows, in order:\n{out}");
+        assert!(
+            listed
+                .iter()
+                .filter(|line| !shown.contains(line))
+                .all(|line| {
+                    ["  public ", "  tunnel ", "  this computer "]
+                        .iter()
+                        .any(|label| line.starts_with(label))
+                }),
+            "{name}: {out}"
+        );
+    }
+}
+
+/// The name serve's banner and `status` both give this machine comes from a list: the root's where it is
+/// kept, the last synced one on a device, a revoked row by the name it had. An invite's name, unsigned, never names it, and a machine no list
+/// names has none.
+#[tokio::test]
+async fn own_name_reads_a_list_never_an_invite() {
+    let own = TestNode::seeded(OWN).node_id();
+    let name = |home| async move {
+        super::own_name(home, own)
+            .await
+            .map(|name| name.to_string())
+    };
+
+    let keeps = home("own-name-holder");
+    holds(&keeps).await;
+    assert_eq!(name(&keeps).await.as_deref(), Some("desk"));
+
+    let synced = home("own-name-device");
+    device_of(&synced).await;
+    list(
+        &synced,
+        &RosterDoc::new(Epoch(1), vec![row(OWN, "nas"), row(LAPTOP, "laptop")]).expect("a list"),
+    );
+    assert_eq!(name(&synced).await.as_deref(), Some("nas"));
+    // A list that revoked this machine still names it, by the name it had, as `status` names it then.
+    let revoked = home("own-name-revoked");
+    device_of(&revoked).await;
+    list(
+        &revoked,
+        &RosterDoc::with_revocations(
+            Epoch(1),
+            vec![row(LAPTOP, "laptop")],
+            Vec::new(),
+            vec![gone(OWN, "nas")],
+        )
+        .expect("a list"),
+    );
+    assert_eq!(name(&revoked).await.as_deref(), Some("nas"));
+
+    let hinted = home("own-name-hint");
+    device_of(&hinted).await;
+    std::fs::write(
+        hinted.invited_by(),
+        format!("{}\nb\n", TestNode::seeded(LAPTOP).node_id()),
+    )
+    .expect("invited-by");
+    assert_eq!(name(&hinted).await, None);
+
+    assert_eq!(name(&home("own-name-fresh")).await, None);
 }

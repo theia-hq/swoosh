@@ -871,7 +871,7 @@ impl<'a> Until<'a> {
 }
 
 /// A day, the bound under which an end prints as a clock time.
-const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The months as a date line names them.
 const MONTHS: [&str; 12] = [
@@ -900,10 +900,10 @@ impl fmt::Display for Until<'_> {
 }
 
 /// A local time as an end prints: `15:04` within a day, `15 Oct 2026` past it. Apart from the clock read, so
-/// its shape is tested on a time made by hand.
-struct End<'a> {
-    local: &'a libc::tm,
-    within_a_day: bool,
+/// its shape is tested on a time made by hand. A link's end and an `--expires` serve's end print by it.
+pub(crate) struct End<'a> {
+    pub(crate) local: &'a libc::tm,
+    pub(crate) within_a_day: bool,
 }
 
 impl fmt::Display for End<'_> {
@@ -927,7 +927,7 @@ impl fmt::Display for End<'_> {
 }
 
 /// `secs` since the epoch in this machine's local time zone, or `None` when the system cannot say.
-fn local_time(secs: u64) -> Option<libc::tm> {
+pub(crate) fn local_time(secs: u64) -> Option<libc::tm> {
     let time = libc::time_t::try_from(secs).ok()?;
     // SAFETY: `tm` is plain C data (integers and, on some platforms, a pointer the call sets), so all-zero is
     // a valid value for `localtime_r` to overwrite.

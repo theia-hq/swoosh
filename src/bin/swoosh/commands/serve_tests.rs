@@ -33,8 +33,8 @@ use tightbeam::tunnel::{
 };
 
 use super::{
-    Keeper, ReachRows, Scope, Serving, banner, expire, keeper_line, log_bind, off_lines,
-    supervised, waiting_warnings,
+    AT_LOGIN, Head, ReachRows, Reader, Scope, Serving, Stop, Until, banner, expire, log_bind,
+    off_lines, span, supervised, waiting_warnings,
 };
 
 #[path = "serve_relative_tests.rs"]
@@ -71,7 +71,7 @@ fn entry_open(name: &str, kind: TargetKind, metering: Option<Metering>) -> Manif
 /// The default `swoosh serve` manifest (gated ping + speed + the node's own `control.*` routes), name-sorted as the
 /// exposer returns it, so a banner test exercises the same shape the product path builds. The default
 /// diagnostic routes are family-gated, so they bind the OWNER engines and report unmetered.
-fn default_manifest() -> Vec<ManifestEntry> {
+pub(crate) fn default_manifest() -> Vec<ManifestEntry> {
     vec![
         entry_gated(
             "control.serve",
@@ -137,9 +137,9 @@ fn serving_block(
     Ok(String::from_utf8(out)?)
 }
 
-/// The banner for key `ed01exampleid` on a host with [`LAN`] and [`LOOPBACK`], stopped by ctrl-c, as a
-/// pipe reads it.
-fn render_banner(serving: &Serving<'_>, keeper: Option<&str>) -> String {
+/// The banner for key `ed01exampleid`, named `name`, on a host with [`LAN`] and [`LOOPBACK`], closing
+/// with `stop`, as a pipe reads it.
+fn render_banner(serving: &Serving<'_>, name: Option<&str>, stop: Stop) -> String {
     let reach = ReachRows::of(
         &reachable(Internet::On, Lan::Announced, host(&[LAN, LOOPBACK])),
         Scope::Banner,
@@ -147,31 +147,63 @@ fn render_banner(serving: &Serving<'_>, keeper: Option<&str>) -> String {
     let mut out = Vec::new();
     banner(
         "swoosh is serving",
-        "ed01exampleid",
+        Head {
+            name,
+            key: "ed01exampleid",
+        },
         &reach,
         serving,
-        keeper,
-        "ctrl-c to stop",
+        stop,
     )
     .write(&mut out)
     .unwrap();
     String::from_utf8(out).unwrap()
 }
 
+/// The whole banner a serve whose reach is `reach` prints, through [`banner`] and the rows the banner
+/// takes, as a pipe reads it.
+pub(crate) fn banner_for(reach: &Reachable) -> String {
+    let manifest = default_manifest();
+    let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
+    let rows = ReachRows::of(reach, Scope::Banner);
+    let mut out = Vec::new();
+    banner(
+        "swoosh is serving",
+        Head {
+            name: None,
+            key: "ed01exampleid",
+        },
+        &rows,
+        &serving,
+        at_a_terminal(),
+    )
+    .write(&mut out)
+    .expect("a Vec takes the banner");
+    String::from_utf8(out).expect("the banner is UTF-8")
+}
+
+/// A banner's closing block at a terminal, for a run with no `--expires`.
+fn at_a_terminal() -> Stop {
+    Stop {
+        until: None,
+        reader: Reader::Person,
+    }
+}
+
 /// An address on this network, the reach fixtures' port throughout.
-const LAN: &str = "192.168.1.20:51006";
+pub(crate) const LAN: &str = "192.168.1.20:51006";
 /// The loopback address a wildcard bind answers on.
-const LOOPBACK: &str = "127.0.0.1:51006";
+pub(crate) const LOOPBACK: &str = "127.0.0.1:51006";
 /// A globally routable address, in the documentation range.
-const PUBLIC: &str = "[2001:db8:85a3::8a2e:370:7334]:51006";
+pub(crate) const PUBLIC: &str = "[2001:db8:85a3::8a2e:370:7334]:51006";
 /// An address on a point-to-point link.
-const TUNNEL: &str = "100.101.102.103:51006";
+pub(crate) const TUNNEL: &str = "100.101.102.103:51006";
 /// The widest address a row can hold: a v6 with no group to compress and a five-digit port, 47 columns.
 const WIDEST_LAN: &str = "[2605:59c1:18c2:df08:1cc1:8f16:193c:5912]:65535";
 
 /// One entry of a host's expansion, its class read off the address: loopback, a CGNAT tunnel, a
 /// private network address, else the internet.
-fn entry(socket: &str) -> At {
+pub(crate) fn entry(socket: &str) -> At {
     let socket: core::net::SocketAddr = socket.parse().expect("a fixture socket");
     let scope = match socket.ip() {
         ip if ip.is_loopback() => bifrost_mdns::Scope::ThisMachine,
@@ -186,12 +218,12 @@ fn entry(socket: &str) -> At {
 }
 
 /// A host whose interfaces read, answering at `sockets`.
-fn host(sockets: &[&str]) -> Dialable {
+pub(crate) fn host(sockets: &[&str]) -> Dialable {
     sockets.iter().copied().map(entry).collect()
 }
 
 /// A host whose interfaces could not be read, answering at only `sockets`.
-fn unread(sockets: &[&str]) -> Dialable {
+pub(crate) fn unread(sockets: &[&str]) -> Dialable {
     Dialable::short(
         sockets.iter().copied().map(entry),
         Missing::Interfaces(io::Error::other("getifaddrs: denied")),
@@ -199,7 +231,7 @@ fn unread(sockets: &[&str]) -> Dialable {
 }
 
 /// What a running serve answers about a bind on `host`.
-fn reachable(internet: Internet, lan: Lan, host: Dialable) -> Reachable {
+pub(crate) fn reachable(internet: Internet, lan: Lan, host: Dialable) -> Reachable {
     Reachable {
         internet,
         lan,
@@ -219,7 +251,7 @@ fn reach_block(reach: &Reachable, scope: Scope) -> String {
 }
 
 /// Every reach state the banner can show, named: how the internet and this network read, and the host.
-fn reach_fixtures() -> Vec<(&'static str, Reachable)> {
+pub(crate) fn reach_fixtures() -> Vec<(&'static str, Reachable)> {
     let every = || host(&[LOOPBACK, TUNNEL, PUBLIC, LAN]);
     vec![
         (
@@ -305,15 +337,22 @@ fn the_reach_block_reads_as_ruled() {
 }
 
 /// The banner's rows are every class's rows less the hidden ones, through one function: under `--local`
-/// the banner already shows every class, so the two are the same bytes; by default, every class adds
-/// only the public, tunnel and loopback rows, and the rows both show read the same.
+/// the banner already shows every class, so the two are the same bytes but for the loopback row beside
+/// `unknown`; by default, every class adds only the public, tunnel and loopback rows, and the rows both
+/// show read the same.
 #[test]
 fn the_banner_rows_are_the_all_rows_less_the_hidden_ones() {
     for (name, reach) in reach_fixtures() {
         let banner = reach_block(&reach, Scope::Banner);
         let all = reach_block(&reach, Scope::All);
         if reach.internet == Internet::Off {
-            assert_eq!(banner, all, "{name}");
+            // Every class, less the loopback row the banner keeps from beside `unknown`.
+            let unknown = all.contains("\n  this network   unknown\n");
+            let kept: Vec<&str> = all
+                .lines()
+                .filter(|line| !(unknown && line.starts_with("  this computer ")))
+                .collect();
+            assert_eq!(banner.lines().collect::<Vec<_>>(), kept, "{name}");
             continue;
         }
         let shown: Vec<&str> = banner.lines().collect();
@@ -329,22 +368,106 @@ fn the_banner_rows_are_the_all_rows_less_the_hidden_ones() {
     }
 }
 
-/// Every reach line holds the screen law with no exemption: each fixture, in both scopes, is written
-/// through the screen, whose `write` holds every line to case, period and width under test and panics
-/// on a breach; this row adds that no reach line is one the law excuses.
+/// Beside an `unknown` network, `status` still lists the loopback address, since it lists every class this
+/// machine has; the banner, pasted where a loopback row would read as the host's one address, does not.
 #[test]
-fn the_reach_block_holds_the_law() {
+fn status_lists_this_computer_beside_unknown() {
+    for internet in [Internet::On, Internet::Off] {
+        let reach = reachable(internet, Lan::Announced, unread(&[LOOPBACK]));
+        let all = reach_block(&reach, Scope::All);
+        assert!(
+            all.ends_with("  this network   unknown\n  this computer  127.0.0.1:51006\n"),
+            "{all}"
+        );
+        let banner = reach_block(&reach, Scope::Banner);
+        assert!(banner.ends_with("  this network   unknown\n"), "{banner}");
+    }
+}
+
+/// Every banner holds the screen law with no line excused: each reach fixture in both scopes, named and
+/// unnamed, with and without an end, at a terminal and in a log, written through the screen, whose `write`
+/// holds every line to case, period and width under test and panics on a breach.
+#[test]
+fn the_whole_banner_holds_the_law() {
+    let manifest = default_manifest();
+    let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
+    let key = "ed01w5exaalx3vluasmzukqiau3bzrvxovdjqj6js46cg337q5ujmlwq";
+    let ends = [
+        None,
+        Some(Until {
+            at: 0,
+            left: Duration::from_secs(5400),
+        }),
+        Some(Until {
+            at: 0,
+            left: Duration::from_secs(90 * 86_400),
+        }),
+    ];
     for (name, reach) in reach_fixtures() {
         for scope in [Scope::Banner, Scope::All] {
-            let block = reach_block(&reach, scope);
-            for line in block.lines() {
-                assert!(
-                    !crate::screen::law::OWED.contains(&line),
-                    "{name}: {line:?} is excused"
-                );
+            let rows = ReachRows::of(&reach, scope);
+            for me in [None, Some("me/miraclx-mbp")] {
+                for until in &ends {
+                    for reader in [Reader::Person, Reader::Log] {
+                        let stop = Stop {
+                            until: until.as_ref().map(|until| until.line(Some(&clock(15, 4)))),
+                            reader,
+                        };
+                        let mut out = Vec::new();
+                        let head = Head { name: me, key };
+                        banner("swoosh is serving", head, &rows, &serving, stop)
+                            .write(&mut out)
+                            .unwrap_or_else(|error| panic!("{name}: {error}"));
+                    }
+                }
             }
         }
     }
+}
+
+/// A local time made by hand: 5 Jan 2027 at `hour:minute`.
+fn clock(hour: i32, minute: i32) -> libc::tm {
+    // SAFETY: `tm` is plain C data, so all-zero is a valid value to fill in.
+    let mut local: libc::tm = unsafe { core::mem::zeroed() };
+    local.tm_hour = hour;
+    local.tm_min = minute;
+    local.tm_mday = 5;
+    local.tm_mon = 0;
+    local.tm_year = 127;
+    local
+}
+
+/// The `--expires` line: the clock time within a day and the date past it, then the span in days, hours
+/// and minutes, never seconds; under a minute, no span.
+#[test]
+fn serving_until_names_the_end_and_the_span() {
+    let at = |left| {
+        Until {
+            at: 0,
+            left: Duration::from_secs(left),
+        }
+        .line(Some(&clock(15, 4)))
+    };
+    assert_eq!(at(5400), "Serving until 15:04 (1h 30m).");
+    assert_eq!(at(86_400), "Serving until 15:04 (1d).");
+    assert_eq!(at(86_401), "Serving until 5 Jan 2027 (1d).");
+    assert_eq!(at(90 * 86_400), "Serving until 5 Jan 2027 (90d).");
+    assert_eq!(at(90), "Serving until 15:04 (1m).");
+    assert_eq!(at(59), "Serving until 15:04.");
+    assert_eq!(
+        span(Duration::from_secs(25 * 3600 + 61)),
+        Some("1d 1h".to_owned())
+    );
+    // With no time zone to read, the end is a date.
+    let unzoned = Until {
+        at: 0,
+        left: Duration::from_secs(5400),
+    }
+    .line(None);
+    assert_eq!(
+        unzoned,
+        format!("Serving until {} (1h 30m).", swoosh::root::Date(0))
+    );
 }
 
 /// A log line, captured.
@@ -449,9 +572,63 @@ fn the_banner_frames_selection_actual_targets_and_how_to_stop() {
     // `reach` sits under the key, with its values in the key's column; the stop line is a block of its
     // own, a blank line under `serving`.
     assert_eq!(
-        render_banner(&serving, None),
-        "swoosh is serving\n\n  key            ed01exampleid\n\nreach\n  internet       on\n  this network   192.168.1.20:51006\n\nserving\n  selection  default services\n  ping       your devices  ping:\n  speed      your devices  speed:\n\nctrl-c to stop\n"
+        render_banner(&serving, None, at_a_terminal()),
+        "swoosh is serving\n\n  key            ed01exampleid\n\nreach\n  internet       on\n  this network   192.168.1.20:51006\n\nserving\n  selection  default services\n  ping       your devices  ping:\n  speed      your devices  speed:\n\nPress ctrl-c to stop.\n"
     );
+    // An `--expires` run says when it stops, directly above how to stop it; in a log, that line alone.
+    let until = || Some("Serving until 15:04 (1h 30m).".to_owned());
+    let tail = |reader| {
+        render_banner(
+            &serving,
+            None,
+            Stop {
+                until: until(),
+                reader,
+            },
+        )
+    };
+    assert!(
+        tail(Reader::Person)
+            .ends_with("speed:\n\nServing until 15:04 (1h 30m).\nPress ctrl-c to stop.\n"),
+        "{}",
+        tail(Reader::Person)
+    );
+    assert!(
+        tail(Reader::Log).ends_with("speed:\n\nServing until 15:04 (1h 30m).\n"),
+        "{}",
+        tail(Reader::Log)
+    );
+    // In a log with no end, the banner closes on `serving`.
+    let logged = render_banner(
+        &serving,
+        None,
+        Stop {
+            until: None,
+            reader: Reader::Log,
+        },
+    );
+    assert!(logged.ends_with("speed:\n"), "{logged}");
+}
+
+/// The head names this machine as `status` does, above its key; with no name, the row is absent, so no
+/// name a list never gave it is shown.
+#[test]
+fn the_head_names_this_machine() {
+    let manifest = default_manifest();
+    let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
+    let named = render_banner(&serving, Some("me/miraclx-mbp"), at_a_terminal());
+    assert!(
+        named.starts_with(
+            "swoosh is serving\n\n  this machine   me/miraclx-mbp\n  key            ed01exampleid\n\nreach\n"
+        ),
+        "{named}"
+    );
+    let unnamed = render_banner(&serving, None, at_a_terminal());
+    assert!(
+        unnamed.starts_with("swoosh is serving\n\n  key            ed01exampleid\n\nreach\n"),
+        "{unnamed}"
+    );
+    assert!(!unnamed.contains("this machine"), "{unnamed}");
 }
 
 #[test]
@@ -603,11 +780,13 @@ fn a_banner_on_a_closed_pipe_is_an_error() {
     );
     let written = banner(
         "swoosh is serving",
-        "ed01exampleid",
+        Head {
+            name: None,
+            key: "ed01exampleid",
+        },
         &reach,
         &serving,
-        None,
-        "ctrl-c to stop",
+        at_a_terminal(),
     )
     .write(&mut Unwritable);
     assert_eq!(
@@ -616,10 +795,10 @@ fn a_banner_on_a_closed_pipe_is_an_error() {
     );
 }
 
-/// The line that says how to keep this machine serving prints only where no service manager runs it and
-/// a person started it at a terminal; under systemd or launchd it would be noise in the journal.
+/// `Press ctrl-c to stop.` is for a person: it prints where stdout is a terminal and no service manager runs
+/// this `serve`. A pipe, systemd or launchd reads no key press, so none of them gets the line.
 #[test]
-fn banner_names_the_service_manager_line_when_not_supervised() {
+fn press_ctrl_c_only_for_a_person() {
     let env = |set: &'static [(&'static str, &'static str)]| {
         move |name: &str| {
             set.iter()
@@ -627,49 +806,98 @@ fn banner_names_the_service_manager_line_when_not_supervised() {
                 .map(|(_, value)| OsString::from(value))
         }
     };
-    let systemd =
-        "to keep this machine serving after a reboot: systemctl --user enable --now swoosh";
-    // Unsupervised, at a terminal: the line.
-    assert_eq!(
-        keeper_line(supervised(env(&[])), true, || Keeper::Systemd),
-        Some(systemd)
-    );
-    // A Terminal session on macOS sets `XPC_SERVICE_NAME=0`: still unsupervised.
-    assert_eq!(
-        keeper_line(supervised(env(&[("XPC_SERVICE_NAME", "0")])), true, || {
-            Keeper::Brew
-        }),
-        Some("to keep this machine serving after a reboot: brew services start swoosh")
-    );
-    // Under a service manager, or with no terminal, nothing, and the keeper is never asked.
+    // Unsupervised, at a terminal: a person. A Terminal session on macOS sets `XPC_SERVICE_NAME=0`.
+    for set in [&[][..], &[("XPC_SERVICE_NAME", "0")][..]] {
+        assert_eq!(
+            Reader::of(supervised(env(set)), true),
+            Reader::Person,
+            "{set:?}"
+        );
+    }
+    // Under a service manager, or piped, a log.
     for set in [
         &[("INVOCATION_ID", "5f1c")][..],
         &[("JOURNAL_STREAM", "8:1234")][..],
         &[("XPC_SERVICE_NAME", "homebrew.mxcl.swoosh")][..],
     ] {
         assert_eq!(
-            keeper_line(supervised(env(set)), true, || panic!("never asked")),
-            None,
-            "supervised by {set:?}: no line"
+            Reader::of(supervised(env(set)), true),
+            Reader::Log,
+            "{set:?}"
         );
     }
-    assert_eq!(
-        keeper_line(supervised(env(&[])), false, || panic!("never asked")),
-        None,
-        "no terminal: no line"
-    );
-    // The line rides the banner before how to stop.
+    assert_eq!(Reader::of(supervised(env(&[])), false), Reader::Log);
+    // Only a person's banner closes on the line.
     let manifest = default_manifest();
     let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
-    let banner = render_banner(&serving, Some(systemd));
+    let person = render_banner(&serving, None, at_a_terminal());
+    assert!(person.ends_with("\n\nPress ctrl-c to stop.\n"), "{person}");
+    let log = render_banner(
+        &serving,
+        None,
+        Stop {
+            until: None,
+            reader: Reader::Log,
+        },
+    );
+    assert!(!log.contains("ctrl-c"), "{log}");
+}
+
+/// `serve --help` ends with where to read how to start serving at login: the page for this build's tag, a
+/// page the tree holds. The banner never says it.
+#[test]
+fn serve_help_points_at_the_login_page() {
+    let mut cli = crate::Cli::command();
+    let help = cli
+        .find_subcommand_mut("serve")
+        .expect("a serve subcommand")
+        .render_help()
+        .to_string();
+    let url = format!(
+        "https://github.com/theia-hq/swoosh/blob/v{}/docs/use-cases/run-at-login.md",
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(
-        banner.ends_with(&format!("{systemd}\nctrl-c to stop\n")),
+        help.trim_end()
+            .ends_with(&format!("To start serving at login:\n  {url}")),
+        "{help}"
+    );
+    assert_eq!(AT_LOGIN, format!("To start serving at login:\n  {url}"));
+    assert!(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/use-cases/run-at-login.md")
+            .is_file()
+    );
+    let manifest = default_manifest();
+    let serving = Serving::of(&swoosh::serve::Started::Default, None, &manifest);
+    let banner = render_banner(&serving, Some("me/nas"), at_a_terminal());
+    assert!(
+        !banner.contains("login") && !banner.contains("reboot"),
         "{banner}"
     );
-    assert_eq!(
-        Keeper::Elsewhere.line(),
-        "to keep this machine serving after a reboot: see docs/use-cases/run-at-login.md"
-    );
+}
+
+/// Each `warning:` a changed `serve.toml` prints is styled where stderr shows style, and only the head: the
+/// wrapped words stay plain. On a plain writer the bytes are as they always were.
+#[test]
+fn waiting_warnings_paint_their_head() {
+    use swoosh::serve_toml::Waiting;
+
+    let waiting = Waiting {
+        relay: true,
+        added: vec!["a".repeat(40)],
+        ..Waiting::default()
+    };
+    let plain = waiting_warnings(&waiting, &Vec::new());
+    assert!(!plain.contains('\u{1b}'), "{plain}");
+    let styled = waiting_warnings(&waiting, &anstream::AutoStream::always(Vec::new()));
+    let head = crate::screen::Style::WARNING
+        .paint("warning:", &anstream::AutoStream::always(Vec::new()))
+        .to_string();
+    assert_ne!(head, "warning:");
+    assert_eq!(styled.matches(&head).count(), 2, "{styled:?}");
+    // Every escape is in a head: with the heads plain, the bytes are the plain ones.
+    assert_eq!(styled.replace(&head, "warning:"), plain);
 }
 
 // Binding preserves finite refusal categories instead of retaining target text.
@@ -2098,7 +2326,8 @@ fn serve_without_a_runtime_dir_refuses_before_binding() {
 }
 
 /// `serve` never presents the root. With a root kept here, sealed, and no terminal for a passphrase prompt
-/// to open, it starts and stops on its expiry: a prompt would have failed, and so would the run.
+/// to open, it starts, prints its banner, which names this machine from the root's list, and stops on its
+/// expiry: a prompt would have failed, and so would the run.
 #[test]
 fn serve_never_opens_root_key() {
     use std::os::unix::process::CommandExt as _;
@@ -2123,7 +2352,7 @@ fn serve_never_opens_root_key() {
     command
         .arg("--home")
         .arg(&scratch.home_dir)
-        .args(["serve", "--quiet", "--expires", "1s"])
+        .args(["serve", "--expires", "1s"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
         .stdin(Stdio::null());
@@ -2142,6 +2371,8 @@ fn serve_never_opens_root_key() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+    let banner = String::from_utf8_lossy(&output.stdout);
+    assert!(banner.contains("\n  this machine   me/"), "{banner}");
 }
 
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
@@ -4515,7 +4746,7 @@ async fn fold_into(home: &Home, update: &[u8]) {
 fn waiting_warnings_include_the_prefix_in_the_width_and_never_split_names() {
     use swoosh::serve_toml::Waiting;
 
-    assert!(waiting_warnings(&Waiting::default()).is_empty());
+    assert!(waiting_warnings(&Waiting::default(), &Vec::new()).is_empty());
     let prefix = "warning: saved service ";
     let suffix = " applies to the next bare or --with/--without serve";
     let boundary = 80 - prefix.len() - suffix.len();
@@ -4538,7 +4769,7 @@ fn waiting_warnings_include_the_prefix_in_the_width_and_never_split_names() {
                 ..Waiting::default()
             },
         ] {
-            let out = waiting_warnings(&waiting);
+            let out = waiting_warnings(&waiting, &Vec::new());
             assert_eq!(
                 out.split_whitespace().collect::<Vec<_>>().join(" "),
                 format!("{prefix}{name}{suffix}")
@@ -4559,7 +4790,7 @@ fn waiting_warnings_include_the_prefix_in_the_width_and_never_split_names() {
         changed: vec!["two".to_owned()],
     };
     assert_eq!(
-        waiting_warnings(&waiting),
+        waiting_warnings(&waiting, &Vec::new()),
         concat!(
             "warning: the changed relay in serve.toml takes effect at the next start\n",
             "warning: the changed resolver in serve.toml takes effect at the next start\n",

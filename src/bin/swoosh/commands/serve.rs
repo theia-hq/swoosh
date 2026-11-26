@@ -32,7 +32,7 @@
 
 use core::time::Duration;
 use std::ffi::OsString;
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write as _};
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use bifrost_mdns::{Dialable, Missing};
@@ -59,7 +59,9 @@ use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Router};
 
 use crate::commands::service::Running;
-use crate::screen::{Block, Cell, Screen};
+use crate::commands::share;
+use crate::commands::status::report::own_name;
+use crate::screen::{Block, Cell, Paint, Screen, Style};
 
 /// Be a node: publish these services behind your gate, then stay reachable.
 #[derive(Debug, Args)]
@@ -411,7 +413,7 @@ impl ServeCmd {
         // name for as long as a lost `anyone` link lives. A ledger that cannot be read is not said here
         // either: the gate logs it when it is built, and admits no link this machine signed until it can.
         match LinksForAnother::in_home(home, requested.iter().map(String::as_str)) {
-            Ok(Some(links)) => eprintln!("warning: {links}"),
+            Ok(Some(links)) => warn(&links),
             Ok(None) => {}
             Err(error) => tracing::debug!("could not check the services' links: {error:#}"),
         }
@@ -744,18 +746,17 @@ impl ServeCmd {
         if !self.quiet {
             let manifest = exposer.manifest();
             let rows = ReachRows::of(&shown, Scope::Banner);
-            let stop_line = match self.expires {
-                Some(lifetime) => format!(
-                    "runs for {}, then stops (or ctrl-c)",
-                    humanize_secs(lifetime.duration().as_secs())
-                ),
-                None => "ctrl-c to stop".to_owned(),
-            };
-            let keeper = keeper_line(
+            let until = self
+                .expires
+                .map(|lifetime| Until::from_now(lifetime.duration()));
+            let reader = Reader::of(
                 supervised(|name| std::env::var_os(name)),
-                std::io::stderr().is_terminal(),
-                Keeper::here,
+                std::io::stdout().is_terminal(),
             );
+            // Named as `status` names it, from the one source both read; with no name, no row.
+            let name = own_name(&home, addr.node)
+                .await
+                .map(|name| format!("me/{name}"));
             let key = addr.node.to_string();
             let serving = Serving::of(&started, enabled.saved_services().as_ref(), &manifest);
             banner(
@@ -764,11 +765,16 @@ impl ServeCmd {
                 } else {
                     "swoosh is serving"
                 },
-                &key,
+                Head {
+                    name: name.as_deref(),
+                    key: &key,
+                },
                 &rows,
                 &serving,
-                keeper,
-                &stop_line,
+                Stop {
+                    until: until.map(|until| until.to_string()),
+                    reader,
+                },
             )
             .write(&mut std::io::stdout())?;
         }
@@ -787,10 +793,11 @@ impl ServeCmd {
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             () = devices.watch() => unreachable!("the root route's keys are read until the node stops"),
             () = enabled.watch(|waiting| {
-                eprint!("{}", waiting_warnings(waiting));
+                // One write for every warning, so a line logged beside them cannot land inside one.
+                let _ = std::io::stderr().write_all(waiting_warnings(waiting, &std::io::stderr()).as_bytes());
                 let changed: Vec<String> = waiting.added.iter().chain(&waiting.changed).cloned().collect();
                 match LinksForAnother::among_changed(&home, &enabled.held(), &changed) {
-                    Ok(Some(links)) => eprintln!("warning: {links}"),
+                    Ok(Some(links)) => warn(&links),
                     Ok(None) => {}
                     Err(error) => tracing::warn!("could not check the added services: {error:#}"),
                 }
@@ -816,7 +823,6 @@ impl ServeCmd {
         // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic. It is stdout, so
         // `--quiet` withholds it with the banner.
         if !self.quiet {
-            use std::io::Write as _;
             let _ = writeln!(std::io::stdout(), "{}", stopped.message());
         }
         // The bound node's teardown (iroh's graceful `Endpoint::close`) is owned by the composition root,
@@ -1004,11 +1010,20 @@ impl<'m> Serving<'m> {
     }
 }
 
-/// Account for the diagnostic prefix here, not in the library's unprefixed description.
-fn waiting_warnings(waiting: &swoosh::serve_toml::Waiting) -> String {
+/// `warning: <fact>` on stderr, in one write, its head styled where stderr shows style. A closed stderr
+/// is no reason to stop serving, so a failed write is dropped.
+fn warn(fact: &impl core::fmt::Display) {
+    let mut err = std::io::stderr();
+    let head = Style::WARNING.paint("warning:", &err);
+    let _ = err.write_all(format!("{head} {fact}\n").as_bytes());
+}
+
+/// Account for the diagnostic prefix here, not in the library's unprefixed description. Each `warning:`
+/// is styled where `on` shows style; the width counts only its letters.
+fn waiting_warnings(waiting: &swoosh::serve_toml::Waiting, on: &impl Paint) -> String {
     let mut out = String::new();
     for fact in waiting.to_string().lines() {
-        out.push_str("warning:");
+        out.push_str(&Style::WARNING.paint("warning:", on).to_string());
         let mut column = "warning:".len();
         for word in fact.split_ascii_whitespace() {
             // Validated service names contain no whitespace, so each name remains one whole token.
@@ -1035,30 +1050,141 @@ fn off_lines(name: &str) -> Screen<'static> {
     )
 }
 
-/// The banner: its title, this machine's key, how peers reach it, what it serves, then how to keep it
-/// serving and how to stop it.
+/// The banner: its title, this machine's name and key, how peers reach it, what it serves, then when it
+/// stops and how to stop it.
 fn banner<'a>(
     title: &'static str,
-    key: &'a str,
+    head: Head<'a>,
     reach: &'a ReachRows,
     serving: &'a Serving<'_>,
-    keeper: Option<&str>,
-    stop_line: &str,
+    stop: Stop,
 ) -> Screen<'a> {
-    let stop = keeper
-        .into_iter()
-        .chain([stop_line])
-        .fold(Block::default(), |block, line| block.text(line.to_owned()));
     Screen::default()
         .block(Block::titled(title))
-        .block(
-            Block::default()
-                .column(17)
-                .row([Cell::Word("key"), Cell::Token(key)]),
-        )
+        .block(head.block())
         .block(reach.block("reach"))
         .block(serving.block())
-        .block(stop)
+        .block(stop.block())
+}
+
+/// The banner's head: this machine's name among your devices, when it has one, then its key.
+struct Head<'a> {
+    /// `me/<name>`, from the one source `status` reads; `None` drops the row.
+    name: Option<&'a str>,
+    key: &'a str,
+}
+
+impl<'a> Head<'a> {
+    fn block(&self) -> Block<'a> {
+        let block = Block::default().column(17);
+        let block = match self.name {
+            Some(name) => block.row([Cell::Word("this machine"), Cell::Token(name)]),
+            None => block,
+        };
+        block.row([Cell::Word("key"), Cell::Token(self.key)])
+    }
+}
+
+/// The banner's closing block: when an `--expires` run stops, then how a person stops it.
+struct Stop {
+    /// `Serving until ...`, for an `--expires` run.
+    until: Option<String>,
+    reader: Reader,
+}
+
+impl Stop {
+    fn block(self) -> Block<'static> {
+        let block = self
+            .until
+            .into_iter()
+            .fold(Block::default(), |block, line| block.text(line));
+        match self.reader {
+            Reader::Person => block.text("Press ctrl-c to stop.".to_owned()),
+            Reader::Log => block,
+        }
+    }
+}
+
+/// Who reads the banner as it prints, which decides whether it says how to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    /// A person at the terminal on stdout, with no service manager running this `serve`: ctrl-c is theirs.
+    Person,
+    /// A pipe, a file, or a service manager's log: no key to press, so no line that says to.
+    Log,
+}
+
+impl Reader {
+    fn of(supervised: bool, stdout_terminal: bool) -> Self {
+        if stdout_terminal && !supervised {
+            Self::Person
+        } else {
+            Self::Log
+        }
+    }
+}
+
+/// When an `--expires` run stops, as its line prints: `Serving until 15:04 (1h 30m).` The end is the local
+/// clock time within a day of now and the local date past it, as a link's end prints; the span is what
+/// `--expires` took, in days, hours and minutes.
+struct Until {
+    /// The end, in seconds since the epoch.
+    at: u64,
+    left: Duration,
+}
+
+impl Until {
+    /// `left` from now.
+    fn from_now(left: Duration) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            at: now.saturating_add(left).as_secs(),
+            left,
+        }
+    }
+
+    /// The line, with the end in `local`, this machine's time zone, or as a date with no zone when the
+    /// system cannot say.
+    fn line(&self, local: Option<&libc::tm>) -> String {
+        let end = match local {
+            Some(local) => share::End {
+                local,
+                within_a_day: self.left <= share::DAY,
+            }
+            .to_string(),
+            None => swoosh::root::Date(self.at).to_string(),
+        };
+        match span(self.left) {
+            Some(span) => format!("Serving until {end} ({span})."),
+            None => format!("Serving until {end}."),
+        }
+    }
+}
+
+impl core::fmt::Display for Until {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.line(share::local_time(self.at).as_ref()))
+    }
+}
+
+/// A span as the `Serving until` line prints it: its two coarsest non-zero units of days, hours and
+/// minutes (`1h 30m`, `90d`), with no seconds. `None` under a minute, which has no such span.
+fn span(left: Duration) -> Option<String> {
+    let mut secs = left.as_secs();
+    let mut parts = Vec::new();
+    for (unit, per) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
+        let n = secs / per;
+        if n > 0 {
+            parts.push(format!("{n}{unit}"));
+            secs %= per;
+        }
+        if parts.len() == 2 {
+            break;
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 /// Which of the `reach` rows a screen shows.
@@ -1068,7 +1194,8 @@ pub(crate) enum Scope {
     /// machine has no network address. A banner is pasted into logs and issues, so it
     /// never shows the public or tunnel address unless `--local` made an address the whole of its reach.
     Banner,
-    /// Every class this machine has, as `status` lists them on the person's own terminal.
+    /// Every class this machine has, as `status` lists them on the person's own terminal: the public,
+    /// tunnel and loopback addresses too, the loopback one beside an `unknown` network as well.
     All,
 }
 
@@ -1117,13 +1244,15 @@ impl ReachRows {
         if every && let Some(tunnel) = at.tunnel() {
             rows.push(("tunnel", Value::Address(tunnel.to_string())));
         }
-        // By default the loopback address shows only when this machine has no network address, so the
-        // banner still names an address to reach it at. Never beside `unknown`: a loopback row there
-        // would read as the one address the host has, when it only could not look.
+        // On the banner by default the loopback address shows only when this machine has no network
+        // address, so the banner still names an address to reach it at; `status` and a `--local` banner
+        // show every class. The banner never shows it beside `unknown`, where a pasted loopback row would
+        // read as the one address the host has, when it only could not look; `status` lists every class
+        // it has, so it shows it there too.
         let shows_computer = match at.network() {
             Network::Nothing => true,
             Network::At(_) => every,
-            Network::Unknown => false,
+            Network::Unknown => scope == Scope::All,
         };
         if shows_computer && let Some(computer) = at.computer() {
             rows.push(("this computer", Value::Address(computer.to_string())));
@@ -1188,83 +1317,20 @@ fn log_bind(dialable: &Dialable, mdns: &MdnsState, bound_reach: &Reach, local: b
     tracing::debug!(relay, "the relay this machine offers");
 }
 
+/// `serve --help`'s closing lines: the page on starting `serve` at login, for this build's tag. The link
+/// is alone on its line, an unbreakable token.
+pub(crate) const AT_LOGIN: &str = concat!(
+    "To start serving at login:\n  https://github.com/theia-hq/swoosh/blob/v",
+    env!("CARGO_PKG_VERSION"),
+    "/docs/use-cases/run-at-login.md"
+);
+
 /// Whether a service manager already runs this `serve`: systemd sets `INVOCATION_ID` or `JOURNAL_STREAM`,
 /// and launchd sets `XPC_SERVICE_NAME` to something other than `0` (a Terminal session sets it to `0`).
 fn supervised(var: impl Fn(&str) -> Option<OsString>) -> bool {
     var("INVOCATION_ID").is_some()
         || var("JOURNAL_STREAM").is_some()
         || var("XPC_SERVICE_NAME").is_some_and(|value| value != "0")
-}
-
-/// The line that says how to keep this machine serving after a reboot: printed only by a `serve` that no
-/// service manager runs, started from a terminal. `keeper` is asked only then, since on macOS it runs
-/// `brew --prefix`.
-fn keeper_line(
-    supervised: bool,
-    stderr_terminal: bool,
-    keeper: impl FnOnce() -> Keeper,
-) -> Option<&'static str> {
-    if supervised || !stderr_terminal {
-        return None;
-    }
-    Some(keeper().line())
-}
-
-/// The service manager that keeps a `serve` running on this machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Keeper {
-    /// Homebrew's, for a binary installed under `brew --prefix`.
-    Brew,
-    /// systemd's user manager, on Linux.
-    Systemd,
-    /// Anything else: the page that shows how.
-    Elsewhere,
-}
-
-impl Keeper {
-    /// The keeper for this machine and this binary.
-    fn here() -> Self {
-        if cfg!(target_os = "linux") {
-            return Self::Systemd;
-        }
-        if cfg!(target_os = "macos") && under_brew() {
-            return Self::Brew;
-        }
-        Self::Elsewhere
-    }
-
-    /// The line naming how to keep this machine serving after a reboot.
-    fn line(self) -> &'static str {
-        match self {
-            Self::Brew => "to keep this machine serving after a reboot: brew services start swoosh",
-            Self::Systemd => {
-                "to keep this machine serving after a reboot: systemctl --user enable --now swoosh"
-            }
-            Self::Elsewhere => {
-                "to keep this machine serving after a reboot: see docs/use-cases/run-at-login.md"
-            }
-        }
-    }
-}
-
-/// Whether this binary sits under `brew --prefix`, the one install `brew services` can start.
-fn under_brew() -> bool {
-    let Ok(output) = std::process::Command::new("brew")
-        .arg("--prefix")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let prefix = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let prefix = std::fs::canonicalize(&prefix).unwrap_or(prefix);
-    std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .is_ok_and(|exe| exe.starts_with(prefix))
 }
 
 /// How often a `serve` exchanges with your devices after its first round, give or take a tenth.
@@ -1337,31 +1403,6 @@ async fn sync_round(
     replies.len() + again.len()
 }
 
-/// Render a count of seconds as a short human span (`5400` -> `1h 30m`, `3600` -> `1h`), so the
-/// `--expires` banner and a status uptime read the way an operator thinks rather than in raw seconds.
-/// Coarsest non-zero units only, at most two, so `1d` stays `1d` and `5400` reads `1h 30m`. The one
-/// span formatter the serve banner and bare `status` share, so the two can never drift.
-pub(crate) fn humanize_secs(mut secs: u64) -> String {
-    let mut parts = Vec::new();
-    for (unit, per) in [("d", 86_400), ("h", 3_600), ("m", 60), ("s", 1)] {
-        let n = secs / per;
-        if n > 0 {
-            parts.push(format!("{n}{unit}"));
-            secs %= per;
-        }
-        if parts.len() == 2 {
-            break;
-        }
-    }
-    // A zero span renders `0s`: `--expires` cannot be zero (`Lifetime` rejects it), but a status uptime
-    // of zero seconds can, so keep the guard rather than indexing an empty `parts`.
-    if parts.is_empty() {
-        "0s".to_owned()
-    } else {
-        parts.join(" ")
-    }
-}
-
 #[cfg(test)]
 #[path = "serve_tests.rs"]
-mod serve_tests;
+pub(crate) mod serve_tests;

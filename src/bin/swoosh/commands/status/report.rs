@@ -19,7 +19,7 @@ use swoosh::escape::{Escaped, EscapedPath};
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::passphrase::{Asked, Prompt, Terminal};
-use swoosh::root::{Date, Root, RootPlace};
+use swoosh::root::{Date, Inspected, Root, RootPlace};
 use swoosh::root_key::RootKey;
 use swoosh::roster::{Member, RevokedDevice};
 use swoosh::serve::{
@@ -29,7 +29,9 @@ use swoosh::standing::{Standing, StandingError};
 use swoosh::{badge, roster, standing, sync, touch};
 use tightbeam::identity::AsVerifyKey as _;
 
+use crate::commands::serve::{ReachRows, Scope};
 use crate::commands::service_state::{ReadError, ReadMode, ServiceState};
+use crate::screen::Screen;
 
 /// What bare `status` prints on stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +104,8 @@ pub(crate) struct Report {
     sections: Vec<Section>,
     /// `serving:`; present on every home with a key.
     serving: Option<String>,
+    /// `reach:` and a row for every address class, while a `serve` answers here; empty otherwise.
+    reach: Vec<String>,
     /// `internal routes:` and a row for each, while a `serve` answers here; empty otherwise.
     internal: Vec<String>,
     /// The lines that say what to do, last.
@@ -154,6 +158,7 @@ impl Report {
             this_machine: None,
             sections: Vec::new(),
             serving: None,
+            reach: Vec::new(),
             internal: Vec::new(),
             nags: Vec::new(),
             notices: Vec::new(),
@@ -274,35 +279,7 @@ impl Report {
                     self.nags
                         .push(touch::Lines::of(Asked::Root, &file, true).dead());
                 }
-                // Another copy of the root, or this machine, may have revoked a device since the last act
-                // here: the records as the next act would bring them forward say so before the list does.
-                let device = |row: &Member, revoked| DeviceRow {
-                    label: row.label.clone(),
-                    key: row.node,
-                    until: row.until,
-                    duration: row.duration,
-                    seeded: row.seeded(),
-                    revoked,
-                };
-                let marked = inspected.marked().iter().map(|row| device(row, true));
-                let listed: Vec<VerifyKey> = inspected
-                    .rows()
-                    .iter()
-                    .chain(inspected.marked())
-                    .map(|row| row.node)
-                    .collect();
-                // A revoked device the list carries no row for: its key and the name it had.
-                let unlisted = inspected
-                    .revoked_devices()
-                    .filter(|device| !listed.contains(&device.node))
-                    .map(revoked_device);
-                let rows: Vec<DeviceRow> = inspected
-                    .rows()
-                    .iter()
-                    .map(|row| device(row, false))
-                    .chain(marked)
-                    .chain(unlisted)
-                    .collect();
+                let rows = held_rows(&inspected);
                 self.devices("devices:".to_owned(), &rows, now);
                 // Due by the same test the renewal runs, which skips a device it cannot renew.
                 let due: Vec<VerifyKey> = inspected.due(now).map(|row| row.node).collect();
@@ -320,24 +297,7 @@ impl Report {
             }
             Standing::Device { pin, until } => {
                 self.top = vec![format!("root:{pin} not on this machine.")];
-                let rows: Vec<DeviceRow> = pin
-                    .verify_key()
-                    .ok()
-                    .and_then(|root| roster::held(home, root))
-                    .map(|update| {
-                        let members = update.members().iter().map(|member| DeviceRow {
-                            label: member.label.clone(),
-                            key: member.node,
-                            until: member.until,
-                            duration: member.duration,
-                            seeded: member.seeded(),
-                            revoked: false,
-                        });
-                        // A revoked device carries its key and the name it had, and no date.
-                        let revoked = update.revoked_devices().iter().map(revoked_device);
-                        members.chain(revoked).collect()
-                    })
-                    .unwrap_or_default();
+                let rows = synced_rows(home, pin);
                 let title = format!("devices (as of the last sync, {}):", sync::ago(home));
                 self.devices(title, &rows, now);
                 self.nags.extend(
@@ -355,10 +315,7 @@ impl Report {
         let own = key.verify_key().ok();
         let own_row = rows.iter().find(|row| Some(row.key) == own);
         // Named by the list once it lands. A line that gives a command takes only that name.
-        let name = match own_row {
-            Some(row) => Some(row.label.clone()),
-            None => swoosh::renewal::own_label(home).await,
-        };
+        let name = named(home, own_row).await;
         // Before a list names it, the lines that say what to do call it `this machine`: the one name the
         // reader has already seen for it on `this machine:`.
         let me = name
@@ -451,8 +408,10 @@ impl Report {
     async fn serving_line(&mut self, home: &Home) -> String {
         match ServiceState::read(home, ReadMode::Membership).await {
             Ok(state) => {
-                // Only a `serve` that answered binds the routes; an unknown one is said on `serving:`.
+                // Only a `serve` that answered binds the routes and says how it is reached; an unknown one
+                // is said on `serving:`.
                 if state.resident_present() {
+                    self.reach = reach(&state);
                     self.internal = internal_routes();
                 }
                 serving(&state)
@@ -473,8 +432,8 @@ impl Report {
     }
 
     /// The report, in blocks a blank line apart, an empty block left out: the key, its lock, the home and
-    /// the root's line (or what this machine is); each section with a row and what is served; the internal
-    /// routes a running `serve` answers; the lines that say what to do.
+    /// the root's line (or what this machine is); each section with a row and what is served; how a
+    /// running `serve` is reached and the internal routes it answers; the lines that say what to do.
     pub(crate) fn render(&self) -> String {
         let mut head = match &self.key {
             Some((key, methods, touch)) => {
@@ -512,11 +471,17 @@ impl Report {
         }
         body.extend(self.serving.iter().cloned());
 
-        let blocks: Vec<String> = [head, body, self.internal.clone(), self.nags.clone()]
-            .into_iter()
-            .filter(|block| !block.is_empty())
-            .map(|block| block.join("\n") + "\n")
-            .collect();
+        let blocks: Vec<String> = [
+            head,
+            body,
+            self.reach.clone(),
+            self.internal.clone(),
+            self.nags.clone(),
+        ]
+        .into_iter()
+        .filter(|block| !block.is_empty())
+        .map(|block| block.join("\n") + "\n")
+        .collect();
         blocks.join("\n")
     }
 }
@@ -689,6 +654,23 @@ fn serving(state: &ServiceState) -> String {
     }
 }
 
+/// `reach:`: the running `serve`'s rows, every address class it has, through the one rows function its
+/// banner prints by, so the two screens cannot drift. Empty when no `serve` answered.
+fn reach(state: &ServiceState) -> Vec<String> {
+    let Some(reach) = state.reach() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let written = Screen::default()
+        .block(ReachRows::of(reach, Scope::All).block("reach:"))
+        .write(&mut out);
+    // A `Vec` takes every write, so the block is never lost; were it, `status` would only lack it.
+    match (written, String::from_utf8(out)) {
+        (Ok(()), Ok(text)) => text.lines().map(str::to_owned).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// `internal routes:`: every route a `serve` binds that no entry names, in the table's order, with who
 /// reaches it and what it does. Read from swoosh's own table, never the running node's catalog, so what
 /// each row says it admits is what its bind enforces.
@@ -743,6 +725,84 @@ struct DeviceRow {
     seeded: bool,
     /// Revoked, by these records or by an update another copy of the root signed.
     revoked: bool,
+}
+
+/// This machine's name among your devices, the one `status` and serve's banner both print: its own row of
+/// the list this home holds, else the name a verified list gave it. Never the name an invite carried, which
+/// no list has vouched for. `None` when no list names it, or the list cannot be read.
+pub(crate) async fn own_name(home: &Home, own: NodeId) -> Option<DeviceLabel> {
+    let own = own.verify_key().ok()?;
+    let rows = match Standing::read(home).await {
+        Ok(Standing::HoldsRoot { .. }) => Root::inspect(home, RootPlace::Home)
+            .await
+            .map(|inspected| held_rows(&inspected))
+            .unwrap_or_default(),
+        Ok(Standing::Device { pin, .. }) => synced_rows(home, pin),
+        _ => Vec::new(),
+    };
+    named(home, rows.iter().find(|row| row.key == own)).await
+}
+
+/// The name `own_row` gives this machine, else the one a verified list gave it.
+async fn named(home: &Home, own_row: Option<&DeviceRow>) -> Option<DeviceLabel> {
+    match own_row {
+        Some(row) => Some(row.label.clone()),
+        None => swoosh::renewal::own_label(home).await,
+    }
+}
+
+/// Every device row of the root kept here: its list, the rows it marked revoked, then each revoked device
+/// the list carries no row for. Another copy of the root, or this machine, may have revoked a device since
+/// the last act here: the records as the next act would bring them forward say so before the list does.
+fn held_rows(inspected: &Inspected) -> Vec<DeviceRow> {
+    let device = |row: &Member, revoked| DeviceRow {
+        label: row.label.clone(),
+        key: row.node,
+        until: row.until,
+        duration: row.duration,
+        seeded: row.seeded(),
+        revoked,
+    };
+    let marked = inspected.marked().iter().map(|row| device(row, true));
+    let listed: Vec<VerifyKey> = inspected
+        .rows()
+        .iter()
+        .chain(inspected.marked())
+        .map(|row| row.node)
+        .collect();
+    // A revoked device the list carries no row for: its key and the name it had.
+    let unlisted = inspected
+        .revoked_devices()
+        .filter(|device| !listed.contains(&device.node))
+        .map(revoked_device);
+    inspected
+        .rows()
+        .iter()
+        .map(|row| device(row, false))
+        .chain(marked)
+        .chain(unlisted)
+        .collect()
+}
+
+/// Every device row of the list this device last synced from `pin`'s root; none when it holds none.
+fn synced_rows(home: &Home, pin: NodeId) -> Vec<DeviceRow> {
+    pin.verify_key()
+        .ok()
+        .and_then(|root| roster::held(home, root))
+        .map(|update| {
+            let members = update.members().iter().map(|member| DeviceRow {
+                label: member.label.clone(),
+                key: member.node,
+                until: member.until,
+                duration: member.duration,
+                seeded: member.seeded(),
+                revoked: false,
+            });
+            // A revoked device carries its key and the name it had, and no date.
+            let revoked = update.revoked_devices().iter().map(revoked_device);
+            members.chain(revoked).collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A revoked device with no row: its key and the name it had.

@@ -10,7 +10,7 @@ use swoosh::identity;
 use swoosh::names::Name;
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::serve::control_codec::{ControlError, DisabledList, LocalServiceSnapshot};
-use swoosh::serve::{ServedTarget, ServingError, Started};
+use swoosh::serve::{Reachable, ServedTarget, ServingError, Started};
 use swoosh::serve_toml::{ServeToml, ServeTomlError};
 use tightbeam::tunnel::ServiceCatalog;
 
@@ -24,8 +24,8 @@ pub(super) enum ReadMode {
 /// One answering resident, never independently acquired targets and membership.
 #[derive(Debug)]
 pub(super) enum ResidentObservation {
-    /// The bound catalog and the names its gate refuses, from one status reply.
-    Membership(Option<(ServiceCatalog, DisabledList)>),
+    /// The bound catalog, the names its gate refuses, and how peers reach it, from one status reply.
+    Membership(Option<(ServiceCatalog, DisabledList, Reachable)>),
     Detail(Option<LocalServiceSnapshot>),
 }
 
@@ -57,7 +57,7 @@ impl ServiceState {
         let resident = match mode {
             ReadMode::Membership => ResidentObservation::Membership(match client {
                 Some(client) => match client.status().await {
-                    Ok(status) => Some((status.menu.catalog, status.menu.disabled)),
+                    Ok(status) => Some((status.menu.catalog, status.menu.disabled, status.reach)),
                     Err(ControlError::NoResident) => None,
                     Err(error) => return Err(ReadError::Daemon(error)),
                 },
@@ -87,12 +87,21 @@ impl ServiceState {
         }
     }
 
+    /// How peers reach the resident, from the same status reply as its membership; `None` when no resident
+    /// answered, or the read was for detail.
+    pub fn reach(&self) -> Option<&Reachable> {
+        match &self.resident {
+            ResidentObservation::Membership(value) => value.as_ref().map(|(_, _, reach)| reach),
+            ResidentObservation::Detail(_) => None,
+        }
+    }
+
     /// Membership comes solely from the selected exchange.
     pub fn contains_bound(&self, name: &str) -> bool {
         match &self.resident {
             ResidentObservation::Membership(value) => value
                 .as_ref()
-                .is_some_and(|(catalog, _)| catalog.entries().any(|entry| entry.name == name)),
+                .is_some_and(|(catalog, ..)| catalog.entries().any(|entry| entry.name == name)),
             ResidentObservation::Detail(value) => value
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.contains(name)),
@@ -105,7 +114,7 @@ impl ServiceState {
         let observed: Vec<&str> = match &self.resident {
             ResidentObservation::Membership(value) => value
                 .iter()
-                .flat_map(|(catalog, _)| catalog.entries())
+                .flat_map(|(catalog, ..)| catalog.entries())
                 .map(|entry| entry.name.as_str())
                 .collect(),
             ResidentObservation::Detail(value) => value
@@ -128,10 +137,12 @@ impl ServiceState {
     pub fn refusing(&self, name: &str) -> bool {
         match &self.resident {
             ResidentObservation::Membership(value) => {
-                value.as_ref().is_some_and(|(_, disabled)| match disabled {
-                    DisabledList::Known(names) => names.iter().any(|held| held == name),
-                    DisabledList::Unknown(_) => true,
-                })
+                value
+                    .as_ref()
+                    .is_some_and(|(_, disabled, _)| match disabled {
+                        DisabledList::Known(names) => names.iter().any(|held| held == name),
+                        DisabledList::Unknown(_) => true,
+                    })
             }
             ResidentObservation::Detail(value) => value
                 .as_ref()

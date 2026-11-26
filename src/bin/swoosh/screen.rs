@@ -340,10 +340,7 @@ impl<'a> Screen<'a> {
             #[cfg(test)]
             {
                 let plain = block.print(false)?;
-                let held = plain
-                    .iter()
-                    .map(|(shape, line)| (*shape, &**line))
-                    .filter(|(_, line)| !law::OWED.contains(line));
+                let held = plain.iter().map(|(shape, line)| (*shape, &**line));
                 if let Err(breach) = law::hold(held) {
                     panic!("{breach}");
                 }
