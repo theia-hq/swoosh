@@ -503,6 +503,9 @@ struct Timed {
     pending: String,
 }
 
+/// A test writer, so plain: it never shows style.
+impl crate::screen::Paint for Timed {}
+
 impl std::io::Write for Timed {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.pending.push_str(core::str::from_utf8(bytes).unwrap());

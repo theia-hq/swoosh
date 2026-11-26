@@ -233,4 +233,13 @@ fn a_screen_is_one_write() {
         assert_eq!(out.0.len(), 1, "styled {styled}");
         assert_eq!(out.0[0].contains(&0x1b), styled);
     }
+    // So are a refusal's line and the warning line, styled.
+    let mut out = Counted(Vec::new(), true);
+    crate::print_error(&eyre::eyre!("refused"), &mut out);
+    let failed = swoosh::observation::Observed {
+        last: Err(swoosh::observation::ObservationError::Unavailable),
+        earlier: None,
+    };
+    crate::commands::through_serve::final_path(failed, &mut out).unwrap();
+    assert_eq!(out.0.len(), 2, "{:?}", out.0);
 }

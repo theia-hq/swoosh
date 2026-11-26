@@ -69,6 +69,48 @@ fn a_refusal_exits_1_when_stderr_cannot_be_written() {
     assert_eq!(status.code(), Some(1));
 }
 
+/// Colour follows the stream: a refusal's `error:` is styled only where the stream asks for it, never in a
+/// pipe, and `NO_COLOR` beats `CLICOLOR_FORCE`. How a terminal's `TERM` counts is `anstream`'s, and a test
+/// with no terminal cannot see it.
+#[test]
+fn colour_follows_the_stream() {
+    use clap::builder::styling::{AnsiColor, Style};
+
+    let file = scratch("colour");
+    std::fs::write(&file, "").unwrap();
+    let refusal = |env: &[(&str, &str)]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_swoosh"));
+        command
+            .args(["--home", file.to_str().unwrap(), "status"])
+            .env_remove("SWOOSH_HOME")
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .envs(env.iter().copied())
+            .stdin(Stdio::null());
+        let out = command.output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        text(&out.stderr)
+    };
+    let piped = refusal(&[]);
+    let forced = refusal(&[("CLICOLOR_FORCE", "1")]);
+    let refused = refusal(&[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")]);
+    let _ = std::fs::remove_file(&file);
+
+    for plain in [&piped, &refused] {
+        assert!(plain.starts_with("error: "), "{plain:?}");
+        assert!(!plain.contains('\u{1b}'), "{plain:?}");
+    }
+    let error = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
+    assert_eq!(
+        forced,
+        format!(
+            "{error}error:{error:#}{}",
+            piped.strip_prefix("error:").unwrap()
+        )
+    );
+}
+
 /// A bare `swoosh` is a mistake: its help goes to stderr, stdout stays empty, and it exits 2, with or
 /// without `SWOOSH_HOME` set.
 #[test]

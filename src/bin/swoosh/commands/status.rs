@@ -46,6 +46,7 @@ use swoosh::transport::ReachArgs;
 
 use crate::commands::route::Route;
 use crate::commands::{machine, through_serve};
+use crate::screen::Paint;
 
 pub mod report;
 
@@ -118,7 +119,7 @@ impl StatusCmd {
         machine: &Machine,
         admitted: Admitted<'s>,
         out: &mut impl Write,
-        err: &mut impl Write,
+        err: &mut impl Paint,
     ) -> eyre::Result<()> {
         let Some(peer) = &self.peer else {
             eyre::bail!(
@@ -239,7 +240,7 @@ async fn observed<S: Session>(
     peer: &Peer,
     stopped: impl AsyncFnOnce() -> Option<eyre::Report>,
     out: &mut impl Write,
-    err: &mut impl Write,
+    err: &mut impl Paint,
 ) -> eyre::Result<()> {
     let probed = tokio::select! {
         probed = probe(session, asked, label) => probed,

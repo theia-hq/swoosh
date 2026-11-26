@@ -255,6 +255,20 @@ fn the_path_row_through_serve_is_the_finishs_or_a_warning() {
             "warning: could not read the path of this run\n".to_owned()
         )
     );
+    // At a terminal only `warning:` is styled.
+    let warning = clap::builder::styling::Style::new()
+        .bold()
+        .fg_color(Some(clap::builder::styling::AnsiColor::Yellow.into()));
+    let mut err = anstream::AutoStream::always(Vec::new());
+    let failed = Observed {
+        last: Err(ObservationError::Unavailable),
+        earlier: None,
+    };
+    print_path(failed, &mut Vec::new(), &mut err).unwrap();
+    assert_eq!(
+        String::from_utf8(err.into_inner()).unwrap(),
+        format!("{warning}warning:{warning:#} could not read the path of this run\n")
+    );
     // An earlier failure beside a good Finish: the row, and nothing on stderr.
     assert_eq!(
         printed(Observed {
@@ -432,6 +446,9 @@ struct MovesOnTitle<'a> {
     peer: &'a swoosh::testkit::ScriptedPeer,
     written: Vec<u8>,
 }
+
+/// A test writer, so plain: it never shows style.
+impl crate::screen::Paint for MovesOnTitle<'_> {}
 
 impl std::io::Write for MovesOnTitle<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

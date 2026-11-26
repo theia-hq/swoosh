@@ -38,6 +38,7 @@ use swoosh::transport::ReachArgs;
 
 use crate::commands::route::Route;
 use crate::commands::{machine, through_serve};
+use crate::screen::Paint;
 
 /// How often a running speed test prints its current rate. One second matches iperf's default report
 /// interval and reads as a live, once-a-second heartbeat without flooding the terminal.
@@ -120,7 +121,7 @@ impl SpeedCmd {
         machine: &Machine,
         admitted: Admitted<'s>,
         out: &mut impl Write,
-        err: &mut impl Write,
+        err: &mut impl Paint,
     ) -> eyre::Result<()> {
         let service: Service = reach::SPEED_SERVICE.parse()?;
         // Isolated, never a held session: the rate and the path line it prints belong to this run's own
@@ -208,7 +209,7 @@ async fn observed<S: Session>(
     label: &str,
     cut: impl AsyncFnOnce(eyre::Report) -> eyre::Report,
     out: &mut impl Write,
-    err: &mut impl Write,
+    err: &mut impl Paint,
 ) -> eyre::Result<()> {
     let report = match transfer(mode, limit, session, observer.moves(|_| {})).await {
         Ok(report) => report,
@@ -230,7 +231,7 @@ async fn observed<S: Session>(
 /// Print the path row of a run from its final reading to `out`. When
 /// that failed there is no row; `err` carries a warning, and the run's own result and exit stay as they
 /// are.
-fn print_path(observed: Observed, out: &mut impl Write, err: &mut impl Write) -> io::Result<()> {
+fn print_path(observed: Observed, out: &mut impl Write, err: &mut impl Paint) -> io::Result<()> {
     match through_serve::final_path(observed, err)? {
         Some(info) => writeln!(out, "{}", path_line(&info)),
         None => Ok(()),

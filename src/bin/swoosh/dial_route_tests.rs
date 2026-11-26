@@ -57,7 +57,7 @@ async fn dialed_to(
     home: &Home,
     argv: &[&str],
     bound: Duration,
-    err: &mut impl std::io::Write,
+    err: &mut impl crate::screen::Paint,
 ) -> Printed {
     let mut out = Vec::new();
     let mut printed = dialed_out(home, argv, bound, &mut out, err).await;
@@ -71,7 +71,7 @@ async fn dialed_out(
     argv: &[&str],
     bound: Duration,
     out: &mut impl std::io::Write,
-    err: &mut impl std::io::Write,
+    err: &mut impl crate::screen::Paint,
 ) -> Printed {
     let outward = match Cli::try_parse_from(core::iter::once("swoosh").chain(argv.iter().copied()))
         .unwrap()
@@ -900,6 +900,9 @@ fn a_serve_gone_beside_a_whole_send_ends_without_resending() {
 /// A stderr the resident can read as it hears an Open, or a stdout a row reads as the run goes.
 #[derive(Clone, Default)]
 struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+/// A test writer, so plain: it never shows style.
+impl crate::screen::Paint for Shared {}
 
 impl std::io::Write for Shared {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
