@@ -680,3 +680,36 @@ async fn a_local_only_revoke_lands_beside_an_untrusted_socket() {
     assert!(after != before, "the act landed");
     let _ = std::fs::remove_dir_all(home.dir());
 }
+
+/// A `join` that landed beside a `serve` it cannot reach prints what landed and its error itself, and the
+/// composition root prints nothing after it: one `error:` line, exit 1.
+#[tokio::test]
+async fn a_landed_join_beside_an_unreachable_serve_prints_its_error_once() {
+    let dir = std::env::temp_dir().join(format!("sw-exroute-landed-join-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    swoosh::config::create_store_dir(&dir).unwrap();
+    let home = Home::resolve(Some(dir)).unwrap();
+    swoosh::identity::make_machine_dir(&home).unwrap();
+    let mut seed = TestNode::seeded(DESK).seed();
+    KeyFile::new(home.key())
+        .write(&keystore::Secret::take(&mut seed), Protection::Plain)
+        .unwrap();
+    let until = SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL);
+    let standing = TestRoot::seeded(ROOT)
+        .device_badge(TestNode::seeded(DESK).node_id(), until)
+        .unwrap();
+    let from = TestNode::seeded(NAS).node_id();
+    let invite = swoosh::invite::Invite::bound(from, "desk".parse().unwrap(), standing);
+    let lock = held_unreachable(&home).await;
+    let (status, stderr) = swoosh(&home, &["join", &invite.to_string()]).await;
+    drop(lock);
+    assert_eq!(status, Some(1), "{stderr}");
+    let landed = "The change is made and saved here. Your devices have not been told yet.\n";
+    assert!(
+        stderr.ends_with(&format!("{landed}{}", unreached(&home))),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("error:").count(), 1, "{stderr}");
+    assert!(!stderr.contains("was printed before"), "{stderr}");
+    let _ = std::fs::remove_dir_all(home.dir());
+}

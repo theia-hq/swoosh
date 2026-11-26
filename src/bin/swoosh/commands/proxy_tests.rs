@@ -827,6 +827,69 @@ fn a_refused_proxy_names_the_cause_on_both_paths() {
     });
 }
 
+/// A bare `proxy` admitted prints its URL and nothing else on `out`, stdout in a run: the line a
+/// refused request's body sends a downloader back to, and the one a script reads.
+#[test]
+fn an_admitted_proxy_prints_its_url_alone() {
+    on_a_big_stack(async || {
+        let (cmd, contacts, machine) = to_nas();
+        let peer =
+            swoosh::testkit::ScriptedPeer::new(machine.key(), [swoosh::testkit::Script::Holds]);
+        let node = bifrost::Node::new(peer, bifrost::NoDiscovery);
+        let peers = Peers::new(&node);
+        let home = standing(node.node_id());
+        let bound = crate::probe_route_tests::bound();
+        let route = Route::Own {
+            peer: &cmd.peer,
+            bound: &bound,
+            this: node.node_id(),
+        };
+        let credential = Credential::dialing(&cmd.peer, cmd.service.as_str());
+        let source = OwnBind::new(&peers, &home, node.node_id(), &credential);
+        let out = Shared::default();
+        let mut writer = out.clone();
+        // The run serves until stopped, so it is dropped once its first line is out, and a while
+        // after, so a line written later would be seen too.
+        let printed = async {
+            while !out.0.borrow().ends_with(b"\n") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        tokio::time::timeout(ROW_BOUND, async {
+            tokio::select! {
+                ended = cmd.proxy(source, &route, &machine, &contacts, &mut writer) => {
+                    panic!("an admitted proxy serves until stopped: {ended:?}")
+                }
+                () = printed => {}
+            }
+        })
+        .await
+        .expect("an admitted proxy prints its URL");
+        let out = String::from_utf8(out.0.take()).unwrap();
+        let url = out.strip_suffix('\n').unwrap();
+        assert!(!url.contains('\n'), "the URL alone: {out:?}");
+        let url = url::Url::parse(url).unwrap();
+        assert_eq!(url.host_str(), Some("127.0.0.1"), "{url}");
+        assert_eq!(url.path().len(), 2 + 32, "one token segment: {url}");
+    });
+}
+
+/// A writer the test reads while the run still holds it.
+#[derive(Clone, Default)]
+struct Shared(Rc<RefCell<Vec<u8>>>);
+
+impl std::io::Write for Shared {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Every request rides the Bulk lane: with the machine's Main lane full, a request still passes, on a
 /// held session of its own.
 #[tokio::test]
