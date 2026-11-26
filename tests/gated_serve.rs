@@ -276,6 +276,57 @@ async fn a_device_revoked_by_the_first_round_cannot_stop_on_a_stream_opened_duri
         .await;
 }
 
+/// A device whose key is revoked gets no list: its list is answered before the revocation, and once the
+/// store has read it, a new `control.serve` stream from the same key is refused before `Response::Ok`, so
+/// the handler never runs and nothing of what the node serves goes back.
+#[tokio::test]
+async fn a_revoked_device_is_refused_list() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut serving = Serving::start().await;
+            serving.finish_first_round();
+            let member = Node::new(MemTransport::bind(), NoDiscovery);
+            let (mut writer, mut reader) = serving.open(&member, SIGNET).await;
+            writer
+                .write_all(&[control::Request::List.encode()])
+                .await
+                .unwrap();
+            assert_eq!(read_list(&mut reader).await, serving.catalog);
+
+            let writer_side = Denylist::for_repair(serving.revoked.clone());
+            let lock = writer_side.lock().unwrap();
+            writer_side
+                .revoke(
+                    &lock,
+                    [Revocation::Key(member.node_id().verify_key().unwrap())],
+                )
+                .unwrap();
+            drop(lock);
+            tokio::time::sleep(nauthy::STAT_DEBOUNCE).await;
+
+            let badge = signet_badge(SIGNET, member.node_id());
+            let session = Connector::to_node(
+                serving.host,
+                CONTROL_SERVE_SERVICE.parse().unwrap(),
+                Some(badge.parse().unwrap()),
+            )
+            .open_service(&member)
+            .await
+            .expect("the base connect lands; the gate refuses per-stream");
+            let refused = session.open_bi().await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+                ),
+                "a revoked device is refused before Ok: {:?}",
+                refused.map(|_| ())
+            );
+            serving.still_running().await;
+        })
+        .await;
+}
+
 /// Two requests in one write: the first is answered and the second is never read, so `[List, Stop]` lists
 /// and the node runs on.
 #[tokio::test]

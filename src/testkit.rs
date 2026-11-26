@@ -883,7 +883,9 @@ impl bifrost::Session for HostilePeer {
 pub enum Script {
     /// Read the request, then refuse it.
     Refuse(bifrost::Refusal),
-    /// Read the request, admit it, then send a list of services naming these, and end the stream.
+    /// Read the request, admit it, then send a list of services naming these, and end the stream. On
+    /// `control.serve` it answers as the route does: only a list request, with `Done` before the list, and
+    /// any other request `BadRequest`; a stream that ends before its request goes unanswered.
     Lists(Vec<&'static str>),
     /// Read the request and never answer, holding the stream open.
     Silent,
@@ -1060,6 +1062,7 @@ impl ScriptedPeer {
         let Ok(request) = tightbeam::protocol::Request::read(&mut from).await else {
             return Ok(());
         };
+        let control = request.service == crate::serve::CONTROL_SERVE_SERVICE;
         self.lock().requests.push(request);
         match script {
             Script::Refuse(refusal) => {
@@ -1068,7 +1071,22 @@ impl ScriptedPeer {
                     .await
             }
             Script::Lists(names) => {
+                use tokio::io::AsyncReadExt as _;
+
+                use crate::serve::control::{Answer, Request};
+
                 tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                if control {
+                    let mut asked = [0u8; 1];
+                    if from.read_exact(&mut asked).await.is_err() {
+                        return Ok(());
+                    }
+                    if Request::decode(asked[0]) != Some(Request::List) {
+                        to.write_all(&[Answer::BadRequest.encode()]).await?;
+                        return to.shutdown().await;
+                    }
+                    to.write_all(&[Answer::Done.encode()]).await?;
+                }
                 to.write_all(&Self::catalog(&names)).await?;
                 to.shutdown().await
             }

@@ -809,7 +809,7 @@ fn failed_user_policy_leaves_internal_routes_enabled() {
         assert_eq!(watcher.refused().len(), entries.len());
         for name in [
             "control.stop",
-            "control.services",
+            "control.serve",
             "control.reach",
             "control.pickup",
         ] {

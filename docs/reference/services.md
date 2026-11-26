@@ -116,12 +116,12 @@ no entry can name it. Your other devices reach it on their own, and with `swoosh
 
 ### <a id="control-serve"></a>`control.serve`
 
-How your devices stop a machine. Every `swoosh serve` serves it, whatever else you
-name; no entry can name it.
+How your devices stop a machine and list what it serves. Every `swoosh serve` serves it, whatever else
+you name; no entry can name it.
 
 - Posture: your devices only. Anyone else is refused, and a `swoosh:` link naming it is refused at the route.
-- Client: `swoosh stop me/<name>`.
-- Limits: [stop](commands/stop.md).
+- Client: `swoosh stop me/<name>` and `swoosh status me/<name>`.
+- Limits: [stop](commands/stop.md), [status](commands/status.md).
 
 ## Posture
 

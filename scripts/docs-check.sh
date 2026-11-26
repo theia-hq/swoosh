@@ -30,6 +30,8 @@
 #   UNKNOWN / ORPHAN / DOUBLE / UNMARKED / COVERAGE   the marker binding rules (M3)
 #   LINK / ANCHOR   every relative link resolves; every #anchor exists in its target (M5)
 #   SECRET   a full-length invite:/swoosh: literal in expected text
+#   UNBOUND  a route no serve binds (control.stop, control.services, control.node) named in docs/ or
+#            README.md; released CHANGELOG sections keep their history, so the CHANGELOG is not read
 #   plus the census and the coverage invariant above
 #
 # WHAT IT DOES NOT DO YET (the spec's later slices; those modes refuse instead of passing, so a
@@ -323,6 +325,20 @@ check_secret() {
     return 0
 }
 
+# A page that names a route no `serve` binds sends a reader to a name every machine refuses. The names are
+# fixed strings: `control.serve`, the route that replaced them, never matches, and neither does `control.*`.
+check_unbound_route() {
+    case "$1" in
+        docs/*|README.md) ;;
+        *) return 0 ;;
+    esac
+    LC_ALL=C grep -n -F -e 'control.stop' -e 'control.services' -e 'control.node' "$2" 2>/dev/null \
+        | while IFS=: read -r ln _; do
+            printf 'UNBOUND %s:%s: names a route no serve binds\n' "$1" "$ln" >> "$TMP/findings"
+        done
+    return 0
+}
+
 lint() {
     ROOT="$1"
     [ -d "$ROOT" ] || { printf 'docs-check: no such root: %s\n' "$ROOT" >&2; exit 2; }
@@ -343,6 +359,7 @@ lint() {
         check_em_dash "$f" "$ROOT/$f"
         check_process "$f" "$ROOT/$f"
         check_secret "$f" "$ROOT/$f"
+        check_unbound_route "$f" "$ROOT/$f"
         check_links "$f" "$ROOT/$f"
     done < "$TMP/list"
 

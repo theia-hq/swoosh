@@ -882,14 +882,14 @@ fn ping_and_status_run_through_the_resident_on_its_held_session() {
 }
 
 /// `ping` and `status <machine>` through `serve` make one Open each, observed, on the held Main session,
-/// for the service the probe names: `control.services` for one of your devices.
+/// for the service the probe names: `control.serve` for one of your devices.
 #[tokio::test]
 async fn ping_and_status_open_once_observed_on_main() {
     use swoosh::serve::control_codec::{Observation, OpenLane, Request, Response};
 
     for (argv, service) in [
         (["ping", "me/nas"], "ping"),
-        (["status", "me/nas"], "control.services"),
+        (["status", "me/nas"], "control.serve"),
     ] {
         let mut served = Served::new(&format!("open-{}", argv[0])).await;
         let listener = served.listener();

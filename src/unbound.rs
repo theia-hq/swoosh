@@ -1,7 +1,7 @@
 //! The services three verbs dial by default that a bare `swoosh serve` does not bind.
 //!
-//! A bare `swoosh serve` binds `ping`, `speed`, the two `control.*` routes and the member-gated update
-//! route, and nothing else: a default service may cost a peer bandwidth, but never code execution, a
+//! A bare `swoosh serve` binds `ping`, `speed`, `control.serve` and the member-gated update route,
+//! and nothing else: a default service may cost a peer bandwidth, but never code execution, a
 //! byte of its disk, or a packet from its IP. Three verbs (`ssh`, `send`, `proxy`) therefore default to
 //! names a zero-config peer does not serve. A dial of one that is refused by one of your own devices
 //! names the `service add` form that serves it there ([`crate::serve::entry_for`]); a dial that is not

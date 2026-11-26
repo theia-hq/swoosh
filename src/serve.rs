@@ -31,7 +31,6 @@ mod opening;
 mod recv_home_tests;
 mod resident;
 mod scheme;
-mod services;
 mod serving;
 mod single;
 mod socket;
@@ -63,20 +62,7 @@ pub use self::definition::{DefinitionCause, DefinitionError, Operand};
 #[cfg(test)]
 pub(crate) use self::lookup::answer as lookup_answer;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
-pub use self::services::ServiceList;
 pub use self::serving::{Added, EditError, Mistyped, ServingError, Started};
-
-/// The node-control service that LISTS what this node serves: an admitted caller reaching it reads back the
-/// node's served services, each with its NAME and reach posture (gated behind a member badge, or open to
-/// anyone). A pure READ of what the exposer was built with, no mutable state and no authority granted. The
-/// client verb is `swoosh service --at <peer>`.
-///
-/// GATED (`type Exposure = Never`, like `control.serve`): the service menu is member-only, so a stranger never
-/// learns what a node serves: existence and shape are revealed only AFTER admission, and this is the
-/// teaching read the wrong-name path deliberately withholds. One unified `control.*` family, the dotted
-/// name is the verbatim wire name. Public so the `swoosh service` client requests the SAME name the
-/// served handler is keyed under, one source of truth for the wire string.
-pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
 
 /// The node's own control route: every `serve` binds it, member-only, and answers one request per stream on
 /// it, a list of what it serves or a stop ([`control::Serve`]). Bound by the node, never named in a `serve`

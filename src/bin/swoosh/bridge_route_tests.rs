@@ -242,7 +242,7 @@ fn the_bridge_ends_at_a_cut_on_both_paths() {
     });
 }
 
-/// `NotAdmitted` from one of your devices asks it why, one `control.services` stream on Main through the
+/// `NotAdmitted` from one of your devices asks it why, one `control.serve` stream on Main through the
 /// path the refused stream took, and names the cause on both paths; a contact's machine is asked
 /// nothing.
 #[test]
@@ -276,7 +276,7 @@ fn a_refused_bridge_names_the_cause_on_both_paths() {
             .await;
             assert_eq!(format!("{:#}", ended.unwrap_err()), line, "{typed}");
             let expected: &[&str] = if follow_up {
-                &["ssh", "control.services"]
+                &["ssh", "control.serve"]
             } else {
                 &["ssh"]
             };
@@ -323,7 +323,7 @@ fn a_refused_bridge_names_the_cause_on_both_paths() {
                 .collect();
             let mut expected = vec![("ssh", OpenLane::Main)];
             if follow_up {
-                expected.push(("control.services", OpenLane::Main));
+                expected.push(("control.serve", OpenLane::Main));
             }
             assert_eq!(opens, expected, "{typed}");
         }

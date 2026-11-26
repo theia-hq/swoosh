@@ -12,12 +12,13 @@ use core::time::Duration;
 use bifrost::{ConnInfo, NodeId, Path};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::{self, Connector};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::escape::{Escaped, causes, escaped_report};
 use crate::peer::{Kind, Machine};
 use crate::peers::{Hints, OpenError};
-use crate::serve::CONTROL_SERVICES_SERVICE;
+use crate::serve::CONTROL_SERVE_SERVICE;
+use crate::serve::control::{Answer, Request};
 use crate::serve::control_codec::{OpenLane, OpenRefusal, PeerRefusal};
 use crate::streams::{Ask, StreamSource, Unopened};
 use crate::transport;
@@ -74,8 +75,8 @@ pub fn gated(
     }
 }
 
-/// What a refused dial to one of your own devices learned from that device's `control.services`, which
-/// only your devices reach. The list is the one the device started with, so it is the truth about what
+/// What a refused dial to one of your own devices learned from that device's list on `control.serve`,
+/// which only your devices reach. The list is the one the device started with, so it is the truth about what
 /// it serves now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Diagnosis {
@@ -91,9 +92,9 @@ pub enum Diagnosis {
 }
 
 /// Why `machine` refused a stream of `service`, asked through `source`, the path the refused stream
-/// took: one `control.services` stream on Main, presenting `slip` when the machine was typed as a link,
-/// else what `source` presents for the route, since the route is member-only and a call presenting
-/// nothing would always be refused. Asked of your own devices only (`None` for any other kind, a link
+/// took: one `control.serve` stream on Main asking for its list, presenting `slip` when the machine was
+/// typed as a link, else what `source` presents for the route, since the route is member-only and a call
+/// presenting nothing would always be refused. Asked of your own devices only (`None` for any other kind, a link
 /// included, since the refusal could then be the link's), and only after a `NotAdmitted`, which the
 /// caller checks. Bounded by [`FOLLOW_UP_TIMEOUT`]; past it, or on any failure, the answer is
 /// [`Diagnosis::Unknown`], which claims no cause.
@@ -107,7 +108,7 @@ pub async fn diagnose_through(
         return None;
     }
     let asked = async {
-        let Ok(route) = CONTROL_SERVICES_SERVICE.parse::<Service>() else {
+        let Ok(route) = CONTROL_SERVE_SERVICE.parse::<Service>() else {
             return Diagnosis::Unknown;
         };
         let ask = Ask {
@@ -118,14 +119,7 @@ pub async fn diagnose_through(
             slip,
         };
         match source.open(&ask).await {
-            Ok(mut opened) => {
-                // The read sends nothing. Its clean end, never a dropped half, which a stream through
-                // the resident passes on as a reset, lets the node's reply complete.
-                if let Err(error) = opened.write.shutdown().await {
-                    tracing::debug!(%error, "the follow-up's request did not end cleanly");
-                }
-                listed(opened.read, service).await
-            }
+            Ok(opened) => listed(opened.write, opened.read, service).await,
             Err(Unopened::Refused(OpenRefusal::Peer(PeerRefusal::NotAdmitted))) => {
                 Diagnosis::NotYours
             }
@@ -142,9 +136,13 @@ pub async fn diagnose_through(
     )
 }
 
-/// Whether the list `reader` carries holds `service`. Nothing from it is printed.
-async fn listed(reader: impl tokio::io::AsyncRead + Unpin, service: &Service) -> Diagnosis {
-    match read_catalog(reader).await {
+/// Whether the list the stream's machine answers holds `service`. Nothing from it is printed.
+async fn listed(
+    writer: impl AsyncWrite + Unpin,
+    reader: impl AsyncRead + Unpin,
+    service: &Service,
+) -> Diagnosis {
+    match ask_list(writer, reader).await {
         Ok(catalog)
             if catalog
                 .entries()
@@ -160,6 +158,53 @@ async fn listed(reader: impl tokio::io::AsyncRead + Unpin, service: &Service) ->
     }
 }
 
+/// The cause a list that is not one gives: the machine answered the list request with anything but
+/// [`Answer::Done`], or sent a list that does not decode. Whatever it sent stays in the log, since it is the
+/// machine's own bytes.
+const UNKNOWN_LIST_REPLY: &str = "it sent an unknown reply to the list request";
+
+/// The cause a list request that got no answer at all gives: the machine ended its side cleanly before it
+/// sent one. It sent nothing, so nothing it sent was unknown.
+const LIST_ENDED: &str = "it ended the list request without an answer";
+
+/// Ask the machine on an opened `control.serve` stream for its list of services: write
+/// [`Request::List`] and end this side, then read the one answer byte and, after [`Answer::Done`], the
+/// list. The caller bounds the whole exchange.
+///
+/// This side is ended, not dropped, since through `serve` a half dropped unended reaches the node as a
+/// reset. A transport failure keeps its cause; a clean end before any answer is [`LIST_ENDED`]; an answer
+/// that is not `Done` and a list that does not decode are both [`UNKNOWN_LIST_REPLY`]. A node answers a list `Done` whether or not
+/// its first round has ended, so any other answer is one no conforming node gives.
+pub async fn ask_list(
+    mut writer: impl AsyncWrite + Unpin,
+    mut reader: impl AsyncRead + Unpin,
+) -> eyre::Result<tunnel::ServiceCatalog> {
+    let failed = |error: tokio::io::Error| eyre::eyre!("{}", causes(&error));
+    writer
+        .write_all(&[Request::List.encode()])
+        .await
+        .map_err(failed)?;
+    writer.shutdown().await.map_err(failed)?;
+    let mut answer = [0u8; 1];
+    match reader.read_exact(&mut answer).await {
+        Ok(_) => {}
+        // A conforming node resets a stream it does not answer, so a clean end is no answer at all.
+        Err(error) if error.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+            tracing::debug!("the list request's stream ended before an answer");
+            eyre::bail!(LIST_ENDED);
+        }
+        Err(error) => return Err(failed(error)),
+    }
+    if Answer::decode(answer[0]) != Some(Answer::Done) {
+        tracing::debug!(
+            answer = answer[0],
+            "the list request was answered with another code"
+        );
+        eyre::bail!(UNKNOWN_LIST_REPLY);
+    }
+    read_catalog(reader).await
+}
+
 /// Read a machine's list of services under the wire's own bound, then decode it.
 ///
 /// The untrusted end here is the SERVER: these bytes are a remote node's, and an unbounded read lets that
@@ -168,9 +213,7 @@ async fn listed(reader: impl tokio::io::AsyncRead + Unpin, service: &Service) ->
 /// serving end refuses to encode past the same bound, so one number holds both ends of this wire. One byte
 /// past it is read only to tell a list at the ceiling (it decodes) from a peer still streaming (it does
 /// not), so an over-long reply says so instead of reading as a malformed list.
-pub async fn read_catalog(
-    reader: impl tokio::io::AsyncRead + Unpin,
-) -> eyre::Result<tunnel::ServiceCatalog> {
+async fn read_catalog(reader: impl AsyncRead + Unpin) -> eyre::Result<tunnel::ServiceCatalog> {
     let mut bytes = Vec::new();
     reader
         .take(tunnel::MAX_CATALOG_BLOB + 1)
@@ -183,7 +226,10 @@ pub async fn read_catalog(
             tunnel::MAX_CATALOG_BLOB
         );
     }
-    tunnel::ServiceCatalog::decode(&bytes)
+    tunnel::ServiceCatalog::decode(&bytes).map_err(|error| {
+        tracing::debug!(%error, "the list did not decode");
+        eyre::eyre!(UNKNOWN_LIST_REPLY)
+    })
 }
 
 /// Put the fact the bind mode explains under a reach failure, and the fix under that, so the error says

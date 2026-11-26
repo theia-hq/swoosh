@@ -1199,7 +1199,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
 
 /// One of your devices refusing the file is asked why through the same source, on Main: by own bind the
 /// question rides a Main session the run already holds, presenting what the file did, so it makes no
-/// connection of its own; through `serve` it is one Open for `control.services` on Main.
+/// connection of its own; through `serve` it is one Open for `control.serve` on Main.
 #[tokio::test]
 async fn send_follow_up_rides_the_source_on_main() {
     let (dir, paths) = files("follow", 1);
@@ -1244,7 +1244,7 @@ async fn send_follow_up_rides_the_source_on_main() {
         .iter()
         .map(|request| request.service.as_str())
         .collect();
-    assert_eq!(services, ["ping", "recv", "control.services"]);
+    assert_eq!(services, ["ping", "recv", "control.serve"]);
     assert_eq!(
         requests[1].capability.as_deref(),
         Some(badge.as_str()),
@@ -1293,10 +1293,7 @@ async fn send_follow_up_rides_the_source_on_main() {
         .collect();
     assert_eq!(
         asked,
-        [
-            ("recv", OpenLane::Bulk),
-            ("control.services", OpenLane::Main)
-        ]
+        [("recv", OpenLane::Bulk), ("control.serve", OpenLane::Main)]
     );
 }
 
@@ -1475,7 +1472,7 @@ async fn a_refused_send_to_your_device_ends_with_one_refusal() {
         .into_iter()
         .map(|request| request.service)
         .collect();
-    assert_eq!(asked, ["recv", "control.services"]);
+    assert_eq!(asked, ["recv", "control.serve"]);
 }
 
 /// A `serve` that takes an Open and then answers nothing, a status included, has stalled: every file would

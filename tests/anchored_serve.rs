@@ -701,6 +701,30 @@ async fn control_stop_is_not_bound() {
     assert_not_admitted(&stop, "control.stop is no route of a running serve").await;
 }
 
+/// A running `serve` binds no `control.services`: one of your devices asking for it gets the uniform
+/// refusal a name it does not serve gets, while the same device is admitted at `control.serve` on the same
+/// machine. A list has one route, the one a stop rides.
+#[tokio::test]
+async fn control_services_is_not_bound() {
+    let scratch = Scratch::new("no-control-services");
+    let root = TestRoot::seeded(0x56);
+    swoosh::config::write_signet(&swoosh::testkit::lock(), &scratch.home(), root.node_id())
+        .unwrap();
+    let served = serve(&scratch.0, &["demo=echo:"]);
+    let node = dialer(0x4e, &served).await;
+    let badge = root.device_badge(dialer_id(0x4e), in_an_hour()).unwrap();
+    let session = |service: &str| {
+        Connector::to_node(served.key, service.parse().unwrap(), Some(badge.clone()))
+            .open_service(&node)
+    };
+    let admitted = session(CONTROL_SERVE_SERVICE).await.expect("connect");
+    open(&admitted)
+        .await
+        .expect("the same device is admitted at control.serve");
+    let services = session("control.services").await.expect("connect");
+    assert_not_admitted(&services, "control.services is no route of a running serve").await;
+}
+
 /// A fault right after the link is printed (its stdout is a closed pipe) still leaves the row on disk,
 /// because the row is appended and synced before the link is printed.
 #[test]

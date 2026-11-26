@@ -1,8 +1,8 @@
 //! The client half of the default-service pairing: that each defaulted name has a `service add` form that
 //! serves that very name.
 //!
-//! The serve half (that a bare `swoosh serve` binds exactly `ping`, `speed` and the two `control.*`
-//! routes, and none of the names in this table) is proven against the real default set in the
+//! The serve half (that a bare `swoosh serve` binds exactly `ping`, `speed`, `control.serve` and the
+//! update route, and none of the names in this table) is proven against the real default set in the
 //! binary's `serve` tests, which is where that set lives.
 
 use std::collections::BTreeSet;
@@ -16,7 +16,7 @@ fn a_name_the_client_did_not_default_to_is_not_a_row() {
         "ping",
         "speed",
         "control.stop",
-        "control.services",
+        "control.serve",
         "roster",
         "sshd",
         "web",

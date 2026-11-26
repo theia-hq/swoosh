@@ -36,8 +36,6 @@ how peers reach you
              192.168.x.x:58131
 
 serving
-  family-gated   your devices + peers you've granted
-    control.*   node control (never public)
   public !   anyone, unauthenticated
     ping    round-trip probe
     speed   throughput test

@@ -22,15 +22,14 @@ use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVE_SERVICE, CONTROL_SERVICES_SERVICE, DEFAULT_SERVICES, ProxyScope, ProxyService,
-    SYNC_SERVICE, ServiceList, Stopped, bind_entry, control, extract_recv_services,
+    CONTROL_SERVE_SERVICE, DEFAULT_SERVICES, ProxyScope, ProxyService, SYNC_SERVICE, Stopped,
+    bind_entry, control, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
 use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{
-    CancellationToken, ManifestEntry, Metering, Posture, RawSource, Router, ServiceCatalog,
-    TargetKind,
+    CancellationToken, ManifestEntry, Metering, Posture, RawSource, Router, TargetKind,
 };
 
 use super::{
@@ -189,11 +188,6 @@ fn default_manifest() -> Vec<ManifestEntry> {
     vec![
         entry_gated(
             "control.serve",
-            TargetKind::Handler,
-            Some(Metering::Unmetered),
-        ),
-        entry_gated(
-            "control.services",
             TargetKind::Handler,
             Some(Metering::Unmetered),
         ),
@@ -1740,11 +1734,6 @@ fn bare_serve() -> BTreeSet<String> {
         router = bind_entry(router, entry, [0u8; 32], &[]).expect("a default entry binds");
     }
     let exposer = serve_route(update_route(router))
-        .member_service(
-            CONTROL_SERVICES_SERVICE.parse().expect("a name"),
-            ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
-        )
-        .expect("control.services binds")
         .expose()
         .expect("the bare service set assembles under the family gate");
     exposer
@@ -1754,8 +1743,8 @@ fn bare_serve() -> BTreeSet<String> {
         .collect()
 }
 
-/// What a bare `swoosh serve` binds is EXACTLY `ping`, `speed`, the two `control.*` routes and the
-/// member-gated update route.
+/// What a bare `swoosh serve` binds is EXACTLY `ping`, `speed`, `control.serve` and the member-gated
+/// update route.
 ///
 /// The narrow posture had nothing holding it, so widening it was a silent edit. The rule it holds: a
 /// default service may cost a peer BANDWIDTH, and may never cost it code execution, a byte of its
@@ -1787,7 +1776,6 @@ fn a_bare_serve_binds_exactly_ping_speed_the_control_routes_and_the_update_route
         reach::PING_SERVICE,
         reach::SPEED_SERVICE,
         CONTROL_SERVE_SERVICE,
-        CONTROL_SERVICES_SERVICE,
         SYNC_SERVICE,
     ]
     .into_iter()
@@ -1866,12 +1854,7 @@ fn the_control_socket_adds_no_service() {
     let router =
         bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &[]).expect("ping binds");
     let router = bind_entry(router, "speed=speed:", [0u8; 32], &[]).expect("speed binds");
-    let router = serve_route(update_route(router))
-        .member_service(
-            CONTROL_SERVICES_SERVICE.parse().expect("a name"),
-            ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
-        )
-        .expect("control.services binds");
+    let router = serve_route(update_route(router));
     let exposer = router
         .expose()
         .expect("the default service set assembles under the family gate");

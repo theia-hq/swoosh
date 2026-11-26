@@ -299,7 +299,7 @@ fn one_open_table_for_the_probe_verbs() {
         for (argv, meets, out, error) in table {
             let service = match argv[0] {
                 "speed" => swoosh::reach::SPEED_SERVICE,
-                "status" => swoosh::serve::CONTROL_SERVICES_SERVICE,
+                "status" => swoosh::serve::CONTROL_SERVE_SERVICE,
                 _ => swoosh::reach::PING_SERVICE,
             }
             .parse()
@@ -391,7 +391,7 @@ pub(crate) fn asked(peer: &ScriptedPeer) -> Vec<String> {
 }
 
 /// By own bind, `ping` and `status <machine>` each open one stream through the run's `Peers` on Main,
-/// one connection, presenting the stored badge: `status` asks one of your devices `control.services`,
+/// one connection, presenting the stored badge: `status` asks one of your devices `control.serve`,
 /// `ping` asks `ping`. The stale exchange beside a run to your device, presenting this home's standing
 /// as the composition root's own bind does, rides that same held session.
 #[tokio::test(start_paused = true)]
@@ -399,7 +399,7 @@ async fn ping_and_status_own_bind_ride_main() {
     let this = nas();
     for (argv, service) in [
         (&["ping", "me/nas", "-c", "1"][..], "ping"),
-        (&["status", "me/nas"], "control.services"),
+        (&["status", "me/nas"], "control.serve"),
         (&["status", "bob/nas"], "ping"),
     ] {
         let peer = ScriptedPeer::new(this, [Script::Lists(vec!["ping"])]);
@@ -475,7 +475,7 @@ fn ask(service: &str, lane: OpenLane) -> Ask {
     }
 }
 
-/// By own bind, `ping` refused `NotAdmitted` by one of your devices asks `control.services` on the held
+/// By own bind, `ping` refused `NotAdmitted` by one of your devices asks `control.serve` on the held
 /// Main session the refused stream took: one connection in all.
 #[tokio::test]
 async fn the_follow_up_rides_the_verbs_session() {
@@ -488,7 +488,7 @@ async fn the_follow_up_rides_the_verbs_session() {
     );
     let ran = by_own_bind(&["ping", "me/nas"], &peer, "follow-up-session").await;
     assert!(ran.ended.is_err());
-    assert_eq!(asked(&peer), ["ping", "control.services"]);
+    assert_eq!(asked(&peer), ["ping", "control.serve"]);
     assert_eq!(
         peer.dials(),
         1,
