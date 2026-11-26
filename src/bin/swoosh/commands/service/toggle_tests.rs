@@ -284,9 +284,6 @@ async fn every_name_off_accepts_reads_back() {
     let longest = "a".repeat(63);
     for (typed, stored) in [
         ("WEB", "web"),
-        ("me", "me"),
-        ("root", "root"),
-        ("anyone", "anyone"),
         ("0-x", "0-x"),
         (longest.as_str(), longest.as_str()),
     ] {

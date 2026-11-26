@@ -39,7 +39,8 @@ use crate::credential::Credential;
 use crate::home::Home;
 use crate::observation::{Follow, Observed};
 use crate::reaching::ResolveError;
-use crate::serve::{LOOKUP_ROOT_SERVICE, PROVEN_ROUTES};
+use crate::serve::LOOKUP_ROOT_SERVICE;
+use crate::serve::control::Internal;
 
 pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 // A Bulk or Isolated open's deadline. Neither caller waits on its open with anything racing it, so the
@@ -218,7 +219,7 @@ pub async fn presents(
     service: &Service,
     slip: Option<Link>,
 ) -> Result<Presents, Unpresentable> {
-    if slip.is_none() && PROVEN_ROUTES.contains(&service.as_str()) {
+    if slip.is_none() && Internal::is_proven(service.as_str()) {
         return Ok(Presents::Standing(None));
     }
     let slipped = slip.is_some();

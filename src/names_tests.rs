@@ -1,4 +1,4 @@
-use super::{Name, NameError, service, suggest_from};
+use super::{Name, NameError, Reserved, ReservedService, service, suggest_from};
 
 /// Every character outside `a-z`, `0-9` and `-`, a leading `-`, and a 64th character each break the rule,
 /// so no name can hold the invite's `.`, a marker's `:`, a path, or whitespace.
@@ -95,6 +95,27 @@ fn a_stored_name_never_folds() {
     assert_eq!(
         Name::stored("a.b"),
         Err(NameError::NotAName("a.b".to_owned()))
+    );
+}
+
+/// No reserved word is a service, in any case: each refuses with its own error, which names the word.
+#[test]
+fn no_reserved_word_is_a_service() {
+    for reserved in Reserved::ALL {
+        let word = reserved.as_str();
+        let refused = service(&word.to_ascii_uppercase());
+        assert_eq!(
+            refused,
+            Err(NameError::ReservedService(ReservedService(reserved)))
+        );
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            format!("{word} is reserved; no service can have that name")
+        );
+    }
+    assert_eq!(
+        Name::RESERVED.map(str::to_owned),
+        Reserved::ALL.map(|r| r.as_str().to_owned())
     );
 }
 

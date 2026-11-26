@@ -510,7 +510,14 @@ async fn service_add_refuses_reserved_names_before_home_writes() {
         "lookup=ping:",
         "CONTROL=ping:",
         "LookUp=ping:",
+        "me",
+        "Root=ping:",
+        "anyone=ping:",
     ] {
+        let word = entry
+            .split_once('=')
+            .map_or(entry, |(name, _)| name)
+            .to_ascii_lowercase();
         let parsed = crate::Cli::try_parse_from([
             "swoosh",
             "--home",
@@ -533,7 +540,7 @@ async fn service_add_refuses_reserved_names_before_home_writes() {
         assert!(error.downcast_ref::<Usage>().is_some());
         assert_eq!(
             error.to_string(),
-            "invalid service definition at index 1: invalid service name"
+            format!("{word} is reserved; no service can have that name")
         );
         assert_eq!(std::fs::read(home.serve_toml()).unwrap(), original);
         assert_eq!(

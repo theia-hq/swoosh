@@ -39,8 +39,9 @@ use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::home::{Home, HomeWrite};
 use crate::peers::Hints;
 use crate::roster::{MAX_BADGE, read_held};
+use crate::serve::control::Internal;
 use crate::serve::control_codec::{OpenLane, OpenRequest};
-use crate::serve::{PROVEN_ROUTES, RENEWAL_SERVICE, SYNC_SERVICE};
+use crate::serve::{RENEWAL_SERVICE, SYNC_SERVICE};
 use crate::standing::Standing;
 use crate::streams::{Ask, Opened, StreamSource, Unopened};
 use crate::sync::{Device, Reply};
@@ -488,7 +489,7 @@ impl<'a, F: Fetch> OpenRenewal<'a, F> {
     /// them renews first.
     pub async fn before(&self, open: &OpenRequest) -> PickUp {
         let service = open.service().as_str();
-        if open.slip().is_some() || service == SYNC_SERVICE || PROVEN_ROUTES.contains(&service) {
+        if open.slip().is_some() || service == SYNC_SERVICE || Internal::is_proven(service) {
             return PickUp::Skipped;
         }
         let flight = {

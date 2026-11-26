@@ -65,6 +65,19 @@ pub enum ServeTomlError {
     /// Identifies an invalid definition by operand, one-based index, and finite cause. Contains no definition text or underlying parser error.
     #[error(transparent)]
     Definition(#[from] crate::serve::ServingError),
+    /// A service the file saves is named with a reserved word: refused at load, with the one line every
+    /// service slot gives it and the file it is in, so the person can take it out.
+    #[error(
+        "{}\n  It is in {}. Remove it there.",
+        crate::names::ReservedService(*name),
+        EscapedPath(path)
+    )]
+    Reserved {
+        /// The file.
+        path: PathBuf,
+        /// The word.
+        name: crate::names::Reserved,
+    },
     /// The file exists and could not be read or written, or another user owns it, or others can write it.
     #[error("could not use {}", EscapedPath(path))]
     Io {
@@ -113,6 +126,8 @@ enum Undecodable {
     Damaged,
     /// The field `what` is not a usable URL.
     Unusable(&'static str),
+    /// A service turned off is named with a reserved word.
+    Reserved(crate::names::Reserved),
 }
 
 impl ServeToml {
@@ -125,6 +140,27 @@ impl ServeToml {
         Ok(read_stamped(&home.serve_toml())?
             .map(|(file, _)| file)
             .unwrap_or_default())
+    }
+
+    /// Refuse a `<home>/serve.toml` that names a service with a reserved word, in its saved list or its off
+    /// list, reading only: a `serve` asks before it takes its home's lock or binds anything, so the
+    /// refusal leaves no file behind. Every other refusal is left to the load after the lock, which reads
+    /// the file again and stays the authority.
+    ///
+    /// # Errors
+    ///
+    /// [`ServeTomlError::Reserved`], and only that.
+    pub fn refuse_reserved(home: &Home, cwd: &Path) -> Result<(), ServeTomlError> {
+        let path = home.serve_toml();
+        let file = match read_stamped(&path) {
+            Ok(Some((file, _))) => file,
+            Err(error @ ServeTomlError::Reserved { .. }) => return Err(error),
+            Ok(None) | Err(_) => return Ok(()),
+        };
+        match saved(&file, cwd, &path) {
+            Err(error @ ServeTomlError::Reserved { .. }) => Err(error),
+            Ok(_) | Err(_) => Ok(()),
+        }
     }
 
     /// Re-read `<home>/serve.toml`, let `change` set what it sets, and write the file back when anything
@@ -217,11 +253,13 @@ impl ServeToml {
                 SERVICES => read.services = Some(strings(value).ok_or(Undecodable::Damaged)?),
                 OFF => {
                     let off = strings(value).ok_or(Undecodable::Damaged)?;
-                    if off
-                        .iter()
-                        .any(|name| crate::names::Name::stored(name).is_err())
-                    {
-                        return Err(Undecodable::Damaged);
+                    for name in &off {
+                        let name =
+                            crate::names::Name::stored(name).map_err(|_| Undecodable::Damaged)?;
+                        // A reserved word is no service, off or listed: one rule for the whole file.
+                        if let Some(reserved) = crate::names::Reserved::of(&name) {
+                            return Err(Undecodable::Reserved(reserved));
+                        }
                     }
                     read.off = off.into_iter().collect();
                 }
@@ -297,6 +335,10 @@ fn read_stamped(path: &Path) -> Result<Option<(ServeToml, Option<FileStamp>)>, S
         Undecodable::Unusable(what) => ServeTomlError::Unusable {
             path: path.to_owned(),
             what,
+        },
+        Undecodable::Reserved(name) => ServeTomlError::Reserved {
+            path: path.to_owned(),
+            name,
         },
     })?;
     Ok(Some((read, stamp)))
@@ -398,6 +440,18 @@ impl core::fmt::Display for Waiting {
     }
 }
 
+/// The services `file` saves, as a bare start takes them at `cwd`; a reserved word among them is refused
+/// naming `path`, the file it is in.
+fn saved(file: &ServeToml, cwd: &Path, path: &Path) -> Result<Started, ServeTomlError> {
+    Started::bare_at(file, cwd).map_err(|error| match error.reserved() {
+        Some(name) => ServeTomlError::Reserved {
+            path: path.to_owned(),
+            name,
+        },
+        None => error.into(),
+    })
+}
+
 // Use the captured cwd for every snapshot, without consulting the current process directory.
 fn running(file: &ServeToml, cwd: &Path) -> Option<BTreeMap<String, String>> {
     Started::bare_at(file, cwd)
@@ -494,7 +548,7 @@ impl LiveServeToml {
             Some((file, stamp)) => (file, stamp, LivePolicy::Accepted),
             None => (ServeToml::default(), None, LivePolicy::Absent),
         };
-        let started = Started::bare_at(&file, cwd)?;
+        let started = saved(&file, cwd, &path)?;
         let running = targets(&started);
         Ok(Self {
             shared: Arc::new(Watched {

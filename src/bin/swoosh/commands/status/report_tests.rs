@@ -1876,7 +1876,8 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
     use crate::commands::service_state::{ReadError, ReadMode, ServiceState};
 
     let home = home("uncallable-services");
-    for name in ["control", "lookup"] {
+    for reserved in swoosh::names::Reserved::ALL {
+        let name = reserved.as_str();
         let entry = format!("{name}=ping:");
         service_list(&home, &["ssh=sshd:", &entry], &[]).await;
         let before = tree(home.dir());
@@ -1886,9 +1887,9 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
                 swoosh::serve::DefinitionError {
                     operand: swoosh::serve::Operand::Saved,
                     index: 2,
-                    cause: swoosh::serve::DefinitionCause::Name,
+                    cause: swoosh::serve::DefinitionCause::Reserved(found),
                 }
-            )))
+            ))) if found == reserved
         ));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         run_to(&home, Print::Report, &mut out, &mut err)
@@ -1906,33 +1907,72 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
         );
         assert!(
             !err.contains(&entry)
-                && err
-                    .contains("invalid saved service definition at index 2: invalid service name"),
+                && err.contains(&format!(
+                    "{name} is reserved; no service can have that name"
+                )),
             "{err}"
         );
         assert_eq!(tree(home.dir()), before);
 
         service_list(&home, &["ssh=sshd:"], &[]).await;
         let resident = LocalResident::start(&home, &["ssh", "control.stop"], None);
-        // The invalid entry is absent from the bound catalog, but the whole file still refuses.
+        // The invalid entry is absent from the bound catalog, but the whole file still refuses, and a
+        // serve whose list is unknown lists no internal route.
         service_list(&home, &["ssh=sshd:", &entry], &[]).await;
-        assert_eq!(serving_row(&status(&home).await), "serving: unknown");
+        let out = status(&home).await;
+        assert_eq!(serving_row(&out), "serving: unknown");
+        assert!(!out.contains("internal routes"), "{out}");
         drop(resident);
     }
 }
 
+/// While a `serve` answers here, bare `status` lists every internal route in its own block: a blank line
+/// after `serving:`, the title, one row per route in the table's order with who reaches it and what it
+/// does, then the lines that say what to do. With no `serve` running, the block is not there.
 #[tokio::test]
-async fn status_preserves_current_callable_names_without_new_reservations() {
-    let home = home("current-service-names");
-    service_list(&home, &["me=ping:", "root=ping:", "anyone=ping:"], &[]).await;
-    assert_eq!(
-        serving_row(&status(&home).await),
-        "serving: me, root, anyone, when swoosh serve runs"
+async fn status_lists_internal_routes_while_serving() {
+    const BLOCK: &str = "internal routes:\n\
+                         \x20 control.serve    your devices                  stops it, lists its services\n\
+                         \x20 control.sync     your devices                  syncs your device list\n\
+                         \x20 control.renewal  your devices                  renews your devices\n\
+                         \x20 lookup.root      your devices, saved machines  says which root vouches for it\n";
+
+    let home = home("internal-routes");
+    device_of(&home).await;
+    service_list(&home, &["ssh=sshd:"], &[]).await;
+    let fork = RosterDoc::new(Epoch(3), Vec::new()).expect("an update");
+    std::fs::write(
+        home.devices_conflict(),
+        TestRoot::seeded(ROOT).sign_update(&fork),
+    )
+    .expect("the fork");
+    let idle = status(&home).await;
+    assert!(!idle.contains("internal routes"), "{idle}");
+    assert!(!idle.contains("control."), "{idle}");
+
+    let resident = LocalResident::start(&home, &["ssh", "control.stop"], None);
+    let out = status(&home).await;
+    // The resident binds a dotted name, and it never joins `serving:`: the block is where routes print.
+    assert!(!serving_row(&out).contains('.'), "{out}");
+    assert!(
+        out.contains(&format!("\nserving: ssh\n\n{BLOCK}\ntwo copies")),
+        "{out}"
     );
-    let resident = LocalResident::start(&home, &["me", "root", "anyone", "control.stop"], None);
-    assert_eq!(
-        serving_row(&status(&home).await),
-        "serving: me, root, anyone"
+    assert_eq!(out.matches("internal routes:").count(), 1, "{out}");
+    assert!(
+        BLOCK.lines().all(|line| line.chars().count() < 80),
+        "every row fits 80 columns"
     );
     drop(resident);
+    assert!(!status(&home).await.contains("internal routes"));
+}
+
+/// Every internal route has its words: a route added to the table with none fails here, before `status`
+/// prints a row with an empty cell.
+#[test]
+fn every_internal_route_has_its_words() {
+    for route in &swoosh::serve::control::INTERNAL {
+        assert!(!super::what(route.name).is_empty(), "{}", route.name);
+        assert!(!super::who(route.admits).is_empty(), "{}", route.name);
+    }
 }

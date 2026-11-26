@@ -403,7 +403,8 @@ fn print_error(report: &eyre::Report, err: &mut impl std::io::Write) {
 /// [`stop::A_LINK_STOPS_NOTHING`]; an `invite` given a root's key for the device's is refused with
 /// [`invite::ROOT_IS_NO_MACHINE`], and a `serve --admit` given a machine's key with
 /// [`serve::ADMIT_TAKES_A_ROOT`]. A `forward` whose `--peer` gives one key more addresses than one dial
-/// takes is refused with [`transport::CrowdedHints`]. A serve argument conflict between positional definitions and relative flags uses a fixed message instead of echoing operand values. Every other error is clap's own. Refused here, at parse, so nothing is
+/// takes is refused with [`transport::CrowdedHints`]. A reserved word in a service slot is refused with
+/// [`ReservedService`](swoosh::names::ReservedService)'s line. A serve argument conflict between positional definitions and relative flags uses a fixed message instead of echoing operand values. Every other error is clap's own. Refused here, at parse, so nothing is
 /// read, opened or bound first, the home included.
 fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
@@ -411,7 +412,18 @@ where
     T: Into<std::ffi::OsString>,
 {
     let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
-    match Cli::try_parse_from(&argv) {
+    let parsed = Cli::try_parse_from(&argv);
+    // A reserved word in any service slot, refused with its own line under the usage of the verb it was
+    // typed to, rather than in clap's `invalid value` frame. Checked before the match, as no arm below reads
+    // a reserved word.
+    if let Err(error) = &parsed
+        && let Some(reserved) = reserved_service(error)
+    {
+        let path = verb_path(&argv);
+        let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        return Err(usage(&path, &reserved.to_string()));
+    }
+    match parsed {
         Err(error) if error.kind() == clap::error::ErrorKind::ArgumentConflict => {
             // Clap may include operand values in a conflict. Confirm this particular conflict with
             // the same parser, without its positional exclusion, then return only approved fixed text.
@@ -500,6 +512,37 @@ where
         }) => Err(usage(&["stop"], stop::A_LINK_STOPS_NOTHING)),
         other => other,
     }
+}
+
+/// The reserved word a service slot's parser refused, when that is what `error` is: the parser's own error
+/// is its cause, a [`ReservedService`](swoosh::names::ReservedService) or the name rule's error carrying one.
+fn reserved_service(error: &clap::Error) -> Option<swoosh::names::ReservedService> {
+    use swoosh::names::{NameError, ReservedService};
+
+    let cause = core::error::Error::source(error)?;
+    if let Some(reserved) = cause.downcast_ref::<ReservedService>() {
+        return Some(*reserved);
+    }
+    match cause.downcast_ref::<NameError>()? {
+        NameError::ReservedService(reserved) => Some(*reserved),
+        NameError::NotAName(_) | NameError::Reserved(_) => None,
+    }
+}
+
+/// The subcommand words `argv` names (`["service", "off"]`), walked through clap's own model one word at a
+/// time, so a usage error found in a parser prints the usage of the leaf it was typed to. A word that names
+/// no subcommand of the one reached is passed over.
+fn verb_path(argv: &[std::ffi::OsString]) -> Vec<String> {
+    let mut command = Cli::command();
+    let mut path = Vec::new();
+    for word in argv.iter().skip(1).filter_map(|word| word.to_str()) {
+        // A clone, as `usage` takes one: a borrow taken here would outlive the walk.
+        if let Some(sub) = command.find_subcommand(word).cloned() {
+            path.push(word.to_owned());
+            command = sub;
+        }
+    }
+    path
 }
 
 /// Whether `error`, an unexpected argument, is a link or a path typed on a `stop` line: the argument clap
@@ -874,11 +917,12 @@ async fn run() -> eyre::Result<()> {
             }
             // A `serve` takes its home's lock and control socket before anything is opened or bound, so a
             // second one for the home refuses leaving everything as the running one has it. Its typed
-            // services that cannot be one list exit 2 first, as clap's own errors do.
+            // services that cannot be one list exit 2 first, as clap's own errors do, and so does a reserved
+            // word in a service slot, typed or saved.
             match outward.claim(&home).await {
                 Ok(claimed) => claimed,
-                Err(report) => match report.downcast_ref::<swoosh::serve::Mistyped>() {
-                    Some(mistyped) => usage_error(&["serve"], &mistyped.to_string()),
+                Err(report) => match serve::usage_of(&report) {
+                    Some(line) => usage_error(&["serve"], &line),
                     None => return Err(report),
                 },
             }
