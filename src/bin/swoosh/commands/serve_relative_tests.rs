@@ -77,10 +77,10 @@ fn relative_help_and_running_refusal_keep_the_approved_words() {
     for words in [
         "--with <service>",
         "--without <service>",
-        "Add a service to the saved/default selection for this run",
+        "Also serve this service, for this run",
         "Omit a saved/default service for this run",
-        "With none named and no --with or --without, it serves the saved services, or ping and speed if none are saved.",
-        "Repeat or combine these flags; positional definitions cannot be used with them.",
+        "With none named and no --with or --without, it serves the saved\n          services, or ping and speed if none are saved.",
+        "Repeat or combine these flags; positional definitions cannot be\n          used with them.",
     ] {
         assert!(help.contains(words), "missing {words:?}: {help}");
     }

@@ -19,7 +19,7 @@ use swoosh::transport::ReachArgs;
 /// put your root on this machine from a copy
 #[derive(Debug, Args)]
 pub struct RestoreCmd {
-    /// the copy's own directory, which root backup made
+    /// The copy's own directory, which root backup made
     #[arg(value_name = "dir")]
     pub(crate) dir: PathBuf,
     #[command(flatten)]

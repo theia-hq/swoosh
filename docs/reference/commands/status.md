@@ -8,8 +8,8 @@ how you reach one.
 <!-- generated: usage from `swoosh status -h`; option lines curated -->
 ```
 Usage: swoosh status [OPTIONS] [machine]
-  [machine]  A machine: me/<name>, <person>/<name>, a person, a key, or a link
-  --key    print this machine's key and nothing else
+  [machine]  me/<name>, <person>/<name>, a person, key or link
+  --key    Print this machine's key and nothing else
 ```
 
 **Example.** With a key, no saved service list and nothing running, `swoosh status` includes this row:

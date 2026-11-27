@@ -46,7 +46,7 @@ pub struct ProxyCmd {
     // is never optional is a positional.
     #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
-    /// The origin URL to reach (path and query on the local URL resolve against it).
+    /// The origin URL; request path and query go after it
     // Parsed here, so a URL that does not parse is a usage error before anything is dialed, and each
     // request joins onto the one parsed value instead of re-reading the text.
     #[arg(value_name = "url")]

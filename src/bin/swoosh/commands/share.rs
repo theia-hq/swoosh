@@ -48,16 +48,16 @@ use super::service_state::{ShareBasis, ShareTarget};
 /// Make a link to a service for a person, a device, a key, or anyone
 #[derive(Debug, Args)]
 pub struct ShareCmd {
-    /// the service, or a link to copy: swoosh:…, a path, or - for stdin
-    #[arg(value_name = "service | link", value_parser = shared)]
+    /// The service, or a link to copy (swoosh:…, a path or -)
+    #[arg(value_name = "service", value_parser = shared)]
     pub what: Shared,
-    /// who it is for
-    #[arg(value_name = "person | person/name | key | root key | anyone", value_parser = recipient)]
+    /// Who it is for: person, person/name, key, root key or anyone
+    #[arg(value_name = "who", value_parser = recipient)]
     pub who: Option<Recipient>,
     /// How long: `2h`, `90d`.
     #[arg(long, value_name = "d", value_parser = str::parse::<Span>)]
     pub expires: Option<Span>,
-    /// Write the link to a new private file and print only the path.
+    /// Save the link to a new private file; print only its path
     #[arg(long, value_name = "file")]
     pub save: Option<PathBuf>,
     /// Make a link to anyone that works once and lasts 15m at most.

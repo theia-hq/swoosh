@@ -51,19 +51,19 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 pub struct SpeedCmd {
     #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
-    /// Measure the upload direction (this node sends).
+    /// Measure the upload direction (this machine sends)
     #[arg(long)]
     pub up: bool,
-    /// Measure the download direction (this node receives).
+    /// Measure the download direction (this machine receives)
     #[arg(long)]
     pub down: bool,
-    /// Measure upload and download at once, full-duplex on one stream.
+    /// Measure upload and download at once
     #[arg(long)]
     pub bidir: bool,
     /// How long to run, in seconds (5 unless -n is given)
     #[arg(short = 't', long, value_name = "s")]
     pub secs: Option<f64>,
-    /// Transfer this many bytes instead of running for a fixed time.
+    /// Transfer this many bytes, not a fixed time
     #[arg(short = 'n', long, value_name = "bytes")]
     pub bytes: Option<u64>,
     #[command(flatten)]

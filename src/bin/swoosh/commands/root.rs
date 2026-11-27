@@ -24,13 +24,13 @@ pub mod restore;
 /// The `root` group's leaves.
 #[derive(Debug, Subcommand)]
 pub enum RootCmd {
-    /// copy your root to a new directory
+    /// Copy your root to a new directory
     Backup(backup::BackupCmd),
-    /// remove your root from this machine, after checking the copy in <dir>
+    /// Remove your root from this machine, after checking the copy in <dir>
     Forget(forget::ForgetCmd),
-    /// put your root on this machine from a copy
+    /// Put your root on this machine from a copy
     Restore(restore::RestoreCmd),
-    /// change your root's locks, on this machine or in <dir>
+    /// Change your root's locks, on this machine or in <dir>
     Lock(lock::RootLockCmd),
 }
 

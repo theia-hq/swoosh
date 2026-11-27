@@ -2,15 +2,15 @@ Back to [Commands index](../commands.md).
 
 # <a id="ping"></a>`swoosh ping`
 
-Measure the round-trip time to a peer, like `ping(8)` but addressed by key.
+Measure the round-trip time to a machine, like `ping(8)` but addressed by key.
 
 <!-- generated: usage from `swoosh ping -h`; option lines curated -->
 ```
 Usage: swoosh ping [OPTIONS] <machine>
-  <machine>         A machine: me/<name>, <person>/<name>, a person, a key, or a link
-  -c, --count <n>   how many probes to send [default: 4]
-  -i, --interval <s>   seconds between probes [default: 1]
-  -v, --verbose     print a line per probe, and one when the path changes
+  <machine>         me/<name>, <person>/<name>, a person, key or link
+  -c, --count <n>   How many probes to send [default: 4]
+  -i, --interval <s>   Seconds between probes [default: 1]
+  -v, --verbose     Print a line per probe, and one when the path changes
 ```
 
 **Example.** `swoosh ping me/desk -v -c 4` prints `<device>, path: <path>` first, then a

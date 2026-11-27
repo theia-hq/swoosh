@@ -7,7 +7,7 @@ Stop being one of your devices. `--new-key` also gives this machine a new key.
 <!-- generated: usage from `swoosh leave -h`; option lines curated -->
 ```
 Usage: swoosh leave [OPTIONS]
-  --new-key  Make a new key: inside the invite, or for this machine.
+  --new-key  Also give this machine a new key
 ```
 
 **Example.** `swoosh leave` on a machine you no longer use as a device. `swoosh leave --new-key` after

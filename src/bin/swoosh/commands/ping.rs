@@ -43,13 +43,13 @@ use crate::screen::Paint;
 pub struct PingCmd {
     #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
-    /// how many probes to send
+    /// How many probes to send
     #[arg(short = 'c', long, value_name = "n", default_value_t = 4)]
     pub count: u32,
-    /// seconds between probes
+    /// Seconds between probes
     #[arg(short = 'i', long, value_name = "s", default_value_t = 1.0)]
     pub interval: f64,
-    /// print a line per probe, and one when the path changes
+    /// Print a line per probe, and one when the path changes
     #[arg(short = 'v', long)]
     pub verbose: bool,
     #[command(flatten)]

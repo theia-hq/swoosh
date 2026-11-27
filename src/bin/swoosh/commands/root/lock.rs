@@ -25,18 +25,18 @@ pub struct RootLockCmd {
     // `touch-id` is a method on a macOS build only, so the help names it there only.
     #[cfg_attr(
         target_os = "macos",
-        doc = "how your root opens: passphrase, or touch-id beside it; or a copy's own directory"
+        doc = "How your root opens: passphrase, or touch-id beside it; or a copy's own directory"
     )]
     #[cfg_attr(
         not(target_os = "macos"),
-        doc = "how your root opens: passphrase, or a copy's own directory"
+        doc = "How your root opens: passphrase, or a copy's own directory"
     )]
     #[arg(value_name = "method", value_parser = first)]
     pub(crate) first: Option<First>,
-    /// a copy's own directory; without it, your root on this machine
+    /// The copy to change; without it, your root here
     #[arg(value_name = "dir")]
     pub(crate) dir: Option<PathBuf>,
-    /// remove this lock instead
+    /// Take this lock off
     #[arg(long)]
     pub(crate) remove: bool,
 }

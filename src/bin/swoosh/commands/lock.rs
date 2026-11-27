@@ -31,10 +31,10 @@ use crate::screen::{Block, Cell, Paint, Screen, Style};
 )]
 #[derive(Debug, Args)]
 pub struct LockCmd {
-    /// the lock to add or, with --remove, take off; omit to show the locks
+    /// The lock; omit to show them
     #[arg(value_name = "method")]
     method: Option<LockMethod>,
-    /// take this lock off
+    /// Take this lock off
     // A bare `--remove` names no lock to take off, so it is clap's own usage error, never a guess.
     #[arg(long, requires = "method")]
     remove: bool,

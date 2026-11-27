@@ -7,8 +7,8 @@ Make this machine one of your devices, from an invite.
 <!-- generated: usage from `swoosh join -h`; option lines curated -->
 ```
 Usage: swoosh join [OPTIONS] [invite]
-  [invite]   the invite, or `-` to read it from stdin (the default)
-  --switch   Join a different root than the one this machine is on.
+  [invite]   The invite, or `-` to read it from stdin (the default)
+  --switch   Join a different root than the one this machine is on
 ```
 
 **Example.** At a terminal, `swoosh join` alone prints this machine's key and the `swoosh invite` line to

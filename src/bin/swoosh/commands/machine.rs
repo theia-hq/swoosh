@@ -18,7 +18,7 @@ use swoosh::root_key::RootKey;
 use crate::commands::stop;
 
 /// The help line of the machine argument, one line on every verb that takes one.
-pub const HELP: &str = "A machine: me/<name>, <person>/<name>, a person, a key, or a link";
+pub const HELP: &str = "me/<name>, <person>/<name>, a person, key or link";
 
 /// The line a verb prints on stderr, once, when a bare person had one machine saved and it dialed that
 /// one: the person typed no machine, so they are told which.

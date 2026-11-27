@@ -16,7 +16,7 @@ use swoosh::root::{Disk, RealDisk};
 /// remove your root from this machine, after checking the copy in <dir>
 #[derive(Debug, Args)]
 pub struct ForgetCmd {
-    /// the copy's own directory, which root backup made
+    /// The copy's own directory, which root backup made
     #[arg(value_name = "dir")]
     pub(crate) dir: PathBuf,
 }

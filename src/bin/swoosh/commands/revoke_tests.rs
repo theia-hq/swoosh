@@ -850,18 +850,11 @@ fn revoke_help_line_names_the_root() {
         .expect("revoke is a top-level verb");
     let about = revoke.get_about().unwrap().to_string();
     assert!(
-        about.starts_with(
-            "Take back a link, a device, or everything you shared with a contact; or end a root for good"
-        ),
+        about.starts_with("Take back a share or a device, or end a root for good"),
         "{about}"
     );
     let usage = revoke.clone().render_usage().to_string();
-    assert!(
-        usage.contains(
-            "<link | path | - | me/<name> | <person> | <person>/<name> | key | root key>"
-        ),
-        "{usage}"
-    );
+    assert!(usage.contains("revoke [OPTIONS] <what>"), "{usage}");
 }
 
 // --- the refusals before any write ---

@@ -47,19 +47,19 @@ const SHORT_LIVED: u64 = 30 * DAY;
 /// Add one of your devices, or renew it. Bare `invite` lists what is due.
 #[derive(Debug, Args)]
 pub struct InviteCmd {
-    /// the device, as it is named among your devices (me/<name>)
+    /// The device, as it is named among your devices (me/<name>)
     #[arg(value_name = "name", value_parser = device_name)]
     pub name: Option<DeviceLabel>,
-    /// the key the device made (`swoosh join` on it shows it)
+    /// The key the device made (`swoosh join` on it shows it)
     #[arg(value_name = "key", requires = "name", value_parser = typed_key)]
     pub key: Option<String>,
-    /// Make a new key: inside the invite, or for this machine.
+    /// Make a new key: inside the invite, or for this machine
     #[arg(long = "new-key", requires = "name", conflicts_with = "key")]
     pub new_key: bool,
     /// How long: `2h`, `90d`.
     #[arg(long, value_name = "d", requires = "name", value_parser = device_expiry)]
     pub expires: Option<Duration>,
-    /// use the copy of your root in <dir>
+    /// Use the copy of your root in <dir>
     #[arg(long = "root", value_name = "dir")]
     pub root: Option<PathBuf>,
     #[command(flatten)]

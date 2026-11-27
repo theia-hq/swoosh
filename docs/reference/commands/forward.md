@@ -7,9 +7,9 @@ Forward a machine's service to a local port, or to stdout.
 <!-- generated: usage from `swoosh forward -h`; option lines curated -->
 ```
 Usage: swoosh forward [OPTIONS] <machine> <service> <port | unix:<path> | ->
-  <machine>                 A machine: me/<name>, <person>/<name>, a person, a key, or a link
-  <service>                 the service, by the name the machine serves it under
-  <port | unix:<path> | ->  where the bytes go: a local port, or - for stdout
+  <machine>                 me/<name>, <person>/<name>, a person, key or link
+  <service>                 The service to reach, by its name on that machine
+  <port | unix:<path> | ->  A local port, unix:<path>, or - for stdout
 ```
 
 **Example.** On `nas`, serve the database: `swoosh serve db=tcp:localhost:5432`. On your laptop:

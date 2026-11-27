@@ -8,11 +8,12 @@
 //! A third, of the same kind: a lock comes off a key file only where a person asked for that by name, so
 //! every call that takes one off is counted, by file. And a fourth: the lock lines name the lock a removal
 //! takes off, and say Touch ID the way a person does. And a fifth: the Touch ID dialog takes only words fixed
-//! at build time.
+//! at build time. And a sixth: every command a shipped line or a help page names is one the binary has.
 //!
 //! Test files, inline `mod tests` blocks and comments are skipped: only what ships is read.
 
 use std::path::Path;
+use std::process::Command;
 
 /// What stands behind a string that names another line.
 enum Kind {
@@ -267,6 +268,144 @@ fn the_dialog_takes_only_static_words() {
     }
     assert_eq!(calls, ["bin/swoosh/main.rs"], "one call names the command");
     assert!(code("bin/swoosh/main.rs").contains("swoosh::touch::for_command(command.path());"));
+}
+
+/// Every `swoosh <verb> [<leaf>]` a shipped literal or a rendered `-h` or `--help` names is a command the
+/// binary has. Red when a line names a verb the binary lacks, as `swoosh tree` did once the verb was cut.
+#[test]
+fn every_named_command_exists() {
+    let (commands, pages) = command_tree();
+    let mut missing = Vec::new();
+    let texts = pages
+        .iter()
+        .map(|(path, page)| (path.clone(), page.clone()));
+    let literals = shipped().into_iter().flat_map(|(file, text)| {
+        scan(&text)
+            .literals
+            .into_iter()
+            .map(move |(line, literal)| (format!("{file}:{line}"), literal))
+    });
+    for (site, text) in texts.chain(literals) {
+        for named in named_commands(&text) {
+            let verb = &named[0];
+            // A group's next plain word must be one of its leaves; any other verb's is an argument.
+            let group = commands
+                .iter()
+                .any(|path| path.starts_with(&format!("{verb} ")));
+            let exists = commands.contains(verb)
+                && match named.get(1) {
+                    Some(leaf) if group => commands.contains(&format!("{verb} {leaf}")),
+                    _ => true,
+                };
+            if !exists {
+                missing.push(format!("{site}: swoosh {}", named.join(" ")));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "commands swoosh lacks: {missing:#?}");
+}
+
+/// The binary's commands, read off its own help (each verb under a heading of `swoosh --help`, each leaf in a
+/// group's `Commands:`), and every `-h` and `--help` page, by the command's path.
+fn command_tree() -> (Vec<String>, Vec<(String, String)>) {
+    let help = |path: &[&str], flag: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+            .args(path)
+            .arg(flag)
+            .env_remove("SWOOSH_HOME")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "swoosh {path:?} {flag}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // A row is a name indented two under a heading that is not clap's own frame.
+    let rows = |page: &str, under: fn(&str) -> bool| {
+        let mut heading = false;
+        let mut names = Vec::new();
+        for line in page.lines() {
+            if !line.starts_with(' ') && line.ends_with(':') {
+                heading = under(line);
+            } else if let Some(name) = line.strip_prefix("  ").filter(|_| heading) {
+                let name = name.split_whitespace().next().unwrap_or_default();
+                if name != "help" && name.starts_with(|c: char| c.is_ascii_lowercase()) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        names
+    };
+    let top = help(&[], "--help");
+    let verbs = rows(&top, |line| {
+        !["Usage:", "Options:", "Arguments:"].contains(&line)
+    });
+    let mut commands = Vec::new();
+    let mut pages = vec![
+        ("swoosh".to_owned(), top),
+        ("swoosh".to_owned(), help(&[], "-h")),
+    ];
+    for verb in &verbs {
+        let page = help(&[verb], "--help");
+        for leaf in rows(&page, |line| line == "Commands:") {
+            for flag in ["-h", "--help"] {
+                pages.push((format!("swoosh {verb} {leaf}"), help(&[verb, &leaf], flag)));
+            }
+            commands.push(format!("{verb} {leaf}"));
+        }
+        pages.push((format!("swoosh {verb}"), help(&[verb], "-h")));
+        pages.push((format!("swoosh {verb}"), page));
+        commands.push(verb.clone());
+    }
+    (commands, pages)
+}
+
+/// Words that follow `swoosh` as a sentence's verb or a noun, never as a command.
+const PROSE: &[&str] = &[
+    "build",
+    "cannot",
+    "is",
+    "looks",
+    "needs",
+    "never",
+    "publishes",
+    "uses",
+    "version",
+    "will",
+];
+
+/// The words after `swoosh` a text names as a command, up to two: a verb, and the plain word after it
+/// unless the verb ends a clause (`swoosh serve's` names `serve`). `swoosh` as a sentence's subject
+/// (`swoosh needs`), after an article (`the swoosh home`), or ending a clause names no command, and a
+/// placeholder (`{verb}`, `<service>`) is no word.
+fn named_commands(text: &str) -> Vec<Vec<String>> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let bare = |word: &str| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
+        word.strip_suffix("'s").unwrap_or(word).to_owned()
+    };
+    let plain = |word: &&&str| word.starts_with(|c: char| c.is_ascii_lowercase());
+    let ends = |word: &str| word.ends_with([',', '.', ':', ';', ')', '`', '\'']);
+    let mut named = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        if word.trim_start_matches(['`', '(', '\'']) != "swoosh" {
+            continue;
+        }
+        let after_article = at
+            .checked_sub(1)
+            .and_then(|before| words.get(before))
+            .is_some_and(|before| ["the", "a", "The", "A"].contains(before));
+        let Some(verb) = words.get(at + 1) else {
+            continue;
+        };
+        if after_article || PROSE.contains(&bare(verb).as_str()) || !plain(&verb) {
+            continue;
+        }
+        let mut path = vec![bare(verb)];
+        if let Some(leaf) = words.get(at + 2).filter(plain).filter(|_| !ends(verb)) {
+            path.push(bare(leaf));
+        }
+        named.push(path);
+    }
+    named
 }
 
 /// Every shipped source file, by its path under `src/`, cut before an inline `mod tests` block.

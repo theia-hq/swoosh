@@ -341,9 +341,9 @@ fn root_lock_help_names_touch_id_on_a_mac_only() {
         .render_long_help()
         .to_string();
     let line = if cfg!(target_os = "macos") {
-        "how your root opens: passphrase, or touch-id beside it; or a copy's own directory"
+        "How your root opens: passphrase, or touch-id beside it; or a copy's own directory"
     } else {
-        "how your root opens: passphrase, or a copy's own directory"
+        "How your root opens: passphrase, or a copy's own directory"
     };
     assert!(help.contains(line), "{help}");
 }

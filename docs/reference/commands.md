@@ -26,25 +26,24 @@ with only the heading level adjusted and relative links repointed for the new lo
 Note: the `<a id>` anchors below preserve the old per-command anchors, so existing links of the form
 `commands.md#<command>` keep resolving to this index, which then links to the focused page.
 
-- <a id="serve"></a>[`swoosh serve`](commands/serve.md): be a node, publish named services behind your signet gate
+- <a id="serve"></a>[`swoosh serve`](commands/serve.md): serve services on this machine for those you admit
 - <a id="stop"></a>[`swoosh stop`](commands/stop.md): stop swoosh serve here or on one of your own devices
-- <a id="service"></a>[`swoosh service`](commands/service.md): add or remove what this machine serves, or turn a service off and on
-- <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure round-trip time to a peer, addressed by key
-- <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
-- <a id="status"></a>[`swoosh status`](commands/status.md): show this machine: its key, lock, root, devices, contacts, links and services
-- <a id="proxy"></a>[`swoosh proxy`](commands/proxy.md): get a local URL that reaches a site through a machine you name
+- <a id="service"></a>[`swoosh service`](commands/service.md): show or change what this machine serves
+- <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure the round-trip time to a machine
+- <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a machine
+- <a id="status"></a>[`swoosh status`](commands/status.md): show this machine, or how you reach another machine
+- <a id="proxy"></a>[`swoosh proxy`](commands/proxy.md): mint a local URL that reaches an origin through a machine you name
 - <a id="forward"></a>[`swoosh forward`](commands/forward.md): forward a machine's service to a local port or stdout
-- <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer
+- <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a machine
 - <a id="sync"></a>[`swoosh sync`](commands/sync.md): bring your device list up to date with your other devices, both ways
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): save or remove another person's key under a name
 - <a id="identity"></a>[`swoosh identity`](commands/identity.md): back up, restore, or protect this machine's key
-- <a id="invite"></a>[`swoosh invite`](commands/invite.md): add one of your devices, or renew it; bare `invite` lists what is due
+- <a id="invite"></a>[`swoosh invite`](commands/invite.md): add one of your devices, or renew it; bare invite lists what is due
 - <a id="join"></a>[`swoosh join`](commands/join.md): make this machine one of your devices, from an invite
-- <a id="leave"></a>[`swoosh leave`](commands/leave.md): stop being one of your devices; `--new-key` also gives this machine a new key
-- <a id="revoke"></a>[`swoosh revoke`](commands/revoke.md): take back a link, one of your devices, or everything you shared with a contact; or end a root for good
-- <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
-- <a id="share"></a>[`swoosh share`](commands/share.md): make a link to one service for a person, one of their machines, a key, or anyone
-- <a id="tree"></a>[`swoosh tree`](commands/tree.md): print the command tree read straight from the parser
+- <a id="leave"></a>[`swoosh leave`](commands/leave.md): stop being one of your devices
+- <a id="revoke"></a>[`swoosh revoke`](commands/revoke.md): take back a share or a device, or end a root for good
+- <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a machine's sshd; runs the system ssh
+- <a id="share"></a>[`swoosh share`](commands/share.md): make a link to a service for a person, a device, a key, or anyone
 
 ## Next
 

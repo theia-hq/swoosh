@@ -74,32 +74,39 @@ pub struct ServeCmd {
         value_name = "service",
         conflicts_with_all = ["with", "without"],
         long_help = "Serve exactly these for this run, without saving them\n\
-                     With none named and no --with or --without, it serves the saved services, or ping and speed if none are saved.\n\
+                     With none named and no --with or --without, it serves the saved\n\
+                     services, or ping and speed if none are saved.\n\
                      \n\
                      Built in, served under their own names:\n\
-                     \x20 ssh                     a shell on this machine\n\
-                     \x20 ping                    round-trip probe\n\
-                     \x20 speed                   throughput test\n\
-                     \x20 proxy:<url>             requests to one site, made from this machine\n\
-                     \x20 recv:<dir>              files sent here, saved in <dir>, else the inbox\n\
+                     \x20 ssh                   a shell on this machine\n\
+                     \x20 ping                  round-trip probe\n\
+                     \x20 speed                 throughput test\n\
+                     \x20 proxy:<url>           requests to one site, from this machine\n\
+                     \x20 recv:<dir>            files sent here, to <dir>, else the inbox\n\
                      \n\
                      Under a name you give (web=tcp:localhost:3000):\n\
-                     \x20 tcp:<address>:<port>    a TCP service this machine reaches\n\
-                     \x20 unix:<path>             a Unix socket on this machine\n\
-                     \x20 file:<path>             a file's bytes\n\
-                     \x20 fifo:<path>             a named pipe, live\n\
-                     \x20 stdin:                  this process's stdin\n\
-                     \x20 echo:                   sends back whatever it receives"
+                     \x20 tcp:<address>:<port>  a TCP service this machine reaches\n\
+                     \x20 unix:<path>           a Unix socket on this machine\n\
+                     \x20 file:<path>           a file's bytes\n\
+                     \x20 fifo:<path>           a named pipe, live\n\
+                     \x20 stdin:                this process's stdin\n\
+                     \x20 echo:                 sends back whatever it receives"
     )]
     pub services: Vec<String>,
-    /// Add a service to the saved/default selection for this run
+    /// Also serve this service, for this run
     #[arg(
         long,
         value_name = "service",
-        long_help = "Add a service to the saved/default selection for this run\n\
-                     Repeat or combine these flags; positional definitions cannot be used with them.\n\
+        long_help = "Also serve this service, for this run\n\
+                     Repeat or combine these flags; positional definitions cannot be\n\
+                     used with them.\n\
                      \n\
-                     Later saved service additions, removals and target changes do not change this process's selection. Off changes affect new admissions; existing streams may continue. Each restart, including a supervisor restart, captures the then-current saved/default selection again. Launch changes neither saved services nor off settings."
+                     Adding, removing or retargeting a saved service while this runs\n\
+                     does not change what it serves.\n\
+                     Turning one off does, for new connections; open ones may continue.\n\
+                     Each start, including one a service manager makes, reads the saved\n\
+                     or default services again.\n\
+                     This flag changes neither the saved services nor any off setting."
     )]
     pub with: Vec<String>,
     /// Omit a saved/default service for this run
@@ -107,30 +114,35 @@ pub struct ServeCmd {
         long,
         value_name = "service",
         long_help = "Omit a saved/default service for this run\n\
-                     Repeat or combine these flags; positional definitions cannot be used with them.\n\
+                     Repeat or combine these flags; positional definitions cannot be\n\
+                     used with them.\n\
                      \n\
-                     Later saved changes do not change this process's selection; see --with."
+                     Saved changes made while this runs do not change what it serves;\n\
+                     see --with."
     )]
     pub without: Vec<String>,
-    /// Open these services to anyone (comma-separated, repeatable)
+    /// Open these services to anyone, comma-separated
     #[arg(
         long,
         value_name = "service",
         value_delimiter = ',',
         value_parser = swoosh::names::service,
-        long_help = "Open these services to anyone (comma-separated, repeatable)\n\
-                     ssh and recv never open to anyone; a raw stream needs --public-unsafe."
+        long_help = "Open these services to anyone, comma-separated\n\
+                     ssh and recv are never opened to anyone.\n\
+                     A raw stream needs --public-unsafe."
     )]
     pub public: Vec<Service>,
-    /// Open these raw-stream services (file:, fifo:, stdin:) to anyone
+    /// Open these raw streams to anyone
     // A raw stream opens only through this flag, and only when named: no bang suffix, no whole-node form.
     #[arg(
         long,
         value_name = "service",
         value_delimiter = ',',
         value_parser = swoosh::names::service,
-        long_help = "Open these raw-stream services (file:, fifo:, stdin:) to anyone\n\
-                     A raw stream gives its bytes to whoever connects; --public refuses it and points here."
+        long_help = "Open these raw streams to anyone\n\
+                     A raw stream (file:, fifo: or stdin:) gives its bytes to whoever\n\
+                     connects.\n\
+                     The --public flag refuses it and points here."
     )]
     pub public_unsafe: Vec<Service>,
     /// suppress the readiness banner and activity lines
@@ -146,7 +158,7 @@ pub struct ServeCmd {
     /// Serve for this long, then stop (30m, 2h, 1d)
     #[arg(long, value_name = "d")]
     pub expires: Option<Lifetime>,
-    /// For this run, let in the devices of another root without joining it (CI)
+    /// Admit another root's devices, for this run
     #[arg(long, value_name = "root key", value_parser = admitted_root)]
     pub admit: Option<NodeId>,
     #[command(flatten)]
