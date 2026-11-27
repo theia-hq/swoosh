@@ -67,7 +67,7 @@ fn join_refuses_an_unused_reach_flag_before_writing() {
         stderr.contains("--relay or SWOOSH_RELAY has no effect"),
         "{stderr}"
     );
-    assert!(!stderr.contains("joined root"), "{stderr}");
+    assert!(!stderr.contains("This machine is now"), "{stderr}");
     for file in ["key.cert", "root.pub", "invited-by"] {
         assert!(!home.join(file).exists(), "{file} is not written");
     }

@@ -45,6 +45,26 @@ fn root(seed: u8) -> NodeId {
     TestRoot::seeded(seed).node_id()
 }
 
+/// What a change of root prints while `serve` runs: what it cut, and what it did not.
+const SESSIONS: &str = "Sessions this machine admitted under the root it no longer trusts end now,\n\
+                        including one you reached it through as a device of that root.\n\
+                        A session through a link this machine issued stays open.";
+
+/// What `leave` prints first: the root it left, whole, by `seed`.
+fn left(seed: u8) -> String {
+    format!(
+        "This machine no longer trusts this root:\n  root:{}\n",
+        root(seed)
+    )
+}
+
+/// `captured` holds the screen law.
+fn hold(captured: &str) {
+    if let Err(breach) = crate::screen::law::holds(captured) {
+        panic!("{breach}\n{captured}");
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -176,10 +196,13 @@ async fn leave_asking(home: &Home, args: &[&str], prompt: &mut (impl Prompt + Ev
             &mut err,
         )
         .await;
+    let err = String::from_utf8(err).unwrap();
+    // Every screen a leave prints holds the law, but the lines still owed theirs.
+    crate::screen::owed::hold_but_owed(&err);
     Ran {
         result,
         out: String::from_utf8(out).unwrap(),
-        err: String::from_utf8(err).unwrap(),
+        err,
         prompts: prompt.events(),
     }
 }
@@ -282,14 +305,15 @@ async fn leave_removes_the_standing_and_the_pin_and_keeps_the_revocations() {
         "every revocation it learned stays"
     );
     assert_eq!(
-        ran.err.trim(),
+        ran.err,
         format!(
-            "this machine no longer trusts root root:{}. Your root still lists it as me/laptop until {}: \
-             revoke it there with swoosh revoke me/laptop.",
-            root(ROOT),
+            "{}\nYour root still lists this machine as me/laptop until {}.\n\
+             To revoke it, run this where your root is kept:\n  swoosh revoke me/laptop\n",
+            left(ROOT),
             swoosh::root::Date(until)
         )
     );
+    hold(&ran.err);
     assert!(ran.out.is_empty(), "plain leave prints nothing on stdout");
 }
 
@@ -339,10 +363,7 @@ async fn leave_on_a_damaged_home_removes_the_standing_and_the_pin_and_keeps_the_
         read(&home).await,
         Standing::InterruptedMint { .. }
     ));
-    assert_eq!(
-        ran.err.trim(),
-        format!("this machine no longer trusts root root:{}.", root(OTHER))
-    );
+    assert_eq!(ran.err, left(OTHER));
 }
 
 /// A torn `root.key` is not mended by `leave`, which keeps a root kept here: once a device leaves, `status`
@@ -445,7 +466,7 @@ async fn leave_new_key_on_a_device_leaves_and_keeps_the_old_key_and_links_aside(
     );
     assert_eq!(ran.out.lines().count(), 1, "stdout is the new key alone");
     assert!(
-        !ran.err.contains("sessions this machine admitted"),
+        !ran.err.contains(SESSIONS),
         "no serve runs, so no session ends: {}",
         ran.err
     );
@@ -603,11 +624,10 @@ async fn leave_under_a_running_serve_says_its_sessions_end() {
     let _serving = swoosh::testkit::serving(&home, None);
     let ran = leave(&home, &[]).await;
     ran.left();
+    // The sessions lines sit under the left root's block, so `that root` has its referent.
     assert!(
-        ran.err.contains(&format!(
-            "sessions this machine admitted under root root:{} end now",
-            root(ROOT)
-        )),
+        ran.err
+            .starts_with(&format!("{}\n{}\n\n", left(ROOT), SESSIONS)),
         "{}",
         ran.err
     );
@@ -655,9 +675,9 @@ async fn leave_builds_no_revoke_on_the_invites_name() {
     let ran = leave(&home, &[]).await;
     ran.left();
     assert_eq!(
-        ran.err.trim(),
+        ran.err,
         format!(
-            "this machine no longer trusts root root:{}.",
+            "This machine no longer trusts this root:\n  root:{}\n",
             root.node_id()
         )
     );

@@ -28,7 +28,7 @@ use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
 
 use crate::commands::lock::Enclave;
-use crate::screen::{Block, Paint, Screen};
+use crate::screen::{Block, Cell, Paint, Screen};
 
 /// The most bytes of stdin read as an invite: far above any invite, far below anything that costs a read
 /// to hold.
@@ -216,32 +216,72 @@ impl JoinCmd {
                 pin_changes: was != Some(root) || switching.is_some(),
             },
         )?;
+        // The root and the date print as the pin and the standing hold them now, read back under the lock
+        // that wrote them, never as the invite named them: the check compares what this machine trusts.
+        let Standing::Device {
+            pin: pinned,
+            until: held,
+        } = Standing::read(home).await?
+        else {
+            eyre::bail!(
+                "this command could not confirm which root this machine now trusts\n  To see what this \
+                 machine trusts:\n    swoosh status"
+            );
+        };
         drop(home_lock);
 
-        writeln!(
-            io.err,
-            "joined root root:{root}: this machine is its device until {}.",
-            Date(unix(until))
-        )?;
-        if let Some(was) = was.filter(|was| *was != root) {
-            writeln!(
-                io.err,
-                "this machine now trusts root root:{root} (was root:{was})."
-            )?;
-            if swoosh::home::serve_running(home).await {
-                writeln!(io.err, "{}", sessions_end(was))?;
+        // A `serve` here reads the pin at every admission: it ended the old root's sessions, and admits the
+        // new root's devices before the person has checked the key.
+        let serving = swoosh::home::serve_running(home).await;
+        let left = was
+            .filter(|was| *was != pinned)
+            .map(|was| format!("root:{was}"));
+        let mut screen = Screen::default();
+        if let Some(left) = &left {
+            screen = screen.block(
+                Block::default()
+                    .text("This machine no longer trusts the root it had:".to_owned())
+                    .row([Cell::Token(left)]),
+            );
+            if serving {
+                screen = screen.block(sessions_end());
             }
         }
-        writeln!(
-            io.err,
-            "Check that root:{root} is the root: line on the machine that keeps your root; the invite alone \
-             does not prove who sent it."
-        )?;
-        if was.is_none() && !locked {
-            Screen::default()
-                .block(unlocked(Enclave::BUILT))
-                .write(&mut io.err)?;
+        let key = format!("root:{pinned}");
+        let head = format!(
+            "This machine is now me/{}, a device of this root, until {}:",
+            invite.name,
+            Date(unix(held))
+        );
+        // A long name takes the head past 80: it wraps before its date, so the key still follows the colon.
+        let joined = match head.split_once(" until ") {
+            Some((name, date)) if head.chars().count() > swoosh::escape::LINE_WIDTH => {
+                Block::default()
+                    .text(name.to_owned())
+                    .text(format!("until {date}"))
+            }
+            _ => Block::default().text(head),
+        };
+        screen = screen.block(joined.row([Cell::Token(&key)])).block(
+            Block::default()
+                .text("An invite alone does not prove who sent it.".to_owned())
+                .text(
+                    "On the machine that keeps your root, check that swoosh status shows that key."
+                        .to_owned(),
+                )
+                .text("If it does not, leave this root:".to_owned())
+                .command("swoosh leave".to_owned()),
+        );
+        if serving {
+            screen = screen
+                .block(Block::default().text(
+                    "A swoosh serve running here admits that root's devices now.".to_owned(),
+                ));
         }
+        if was.is_none() && !locked {
+            screen = screen.block(unlocked(Enclave::BUILT));
+        }
+        screen.write(&mut io.err)?;
         Ok((invite.from != own).then_some(invite.from))
     }
 
@@ -356,12 +396,15 @@ pub(crate) fn unlocked(enclave: Enclave) -> Block<'static> {
         .command("swoosh lock passphrase".to_owned())
 }
 
-/// The line a change of root prints while `serve` runs: what it cut, and what it did not.
-pub(crate) fn sessions_end(was: NodeId) -> String {
-    format!(
-        "sessions this machine admitted under root root:{was} end now, including one you reached it through as \
-         a device of that root. A session through a link this machine issued stays open."
-    )
+/// What a change of root prints while `serve` runs, under the left root's block so `that root` has its
+/// referent: what it cut, and what it did not.
+pub(crate) fn sessions_end() -> Block<'static> {
+    Block::default()
+        .text(
+            "Sessions this machine admitted under the root it no longer trusts end now,".to_owned(),
+        )
+        .text("including one you reached it through as a device of that root.".to_owned())
+        .text("A session through a link this machine issued stays open.".to_owned())
 }
 
 /// One exchange with `from`, the machine that made the invite, so this machine holds your root's list of
