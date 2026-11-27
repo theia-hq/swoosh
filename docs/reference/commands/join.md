@@ -20,7 +20,7 @@ argument it is refused before anything in it is read, because other processes ca
 Pass it on stdin. An invite from `invite <name> <key>` carries no secret, and joins only the machine that
 made that key. `join` checks the invite, then this machine, and writes nothing until both pass. It then
 asks the machine that made the invite for your list of devices once. The invite is not signed as a whole,
-so compare the root `join` prints with the `root:` line of `swoosh status` where your root is kept. A
+so compare the root `join` prints with the `key` row under `your root` in `swoosh status` where your root is kept. A
 machine that already trusts a root moves to another only with `--switch`, and a machine that keeps your
 root is its own device and joins no other.
 

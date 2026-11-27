@@ -1292,7 +1292,7 @@ async fn each_unfinished_act_is_finished_by_its_verb() {
         .render();
     assert!(
         report.contains(&format!(
-            "a revoked root is still on this machine; to delete it: swoosh revoke root:{}",
+            "A revoked root is still on this machine; to delete it:\n  swoosh revoke root:{}\n",
             root(ROOT)
         )),
         "{report}"

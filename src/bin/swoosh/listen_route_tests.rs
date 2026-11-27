@@ -146,8 +146,8 @@ fn down() -> RefusalDetail {
 /// `me/nas`'s `ssh`: the line it ends with on each path, or the warning's clause.
 pub(crate) fn table() -> [(Meet, Then); 23] {
     let not_yours = "me/nas refused ssh\n  nas does not count this machine as one of your devices.";
-    let ended =
-        "this device's membership badge has ended, so a family-gated peer will refuse this dial; ";
+    let ended = "this device's standing has ended, so a machine that admits only your devices will \
+                 refuse this dial\n";
     [
         (
             || {
@@ -560,7 +560,7 @@ async fn a_lapsed_badge_ends_a_listener_at_its_next_pipe_by_own_bind() {
         } else {
             let line = format!("{:#}", ran.expect("the run ended"));
             assert!(
-                line.starts_with("this device's membership badge has ended"),
+                line.starts_with("this device's standing has ended"),
                 "{line}"
             );
             assert_eq!(requests.len(), 2, "the lapsed badge was never presented");

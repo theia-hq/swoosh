@@ -335,7 +335,7 @@ fn steps(lead: &'static str, commands: &[&'static str]) -> Block<'static> {
         })
 }
 
-/// What this machine's key opens with, as `status`'s `key lock:` row records it: a passphrase without its
+/// What this machine's key opens with, as `status`'s `lock` row records it: a passphrase without its
 /// article, Touch ID with how it reads here where that is not live. The bare read's first sentence reads the
 /// same [`Locks`].
 pub(crate) fn key_locks(locks: Locks) -> &'static str {
@@ -355,12 +355,12 @@ pub(crate) fn key_locks(locks: Locks) -> &'static str {
     }
 }
 
-/// What a root opens with, as `status`'s root line says it after `locked with`: a root always keeps its
-/// passphrase, so a Touch ID lock reads as beside it.
+/// What a root opens with, as `status`'s root `lock` row says it: a root always keeps its passphrase, so a
+/// Touch ID lock reads as beside it.
 pub(crate) fn root_locks(locks: Locks) -> &'static str {
     match locks {
         // A sealed root file read here holds its passphrase; a plain one is never read as a root.
-        Locks::None | Locks::Passphrase => "a passphrase",
+        Locks::None | Locks::Passphrase => key_locks(Locks::Passphrase),
         Locks::TouchId(health) | Locks::Both(health) => key_locks(Locks::Both(health)),
     }
 }

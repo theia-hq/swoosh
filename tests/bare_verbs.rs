@@ -195,14 +195,14 @@ fn bare_stop_stops_the_resident() {
         String::from_utf8_lossy(&status.stderr)
     );
     assert!(
-        status_out.starts_with("key: "),
-        "the key leads: {status_out}"
+        status_out.starts_with("this machine "),
+        "this machine's block leads: {status_out}"
     );
     assert!(
         status_out
             .lines()
-            .any(|line| line.starts_with("serving: ") && line.contains("ping")),
-        "the serving line names what the resident serves: {status_out}"
+            .any(|line| line.starts_with("  serving        ") && line.contains("ping")),
+        "the serving row names what the resident serves: {status_out}"
     );
 
     // A reach flag typed on a bare verb is a usage error naming the flag: it binds a transport and finds

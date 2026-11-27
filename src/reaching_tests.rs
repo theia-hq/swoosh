@@ -28,7 +28,7 @@ fn a_stored_badge_covers_its_effective_second_without_extending_advisory_warning
         let advisory = badge::Expiry::read(&badge, now).expect("advisory expiry");
         let expected = match advisory {
             badge::Expiry::Expiring { .. } => format!(
-                "swoosh: this device's membership badge {advisory}; {}\n",
+                "warning: this device's standing {advisory}\n{}\n",
                 badge::remedy(node)
             ),
             badge::Expiry::Expired { .. } => String::new(),
@@ -45,7 +45,8 @@ fn a_stored_badge_covers_its_effective_second_without_extending_advisory_warning
     assert_eq!(
         error.to_string(),
         format!(
-            "this device's membership badge {expiry}, so a family-gated peer will refuse this dial; {}",
+            "this device's standing {expiry}, so a machine that admits only your devices will refuse \
+             this dial\n{}",
             badge::remedy(node)
         )
     );
@@ -74,7 +75,8 @@ fn badge_refusal_reads_attenuation_and_propagates_unreadable_bounds() {
     );
     let mut warned = Vec::new();
     into_slot_at(badge.clone(), node, &mut warned, until).expect("inclusive narrowed endpoint");
-    assert_eq!(String::from_utf8(warned).expect("utf-8").lines().count(), 1);
+    let warned = String::from_utf8(warned).expect("utf-8");
+    assert_eq!(warned.matches("warning: ").count(), 1, "{warned}");
     let mut warned = Vec::new();
     let next = base + Duration::from_secs(1);
     let Err(error) = into_slot_at(badge, node, &mut warned, next) else {
@@ -84,7 +86,8 @@ fn badge_refusal_reads_attenuation_and_propagates_unreadable_bounds() {
     assert_eq!(
         error.to_string(),
         format!(
-            "this device's membership badge {expiry}, so a family-gated peer will refuse this dial; {}",
+            "this device's standing {expiry}, so a machine that admits only your devices will refuse \
+             this dial\n{}",
             badge::remedy(node)
         )
     );

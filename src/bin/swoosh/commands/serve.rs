@@ -1214,9 +1214,11 @@ pub(crate) enum Scope {
 /// The `reach` block's rows, from the one [`Reachable`] the banner and the status reply share: a fixed
 /// label, then one value. An address is our own formatting of a `SocketAddr`, so it is a token that is
 /// never styled and never split.
+#[derive(Debug)]
 pub(crate) struct ReachRows(Vec<(&'static str, Value)>);
 
 /// One `reach` row's value.
+#[derive(Debug)]
 enum Value {
     /// Fixed words.
     Word(&'static str),

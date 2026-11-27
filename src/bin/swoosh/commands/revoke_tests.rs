@@ -1813,7 +1813,7 @@ async fn revoke_a_root_on_the_holder_killed_after_the_latch_never_yields_a_minta
     let report = status(&home).await;
     assert!(
         report.contains(&format!(
-            "a revoked root is still on this machine; to delete it: swoosh revoke root:{}",
+            "A revoked root is still on this machine; to delete it:\n  swoosh revoke root:{}\n",
             node(ROOT)
         )),
         "{report}"
@@ -1826,7 +1826,11 @@ async fn revoke_a_root_on_the_holder_killed_after_the_latch_never_yields_a_minta
     assert!(!home.root_key().exists(), "running it again deletes it");
     assert!(!home.root_pub().exists());
     assert!(!home.devices().exists());
-    assert!(!status(&home).await.contains("a revoked root"));
+    assert!(
+        !status(&home)
+            .await
+            .contains("revoked root is still on this machine")
+    );
 }
 
 #[tokio::test]

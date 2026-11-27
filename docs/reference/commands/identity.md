@@ -14,7 +14,7 @@ Commands:
   protect  Set how this identity is protected
 ```
 
-**Things to know.** `swoosh status` says how the key is locked on its `key lock:` line, such as `passphrase`
+**Things to know.** `swoosh status` says how the key is locked on its `lock` row, such as `passphrase`
 or `Touch ID or a passphrase`, or `none`. `swoosh lock` shows the locks; `swoosh lock <method>` adds one, and
 `--remove` takes one off.
 

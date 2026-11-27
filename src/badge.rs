@@ -98,11 +98,15 @@ impl fmt::Display for Expiry {
 /// The one remedy every badge-expiry surface names, for the device whose key is `node`: renew it where the
 /// root is kept, and this machine picks it up. Written once, here, so the refusal and the warning cannot
 /// teach two different fixes for one problem.
+///
+/// It is the detail under a head, never part of the head's line: each sentence on its own line at indent
+/// two, each command alone at indent four. The key runs past 80 on its line, since a key never splits. A
+/// surface that keeps one line, such as the proxy's `502` body, joins its first sentence and command itself.
 #[must_use]
 pub fn remedy(node: NodeId) -> String {
     format!(
-        "renew it where your root is kept: swoosh invite <name> {node}. This machine picks it up the next \
-         time it reaches one of your devices, or now with swoosh sync."
+        "  Renew it where your root is kept:\n    swoosh invite <name> {node}\n  This machine picks it up the \
+         next time it reaches one of your devices.\n  To pick it up now:\n    swoosh sync"
     )
 }
 
