@@ -10,8 +10,8 @@
 //! Today's verbs: `swoosh serve` prints this machine's key and stays reachable; `swoosh ping <peer>`
 //! measures the round-trip time to a key; `swoosh speed <peer>` measures throughput; `swoosh status
 //! <peer>` reports whether the link is direct or relayed; `swoosh contact add alice/laptop <key>` saves
-//! a petname so `swoosh ping alice/laptop` works; `swoosh tree` prints the command tree. A peer is a raw key or
-//! a saved petname, interchangeably.
+//! a petname so `swoosh ping alice/laptop` works. A peer is a raw key or a saved
+//! petname, interchangeably.
 //!
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
 //! key and keeps a stable address across runs. The outward verbs only dial out, so they mint a throwaway
@@ -35,11 +35,12 @@ use swoosh::{credential, reaching, transport};
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
     contact, forward, invite, join, learning, leave, lock, ping, proxy, revoke, root, send, serve,
-    service, share, speed, ssh, status, stop, sync, tree,
+    service, share, speed, ssh, status, stop, sync,
 };
 
 mod commands;
 mod decision;
+mod help;
 mod screen;
 
 /// `--home`'s help line, naming the default home of the platform this binary was built for
@@ -60,7 +61,9 @@ const HOME_HELP: &str = "home (default ~/.local/state/swoosh; honors $XDG_STATE_
     // refusal reads `swoosh stop` in clap's usage to know the line was `stop`'s.
     bin_name = "swoosh",
     version,
-    about = "Work with a machine addressed by its public key: reach it, measure it, and more.",
+    about = "Reach your own machines by their keys.",
+    // The verbs print under the command table's headings, which clap has no section for.
+    help_template = help::template(),
     // A bare `swoosh` is a mistake, not a default action: print the help on stderr and exit 2. This
     // must hold even with `SWOOSH_HOME` set, but an env-backed global `--home` counts as an arg to clap,
     // so `arg_required_else_help` would fall to a terse "subcommand required" line there instead of the
@@ -89,7 +92,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Serve services on this machine; peers you admit reach them.
+    /// Serve services on this machine for those you admit
     #[command(after_help = serve::AT_LOGIN)]
     Serve(serve::ServeCmd),
     /// Stop swoosh serve here or on one of your own devices
@@ -99,24 +102,22 @@ enum Command {
         #[command(subcommand)]
         command: Option<service::ServiceCmd>,
     },
-    /// Measure the round-trip time to a peer, addressed by a petname or their public key.
+    /// Measure the round-trip time to a machine
     Ping(ping::PingCmd),
-    /// Measure throughput to a peer: iperf, but over the overlay.
+    /// Measure throughput to a machine
     Speed(speed::SpeedCmd),
-    /// Show this machine: its key, lock, root, devices, contacts, links and services.
-    ///
-    /// `status <machine>` shows how you reach one.
+    /// Show this machine, or how you reach another machine
     Status(status::StatusCmd),
     /// Forward a machine's service to a local port or stdout
     Forward(forward::ForwardCmd),
-    /// Mint a local URL that reaches an origin through a machine you name.
+    /// Mint a local URL that reaches an origin through a machine you name
     Proxy(proxy::ProxyCmd),
-    /// Push a file or directory to a peer.
+    /// Push a file or directory to a machine
     #[command(name = "send")]
     Send(send::SendCmd),
-    /// Bring your device list up to date with your other devices, both ways.
+    /// Bring your device list up to date with your other devices, both ways
     Sync(sync::SyncCmd),
-    /// Save or remove another person's key under a name.
+    /// Save or remove another person's key under a name
     #[command(subcommand)]
     Contact(contact::ContactCmd),
     // `touch-id` is a method on a macOS build only, so the summary names Touch ID there only.
@@ -129,28 +130,26 @@ enum Command {
         doc = "Lock this machine's key with a passphrase"
     )]
     Lock(lock::LockCmd),
-    /// copy, restore or forget your root, or change its locks
+    /// Copy, restore or forget your root, or change its locks
     #[command(
         subcommand,
         subcommand_required = true,
         arg_required_else_help = true,
-        after_help = "To end a root for good: swoosh revoke --help"
+        after_help = "To see how to end a root for good:\n  swoosh revoke --help"
     )]
     Root(root::RootCmd),
-    /// Add one of your devices, or renew it. Bare `invite` lists what is due.
+    /// Add one of your devices, or renew it; bare invite lists what is due
     Invite(invite::InviteCmd),
-    /// Make this machine one of your devices, from an invite.
+    /// Make this machine one of your devices, from an invite
     Join(join::JoinCmd),
-    /// Stop being one of your devices. `--new-key` also gives this machine a new key.
+    /// Stop being one of your devices
     Leave(leave::LeaveCmd),
-    /// Take back a link, a device, or everything you shared with a contact; or end a root for good.
+    /// Take back a share or a device, or end a root for good
     Revoke(revoke::RevokeCmd),
-    /// Reach a peer's sshd over the overlay; runs the system ssh.
+    /// Reach a machine's sshd; runs the system ssh
     Ssh(ssh::SshCmd),
     /// Make a link to a service for a person, a device, a key, or anyone
     Share(share::ShareCmd),
-    /// Print this command tree (spec vs binary).
-    Tree(tree::TreeCmd),
 }
 
 /// Declare the reaching verbs ONCE: the list below becomes both the [`Outward`] enum and its whole
@@ -283,7 +282,6 @@ impl Command {
             Self::Revoke(_) => "revoke",
             Self::Ssh(_) => "ssh",
             Self::Share(_) => "share",
-            Self::Tree(_) => "tree",
         }
     }
 
@@ -308,7 +306,6 @@ impl Command {
             Self::Leave(cmd) => Verb::Leave(cmd),
             Self::Revoke(cmd) => Verb::Revoke(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
-            Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Share(cmd) => Verb::Share(cmd),
             Self::Forward(cmd) => Verb::Outward(Outward::Forward(cmd)),
             Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
@@ -365,8 +362,6 @@ enum Verb {
     /// A bare `swoosh status` (no peer): this machine, read from its own files; it binds no transport.
     /// With a peer it is a reaching verb instead.
     Status(status::StatusCmd),
-    /// Prints the command tree; needs no transport and no store.
-    Tree(tree::TreeCmd),
     /// Makes a link with this machine's key, or a shorter copy of a link, wholly offline. Binds no
     /// transport.
     Share(share::ShareCmd),
@@ -797,14 +792,12 @@ async fn run() -> eyre::Result<()> {
     // never the key store's.
     home.check_key_file()?;
 
-    // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
-    // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address
-    // book. A reaching verb falls through to bind a transport below.
+    // Local verbs run here, before any transport is composed: `contact` only edits the address book. A
+    // reaching verb falls through to bind a transport below.
     // The `--peer` addresses as each machine's hints, for a verb whose Opens through `serve` carry them:
     // checked once, at the arm, and kept for the route.
     let mut hints = std::collections::HashMap::new();
     let reach = match verb {
-        Verb::Tree(cmd) => return cmd.run(&Cli::command()),
         // A bare `swoosh status` (no peer): this machine, from its own files. It never dials; with a
         // peer it is a reach verb. A reach flag typed on it exits 2; one set in the environment is ignored.
         Verb::Status(cmd) => {

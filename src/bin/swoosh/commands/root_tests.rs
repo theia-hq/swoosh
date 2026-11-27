@@ -7,15 +7,15 @@ use crate::Cli;
 
 /// The four leaves, each with the help line the sheet rules, in order.
 const LEAVES: [(&str, &str); 4] = [
-    ("backup", "copy your root to a new directory"),
+    ("backup", "Copy your root to a new directory"),
     (
         "forget",
-        "remove your root from this machine, after checking the copy in <dir>",
+        "Remove your root from this machine, after checking the copy in <dir>",
     ),
-    ("restore", "put your root on this machine from a copy"),
+    ("restore", "Put your root on this machine from a copy"),
     (
         "lock",
-        "change your root's locks, on this machine or in <dir>",
+        "Change your root's locks, on this machine or in <dir>",
     ),
 ];
 
@@ -44,7 +44,7 @@ fn root_help_row_and_leaves_match_the_sheet() {
     assert!(
         row(
             "root",
-            "copy, restore or forget your root, or change its locks"
+            "Copy, restore or forget your root, or change its locks"
         ),
         "{top}"
     );
@@ -78,13 +78,18 @@ fn root_help_row_and_leaves_match_the_sheet() {
     }
 }
 
-/// `swoosh root --help` ends with the one line that says where ending a root lives. Red when it is dropped.
+/// `swoosh root --help` ends with the two lines that say where ending a root lives, the command alone on
+/// its line. Red when they are dropped.
 #[test]
 fn root_help_ends_with_the_revoke_line() {
     let help = root_help();
+    let last: Vec<&str> = help.trim_end().lines().rev().take(2).collect();
     assert_eq!(
-        help.trim_end().lines().last(),
-        Some("To end a root for good: swoosh revoke --help"),
+        last,
+        [
+            "  swoosh revoke --help",
+            "To see how to end a root for good:"
+        ],
         "{help}"
     );
 }

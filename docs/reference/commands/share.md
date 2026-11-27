@@ -7,7 +7,7 @@ link.
 
 <!-- generated: usage from `swoosh share -h`; option lines curated -->
 ```
-Usage: swoosh share [OPTIONS] <service | link> [person | person/name | key | root key | anyone]
+Usage: swoosh share [OPTIONS] <service> [who]
   <service> <who>        a link to that service on this machine, for:
     person               every machine of the root you saved for them
     person/name          that one machine
@@ -18,8 +18,8 @@ Usage: swoosh share [OPTIONS] <service | link> [person | person/name | key | roo
   --expires <d>          how long it works, like 2h, 90d or 1h30m: 1h to 365d, default 1h;
                          with --once, up to 15m, default 15m;
                          a copy takes any span up to its link's end, and ends with it by default
-  --save <file>          write the link to a new private file and print only the path
-  --once                 a link to anyone that works once and lasts 15m at most
+  --save <file>          Save the link to a new private file; print only its path
+  --once                 Make a link to anyone that works once and lasts 15m at most
 ```
 
 **Example.**

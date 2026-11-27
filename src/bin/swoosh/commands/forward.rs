@@ -39,10 +39,10 @@ use crate::commands::through_serve::raise_open_files;
 pub struct ForwardCmd {
     #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
-    /// the served service to reach, under the name the host bound it
+    /// The service to reach, by its name on that machine
     #[arg(value_name = "service", value_parser = swoosh::names::service)]
     pub service: Service,
-    /// where the bytes go: a local port, `unix:<path>`, or `-` for stdout
+    /// A local port, unix:<path>, or - for stdout
     // Never defaulted (see the module docs). The id is named so the composition root can tell a line
     // missing only this slot from one missing anything else, and print the three ends for it.
     #[arg(id = LOCAL_END, value_name = "port | unix:<path> | -")]

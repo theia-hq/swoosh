@@ -492,11 +492,8 @@ fn lock_remove_help_names_this_lock() {
         .unwrap()
         .render_help()
         .to_string();
-    assert!(help.contains("take this lock off"), "{help}");
-    assert!(
-        help.contains("the lock to add or, with --remove, take off; omit to show the locks"),
-        "{help}"
-    );
+    assert!(help.contains("Take this lock off"), "{help}");
+    assert!(help.contains("The lock; omit to show them"), "{help}");
 }
 
 /// What a write that landed and could not be read back prints, under the act's own first line at `{act}`.

@@ -2,16 +2,17 @@ Back to [Commands index](../commands.md).
 
 # <a id="speed"></a>`swoosh speed`
 
-Measure throughput to a peer, like `iperf` but addressed by key.
+Measure throughput to a machine, like `iperf` but addressed by key.
 
 <!-- generated: usage from `swoosh speed -h`; option lines curated -->
 ```
 Usage: swoosh speed [OPTIONS] <machine>
-  <machine>       A machine: me/<name>, <person>/<name>, a person, a key, or a link
-  --up / --down   which direction to measure (default: down)
-  --bidir         measure both at once, full-duplex on one stream
-  -t, --secs <s>         How long to run, in seconds (5 unless -n is given)
-  -n, --bytes <N>        transfer a fixed number of bytes instead
+  <machine>            me/<name>, <person>/<name>, a person, key or link
+  --up                 Measure the upload direction (this machine sends)
+  --down               Measure the download direction (this machine receives)
+  --bidir              Measure upload and download at once
+  -t, --secs <s>       How long to run, in seconds (5 unless -n is given)
+  -n, --bytes <bytes>  Transfer this many bytes, not a fixed time
 ```
 
 **Example.** `swoosh speed me/desk --bidir -t 5` measures upload and download at once.

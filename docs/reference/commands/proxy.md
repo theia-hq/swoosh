@@ -7,8 +7,8 @@ Get a local URL that reaches a site through a machine you name.
 <!-- generated: usage from `swoosh proxy -h`; option lines curated -->
 ```
 Usage: swoosh proxy [OPTIONS] <machine> <url>
-  <machine>      A machine: me/<name>, <person>/<name>, a person, a key, or a link
-  <url>          a site, or a file on it; a path on the local URL resolves against it
+  <machine>      me/<name>, <person>/<name>, a person, key or link
+  <url>          The origin URL; request path and query go after it
   --port <n>     The local port to listen on (default: any free port)
 ```
 

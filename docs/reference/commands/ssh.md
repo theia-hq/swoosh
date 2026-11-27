@@ -2,13 +2,13 @@ Back to [Commands index](../commands.md).
 
 # <a id="ssh"></a>`swoosh ssh`
 
-Reach a peer's sshd over the overlay; runs the system ssh.
+Reach a machine's sshd; runs the system ssh.
 
 <!-- generated: usage from `swoosh ssh -h`; option lines curated -->
 ```
 Usage: swoosh ssh [OPTIONS] <machine> [-- <ssh args>...]
-  <machine>       A machine: me/<name>, <person>/<name>, a person, a key, or a link
-  [ssh args]...   forwarded verbatim to ssh, after --
+  <machine>       me/<name>, <person>/<name>, a person, key or link
+  [ssh args]...   Args forwarded verbatim to the system ssh, after `--`
 ```
 
 **Example.** `swoosh ssh me/desk -- ls` runs a one-off command; `swoosh ssh me/desk -- -p 2222` passes ssh

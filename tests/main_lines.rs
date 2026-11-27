@@ -132,16 +132,26 @@ fn bare_swoosh_prints_help_on_stderr_and_exits_2() {
     }
 }
 
-/// The verbs listed under a help page's `Commands:` heading, `help` left out.
+/// The verbs a help page lists: the rows under each heading before `Options:` but `Arguments:` (a group's
+/// `Commands:`, or the top level's verb groups), `help` left out. What follows `Options:` is text.
 fn listed_verbs(help: &str) -> Vec<String> {
-    help.lines()
-        .skip_while(|line| line.trim_end() != "Commands:")
-        .skip(1)
-        .take_while(|line| !line.trim().is_empty())
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|verb| *verb != "help")
-        .map(str::to_owned)
-        .collect()
+    let mut verbs = Vec::new();
+    let mut listing = false;
+    for line in help.lines() {
+        if line == "Options:" {
+            break;
+        }
+        if !line.starts_with(' ') && line.ends_with(':') {
+            listing = line != "Arguments:";
+        } else if let Some(verb) = line
+            .split_whitespace()
+            .next()
+            .filter(|verb| listing && *verb != "help")
+        {
+            verbs.push(verb.to_owned());
+        }
+    }
+    verbs
 }
 
 /// With `SWOOSH_HOME=/tmp/x`, no `-h` or `--help` of any listed command prints `/tmp/x`; the root help

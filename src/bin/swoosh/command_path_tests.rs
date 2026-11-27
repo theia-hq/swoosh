@@ -40,7 +40,6 @@ const LEAVES: &[(&str, &[&str])] = &[
     ("revoke", &["revoke", "alice"]),
     ("ssh", &["ssh", "alice"]),
     ("share", &["share", "ssh", "anyone"]),
-    ("tree", &["tree"]),
 ];
 
 /// Every command a person can run, walked from the parser itself, has a row, and its parse names the row's

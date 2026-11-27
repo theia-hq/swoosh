@@ -37,7 +37,7 @@ const READ_CAP: u64 = 4096;
 /// Make this machine one of your devices, from an invite.
 #[derive(Debug, Args)]
 pub struct JoinCmd {
-    /// the invite, or `-` to read it from stdin (the default)
+    /// The invite, or `-` to read it from stdin (the default)
     #[arg(value_name = "invite")]
     pub invite: Option<String>,
     /// Join a different root than the one this machine is on.

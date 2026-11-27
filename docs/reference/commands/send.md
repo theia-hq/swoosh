@@ -2,13 +2,13 @@ Back to [Commands index](../commands.md).
 
 # <a id="send"></a>`swoosh send`
 
-Push a file or directory to a peer.
+Push a file or directory to a machine.
 
 <!-- generated: usage from `swoosh send -h`; option lines curated -->
 ```
 Usage: swoosh send [OPTIONS] <path>... <machine>
-  <path>...           the files or directories to push
-  <machine>           A machine: me/<name>, <person>/<name>, a person, a key, or a link
+  <path>...           The files or directories to push
+  <machine>           me/<name>, <person>/<name>, a person, key or link
 ```
 
 **Example.**

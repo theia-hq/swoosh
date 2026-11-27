@@ -53,13 +53,13 @@ const MAX_STDIN: u64 = 64 * 1024;
 #[derive(Debug, Args)]
 #[command(after_long_help = RECIPE)]
 pub struct RevokeCmd {
-    /// what to take back
+    /// What to take back
     #[arg(
-        value_name = "link | path | - | me/<name> | <person> | <person>/<name> | key | root key",
+        value_name = "what",
         value_parser = target
     )]
     pub target: Target,
-    /// use the copy of your root in <dir>
+    /// Use the copy of your root in <dir>
     #[arg(long = "root", value_name = "dir")]
     pub root: Option<PathBuf>,
     #[command(flatten)]

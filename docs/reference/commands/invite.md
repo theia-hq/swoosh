@@ -2,7 +2,7 @@ Back to [Commands index](../commands.md).
 
 # <a id="invite"></a>`swoosh invite`
 
-Add one of your devices, or renew it. Bare `invite` lists what is due.
+Add one of your devices, or renew it; bare invite lists what is due.
 
 Run it where your root is kept, or add `--root <dir>` to use a copy of your root from a device. A named
 form asks for your root's passphrase once, then prints the invite on stdout for the device to join. Bare
@@ -11,11 +11,11 @@ form asks for your root's passphrase once, then prints the invite on stdout for 
 <!-- generated: usage from `swoosh invite -h`; option lines curated -->
 ```
 Usage: swoosh invite [OPTIONS] [name] [key]
-  [name]   the device, as it is named among your devices (me/<name>)
-  [key]    the key the device made (`swoosh join` on it shows it)
+  [name]   The device, as it is named among your devices (me/<name>)
+  [key]    The key the device made (`swoosh join` on it shows it)
   --new-key   Make a new key: inside the invite, or for this machine
   --expires <d>   How long: `2h`, `90d`
-  --root <dir>   Act on your root, or on the root kept in `<dir>`
+  --root <dir>   Use the copy of your root in <dir>
 ```
 
 **The forms.**

@@ -15,7 +15,7 @@ use swoosh::root::Copied;
 /// copy your root to a new directory
 #[derive(Debug, Args)]
 pub struct BackupCmd {
-    /// the directory to copy your root into
+    /// The directory to copy your root into
     #[arg(value_name = "dir")]
     pub(crate) dir: PathBuf,
 }

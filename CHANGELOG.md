@@ -25,6 +25,8 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`swoosh --help` lists the commands under headings, and `swoosh tree` is gone.** Help rows are one capitalized
+  phrase that fits 80 columns, `revoke` takes `<what>`, and `share` takes `<service> [who]`.
 - **A `--local` dial that finds nothing says what to do.** The refusal names `swoosh status` on the other machine and
   the `--peer` form with its key.
 - **`stop me/<name>` runs through `swoosh serve` too.** It warns when this machine's standing is about to

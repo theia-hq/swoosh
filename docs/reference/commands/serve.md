@@ -8,11 +8,11 @@ machine's list; a bare `serve` serves that list, or `ping` and `speed` if no lis
 <!-- generated: usage from `swoosh serve -h`; option lines curated -->
 ```
 Usage: swoosh serve [OPTIONS] [service]...
-  [service]...               Serve exactly these, saved as this machine's list
-  --public <service>         Open these services to anyone (comma-separated, repeatable)
-  --public-unsafe <service>  Open these raw-stream services (file:, fifo:, stdin:) to anyone
+  [service]...               Serve exactly these for this run, without saving them
+  --public <service>         Open these services to anyone, comma-separated
+  --public-unsafe <service>  Open these raw streams to anyone
   --expires <d>              Serve for this long, then stop (30m, 2h, 1d)
-  --admit <root key>         For this run, let in the devices of another root without joining it (CI)
+  --admit <root key>         Admit another root's devices, for this run
 ```
 
 **Example.** `swoosh serve ssh tv=tcp:127.0.0.1:8096` publishes a shell and a local TCP service.

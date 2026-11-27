@@ -6,7 +6,8 @@ Take back a link, one of your devices, or everything you shared with a contact; 
 
 <!-- generated: usage from `swoosh revoke -h`; option lines curated -->
 ```
-Usage: swoosh revoke [OPTIONS] <link | path | - | me/<name> | <person> | <person>/<name> | key | root key>
+Usage: swoosh revoke [OPTIONS] <what>
+  <what>             What to take back, one of:
   <link>             that link, and every link narrowed from it
   <path> | -         the link held in that file, or on stdin
   me/<name>          one of your devices: its key, and the links this machine gave it
@@ -14,7 +15,7 @@ Usage: swoosh revoke [OPTIONS] <link | path | - | me/<name> | <person> | <person
   <person>/<name>    every link this machine gave that device's key
   <key>              every link this machine gave that key
   root:<key>         that root, for good, on this machine
-  --root <dir>       use the copy of your root in <dir>
+  --root <dir>       Use the copy of your root in <dir>
 ```
 
 **Example.** `swoosh revoke me/laptop` on the machine that keeps your root blocks the laptop here, asks

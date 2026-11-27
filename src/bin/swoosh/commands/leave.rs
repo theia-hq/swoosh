@@ -21,11 +21,13 @@ use swoosh::standing::{Standing, StandingError};
 /// Stop being one of your devices. `--new-key` also gives this machine a new key.
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "A server you reach only through swoosh needs its console after `leave --new-key`, unless it \
-                       first issued you a link (swoosh share ssh <your key>)."
+    after_long_help = "A server you reach only through swoosh needs its console after\n\
+                       leave --new-key, unless it first issued you a link.\n\
+                       To issue one, run this on that server:\n\
+                       \x20 swoosh share ssh <your key>"
 )]
 pub struct LeaveCmd {
-    /// Make a new key: inside the invite, or for this machine.
+    /// Also give this machine a new key
     #[arg(long = "new-key")]
     pub new_key: bool,
 }
