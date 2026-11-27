@@ -832,7 +832,6 @@ async fn oversized_declared_frame_ends_the_connection() {
 #[tokio::test]
 async fn socket_stop_acks_before_it_fires() {
     use super::StopKind;
-    use crate::serve::{Stopped, classify_stop};
 
     let cancel = CancellationToken::new();
     let resident = Arc::new(test_resident_with(cancel.clone()));
@@ -856,11 +855,6 @@ async fn socket_stop_acks_before_it_fires() {
         source.first(),
         Some(StopKind::Socket),
         "the socket kind is recorded"
-    );
-    assert_eq!(
-        classify_stop(source.first()),
-        Stopped::Local,
-        "the socket stop renders local, never the wire line"
     );
     assert!(cancel.is_cancelled(), "the stop fired after the Ack");
 }

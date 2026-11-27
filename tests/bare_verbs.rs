@@ -277,9 +277,10 @@ fn bare_stop_stops_the_resident() {
         !resident_out.contains("ctrl-c"),
         "a piped banner says nothing of ctrl-c: {resident_out:?}"
     );
+    let resident_err = stderr.lock().expect("the capture lock").clone();
     assert!(
-        resident_out.contains("node stopped (local request)."),
-        "the resident classifies the socket stop as its local end: {resident_out}"
+        resident_err.contains("\nStopped serving.\n") && !resident_out.contains("Stopped serving."),
+        "the resident says it stopped on stderr, with no cause: {resident_err}"
     );
     assert!(!socket.exists(), "the released socket is unlinked");
 

@@ -48,9 +48,8 @@ use swoosh::reaching::{BindRole, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
     Activity, BoundTargets, InstanceLock, Internet, Lan, Network, ProxyScope, ReachSource,
-    Reachable, RecvService, Resident, SingleError, Started, StopKind, StopSource, Stopped,
-    acquire_single, bind_entry, bind_recv, classify_stop, control, extract_recv_services,
-    refuse_recv_into_home,
+    Reachable, RecvService, Resident, SingleError, Started, StopKind, StopSource, acquire_single,
+    bind_entry, bind_recv, control, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -147,7 +146,8 @@ pub struct ServeCmd {
     pub public_unsafe: Vec<Service>,
     /// suppress the readiness banner and activity lines
     // Hidden and read from `SWOOSH_QUIET`: no flow needs it, and a supervisor or an action sets it once.
-    // It withholds stdout and the activity lines only; refusals, warnings and `Stopped by` still print.
+    // It withholds stdout and the activity lines only; refusals, warnings, `Stopped by` and `Stopped serving.`
+    // still print.
     #[arg(
         long,
         env = "SWOOSH_QUIET",
@@ -326,10 +326,21 @@ pub(crate) async fn admitting(
     }
     serve_lock.record(&home_lock, Some(root))?;
     drop(home_lock);
-    eprintln!(
-        "admitting devices of root root:{root} for this run; this machine does not get your revoked keys."
-    );
+    // A closed stderr is no reason to refuse the run, so a failed write is dropped.
+    let _ = admitting_lines(&format!("root:{root}")).write(&mut std::io::stderr());
     Ok(())
+}
+
+/// What a run that admits the devices of a root (`root:<key>`) says before it serves: the root alone on its
+/// row, that this machine is not one of its devices, and so that a device the root revoked still gets in.
+fn admitting_lines(root: &str) -> Screen<'_> {
+    Screen::default().block(
+        Block::default()
+            .text("Admitting the devices of this root for this run:".to_owned())
+            .row([Cell::Token(root)])
+            .text("This machine does not get the keys that root revoked.".to_owned())
+            .text("A device that root revoked still gets in.".to_owned()),
+    )
 }
 
 impl core::fmt::Debug for ExposeContext {
@@ -396,10 +407,14 @@ impl ServeCmd {
         // the same whether or not a `serve` runs here.
         swoosh::serve::Mistyped::check(&self.services)?;
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
+        // The typed spelling, kept for a missing file's refusal: anchoring makes a relative path absolute.
+        let typed = self.services.clone();
         self.normalize_services(&cwd)?;
         // Additions and exclusions are typed too, so their grammar is refused before the lock as well.
         Started::positional(&self.with, &cwd)?;
         Started::exclusions(&self.without)?;
+        // A typed file that is not there is refused before the lock, so the refusal takes and binds nothing.
+        swoosh::serve::MissingFile::check(typed.iter().chain(&self.with).map(String::as_str))?;
         // A reserved word saved in `serve.toml` is refused here too, reading only, so its refusal creates no
         // lock and binds nothing; the load after the lock stays the authority for every other refusal.
         ServeToml::refuse_reserved(home, &cwd)?;
@@ -798,7 +813,7 @@ impl ServeCmd {
         // Run until a stop, distinguishing a GRACEFUL stop from an ERRORED teardown: a requested stop is
         // SUCCESS (exit 0, so a CI action reads a clean teardown as green); only a genuine error exits
         // non-zero. Beside the run, this node's own exchanges with your devices: they end when the run does.
-        let stopped = tokio::select! {
+        tokio::select! {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock, &opener) => stopped?,
             never = expiry => match never {},
             () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
@@ -831,12 +846,10 @@ impl ServeCmd {
             };
             eprintln!("{}", control::stopped_by(&contacts, key));
         }
-        // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
-        // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic. It is stdout, so
-        // `--quiet` withholds it with the banner.
-        if !self.quiet {
-            let _ = writeln!(std::io::stdout(), "{}", stopped.message());
-        }
+        // The success line, on stderr after `Stopped by`, and under `--quiet` too, so a log shows the end.
+        // Every end prints it the same. One write, best-effort: a closed stderr must NOT turn a clean stop into
+        // a panic.
+        let _ = std::io::stderr().write_all(STOPPED_SERVING.as_bytes());
         // The bound node's teardown (iroh's graceful `Endpoint::close`) is owned by the composition root,
         // which closes it after every reaching verb returns.
         Ok(())
@@ -870,15 +883,16 @@ impl ServeCmd {
     }
 }
 
-/// Drive the exposer and the control socket until the node stops, returning WHY it stopped for a graceful
-/// end or propagating the error for a failed teardown.
+/// The line every graceful end of a `serve` prints: an owner's stop, a `--expires` deadline, ctrl-c or
+/// SIGTERM. A blank line first keeps it off a `^C` echo.
+const STOPPED_SERVING: &str = "\nStopped serving.\n";
+
+/// Drive the exposer and the control socket until the node stops: `Ok` for a graceful end, whatever asked
+/// for it, or the error of a failed teardown. A requested stop is a success, so a CI teardown exits 0.
 ///
 /// The control listener runs beside the exposer and Ctrl-C: it serves the local socket until the same
-/// token fires, then the teardown unlinks the socket and drops the lock. Because the socket `Stop` cancels
-/// the SAME token the exposer watches, every arm classifies its result from the recorded [`StopKind`]
-/// rather than from the arm that won the poll: a socket stop renders [`Stopped::Local`], a wire
-/// `control.serve` stop or a `--expires` deadline renders [`Stopped::Requested`], and a Ctrl-C records itself and
-/// renders [`Stopped::Interrupted`], so the kinds never collapse into one.
+/// token fires, then the teardown unlinks the socket and drops the lock. A ctrl-c or SIGTERM records itself
+/// in the stop source before it cancels, so a wire stop that lands after it is not named as the stop.
 async fn run_until_stopped<T: Transport, D: Discovery>(
     exposer: Exposer,
     node: &Node<T, D>,
@@ -887,7 +901,7 @@ async fn run_until_stopped<T: Transport, D: Discovery>(
     listener: std::os::unix::net::UnixListener,
     lock: InstanceLock,
     opens: &impl swoosh::serve::Opens,
-) -> eyre::Result<Stopped>
+) -> eyre::Result<()>
 where
     <T::Session as Session>::Write: Send + 'static,
     <T::Session as Session>::Read: Send + 'static,
@@ -898,31 +912,27 @@ where
     // the same graceful stop as a ctrl-c, so the socket goes with the process.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .wrap_err("could not watch for SIGTERM")?;
-    let stopped = tokio::select! {
+    tokio::select! {
         () = exposer.run(node, cancel.clone()) => {
             lock.release();
-            classify_stop(source.first())
         }
         output = control => {
             output?;
             lock.release();
-            classify_stop(source.first())
         }
         signalled = tokio::signal::ctrl_c() => {
             signalled?;
             source.note(StopKind::Interrupted);
             cancel.cancel();
             lock.release();
-            classify_stop(source.first())
         }
         _ = terminate.recv() => {
             source.note(StopKind::Interrupted);
             cancel.cancel();
             lock.release();
-            classify_stop(source.first())
         }
-    };
-    Ok(stopped)
+    }
+    Ok(())
 }
 
 /// Cancel `cancel` once `lifetime` has elapsed, then wait forever; with no lifetime, only wait. It never
@@ -1039,9 +1049,12 @@ impl<'m> Serving<'m> {
 /// `warning: <fact>` on stderr, in one write, its head styled where stderr shows style. A closed stderr
 /// is no reason to stop serving, so a failed write is dropped.
 fn warn(fact: &impl core::fmt::Display) {
-    let mut err = std::io::stderr();
-    let head = Style::WARNING.paint("warning:", &err);
-    let _ = err.write_all(format!("{head} {fact}\n").as_bytes());
+    let _ = warning(fact).write(&mut std::io::stderr());
+}
+
+/// The screen [`warn`] writes: one `warning:` head and its fact.
+fn warning(fact: &impl core::fmt::Display) -> Screen<'static> {
+    Screen::default().block(Block::default().head(Style::WARNING, "warning:", fact.to_string()))
 }
 
 /// Account for the diagnostic prefix here, not in the library's unprefixed description. Each `warning:`

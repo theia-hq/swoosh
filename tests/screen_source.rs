@@ -260,8 +260,8 @@ fn a_landed_line_prints_only_from_its_read_back() {
 /// that owes it, and a listed site that no longer holds the phrase fails, so the list only shrinks.
 #[test]
 fn no_line_says_root_root() {
-    // The first root's made line is SW6's; serve's admitting line is SW4g's.
-    const OWED: [&str; 2] = ["root.rs", "bin/swoosh/commands/serve.rs"];
+    // The first root's made line is SW6's.
+    const OWED: [&str; 1] = ["root.rs"];
     let mut seen = [false; OWED.len()];
     for (file, text) in shipped() {
         for (line, literal) in scan(&text).literals {
@@ -277,6 +277,37 @@ fn no_line_says_root_root() {
     for (owed, seen) in OWED.iter().zip(seen) {
         assert!(seen, "{owed} no longer says `root root:`: drop its row");
     }
+}
+
+/// `serve`'s `warning:` lines are drawn through the screen's head, so the line a run prints is the one a test
+/// holds to the law. `waiting_warnings` still builds its own, wrapped by hand (owed with f11's words, SW4f).
+/// Red when another site composes one, or when `waiting_warnings` stops and its exemption stays.
+#[test]
+fn serve_draws_its_warnings_through_the_screen() {
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/swoosh/commands/serve.rs"),
+    )
+    .unwrap();
+    let owed = text
+        .split("fn waiting_warnings(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .unwrap_or_default();
+    let mut drawn = 0;
+    let mut owed_seen = false;
+    for line in text.lines().filter(|line| line.contains("\"warning:\"")) {
+        if line.contains(".head(Style::WARNING, \"warning:\"") {
+            drawn += 1;
+        } else {
+            assert!(owed.contains(line), "a warning composed by hand: {line}");
+            owed_seen = true;
+        }
+    }
+    assert_eq!(drawn, 1, "one screen draws serve's warnings");
+    assert!(
+        owed_seen,
+        "waiting_warnings draws through the screen now: drop its exemption"
+    );
 }
 
 /// The Touch ID dialog names the command that asked, and only words fixed at build time reach it: the one

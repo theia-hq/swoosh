@@ -11,12 +11,15 @@
 //! saved services nor off settings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use super::DEFAULT_SERVICES;
 use super::definition::{
-    DefinitionCause, DefinitionError, Operand, ValidatedDefinition, service_name,
+    DefinitionCause, DefinitionError, Operand, Target, ValidatedDefinition, service_name,
 };
+use super::scheme::Scheme;
+use crate::escape::EscapedPath;
 use crate::names::{Reserved, ReservedService};
 use crate::serve_toml::ServeToml;
 
@@ -117,6 +120,48 @@ impl Mistyped {
                     index: index + 1,
                     cause: DefinitionCause::Collision,
                 }));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A `file:` target typed on this command line that names nothing: refused before anything is taken or
+/// bound, since serving it would answer every caller with an error. The path prints as it was typed.
+#[derive(Debug, thiserror::Error)]
+#[error("{} does not exist", EscapedPath(.0))]
+pub struct MissingFile(PathBuf);
+
+impl MissingFile {
+    /// Refuse the first typed `file:` target whose path does not exist, read once, now: nothing there, or a
+    /// file where the path needs a directory. A path that cannot be checked otherwise (a directory this
+    /// user may not read) is not called absent: it starts as it would have, and a file that appears or goes
+    /// after this is served as it is then.
+    ///
+    /// # Errors
+    ///
+    /// The first typed `file:` path that does not exist, as typed.
+    pub fn check<'e>(entries: impl IntoIterator<Item = &'e str>) -> Result<(), Self> {
+        for entry in entries {
+            // A typed entry that does not parse was refused before this, by its grammar.
+            let Ok(ValidatedDefinition {
+                target: Target::Primitive(spec),
+                ..
+            }) = ValidatedDefinition::parse(entry)
+            else {
+                continue;
+            };
+            let Some((Scheme::File, path)) = Scheme::parse(spec.as_str()) else {
+                continue;
+            };
+            // Relative to the cwd, as anchoring would make it.
+            let path = Path::new(path);
+            match path.try_exists() {
+                Ok(false) => return Err(Self(path.to_owned())),
+                Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                    return Err(Self(path.to_owned()));
+                }
+                Ok(true) | Err(_) => {}
             }
         }
         Ok(())

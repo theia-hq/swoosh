@@ -48,17 +48,23 @@ The banner gives this machine's name, when it has one, and its key, how peers re
 `--expires` it then says when `serve` stops (`Serving until 15:04 (1h 30m).`). At a terminal, with no service
 manager running `serve`, it ends with `Press ctrl-c to stop.` To start `serve` at login, see
 [Run a node at login](../../use-cases/run-at-login.md).
-`--quiet` (or `SWOOSH_QUIET`) prints no banner, no per-file lines and no `node stopped` line; refusals,
-warnings and the `Stopped by` line still print.
+`--quiet` (or `SWOOSH_QUIET`) prints no banner and no per-file lines; refusals, warnings, the `Stopped by`
+line and `Stopped serving.` still print.
+However `serve` ends (`--expires`, `swoosh stop`, ctrl-c, a service manager's stop), it prints a blank line
+and `Stopped serving.` on stderr.
 A raw-stream service (`file:`, `fifo:`, `stdin:`) has no auth of its own, so `--public` refuses it and
-points at `--public-unsafe`, so name only a file you mean to hand out.
+points at `--public-unsafe`, so name only a file you mean to hand out. A `file:` path you type that does not
+exist, or sits under something that is not a directory, refuses the start with `error: <path> does not exist`
+and exit 1; a target saved in `serve.toml` is not checked.
 Every `serve` holds its home's lock and control socket, so `swoosh stop` and
 `swoosh status` find it, and a second `serve` for the same home refuses; backgrounding is the
 supervisor's job. On Linux it needs `XDG_RUNTIME_DIR` set to a private directory.
 Only the services are kept for the next bare `serve`: `--public`, `--public-unsafe`,
 `--admit` and `--expires` apply only to the run that types them.
 `--admit root:<key>` lets in the devices of that root for this run only, on a machine that trusts no
-root; it writes nothing, and this machine does not get that root's revoked keys. It refuses this machine's
+root; it writes nothing. Before `serve` starts, it prints on stderr `Admitting the devices of this root for
+this run:`, the root's key, `This machine does not get the keys that root revoked.` and `A device that root
+revoked still gets in.` It refuses this machine's
 own key, a root revoked here, and a root saved as a person's, and `swoosh join` refuses while it runs.
 
 See also [Services](../services.md) for every service form and its gate, [Commands index](../commands.md),

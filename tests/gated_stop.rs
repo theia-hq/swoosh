@@ -27,7 +27,7 @@ use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use swoosh::contacts::Contacts;
 use swoosh::serve::control::{ACK_GRACE, Answer, Request, stopped_by};
-use swoosh::serve::{CONTROL_SERVE_SERVICE, StopKind, StopSource, Stopped, control};
+use swoosh::serve::{CONTROL_SERVE_SERVICE, StopKind, StopSource, control};
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{CancellationToken, Connector, Exposer, Router};
@@ -113,19 +113,12 @@ async fn a_member_stops_a_gated_node_over_control_serve() {
             writer.shutdown().await.expect("the member closes its side");
 
             // The stop cancelled the exposer's token, so its run returns. That return is EXACTLY what
-            // `serve` classifies as a graceful, exit-0 stop: its run maps an exposer that returned (the
-            // token fired) to `Stopped::Requested` and exits 0, so a deliberate `swoosh stop` (a CI
-            // teardown) reads as SUCCESS, not a crash.
+            // `serve` takes as a graceful end: an exposer that returned exits 0, so a deliberate `swoosh
+            // stop` (a CI teardown) reads as SUCCESS, not a crash.
             tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("an admitted stop must stop the node, not leave it running")
                 .expect("the run task joins");
-            let stopped = Stopped::Requested;
-            assert!(
-                stopped.message().contains("gracefully"),
-                "the graceful-stop line names it a graceful stop: {:?}",
-                stopped.message()
-            );
         })
         .await;
 }

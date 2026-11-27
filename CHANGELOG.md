@@ -26,6 +26,11 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`swoosh serve` ends on one line, `Stopped serving.`, and refuses a missing `file:` path.** Every end prints it
+  on stderr after a blank line, with `--quiet` too; it printed `node stopped` on stdout, and `--quiet` withheld it.
+  A `file:` path you type that does not exist refuses the start with `error: <path> does not exist` and exit 1.
+  `--admit` prints `Admitting the devices of this root for this run:`, the root, and that this machine does not
+  get the keys that root revoked, so a device it revoked still gets in.
 - **`send` and the receive line lead with who and how much.** `send` prints `Sent app.tar (200.0 KiB) to
   me/deploybox.` on stderr and nothing on stdout, and a missing path refuses before it dials. A receive service
   prints `00:47  me/laptop sent 1.5 KiB: notes.txt`. `status <machine>` reads `me/nas   reachable, direct, 12.0 ms`.
