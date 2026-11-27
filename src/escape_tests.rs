@@ -3,7 +3,8 @@
 use core::fmt::{self, Write as _};
 
 use super::{
-    BLANK_LETTERS, Escaped, EscapedComplete, EscapedPath, MAX_ESCAPED, causes, escaped_report,
+    BLANK_LETTERS, CELL_CUT, DETAIL_ROOM, Escaped, EscapedComplete, EscapedPath, MAX_ESCAPED,
+    beside, causes, escaped_report, peer_cell,
 };
 use crate::serve::measure_allocations;
 
@@ -114,7 +115,11 @@ fn paths_causes_and_reports_keep_their_cap() {
     );
     let error = std::io::Error::other(text.clone());
     assert_eq!(Escaped(&causes(&error)).to_string(), expected);
-    assert_eq!(escaped_report(eyre::eyre!(text)).to_string(), expected);
+    // A report is cut to the room its `error:` line leaves, the tighter bound.
+    assert_eq!(
+        escaped_report(eyre::eyre!(text)).to_string(),
+        format!("{}\u{2026}", "x".repeat(70))
+    );
 }
 
 #[test]
@@ -312,4 +317,88 @@ fn no_home_path_prints_raw() {
         "a path prints through Path::display, not EscapedPath:\n{}",
         raw.join("\n")
     );
+}
+
+/// Peer text of every width class is cut to its budget by the bound, not by a table: ASCII, CJK and
+/// full-width glyphs, and zero-width scalars, which a table counts as nothing.
+#[test]
+fn a_peer_cell_never_fills_more_than_its_budget() {
+    let samples = [
+        "a".repeat(200),
+        "\u{6587}\u{4ef6}".repeat(100),
+        "\u{ff21}\u{ff22}".repeat(100),
+        "\u{200b}".repeat(200),
+        "\u{1f600}".repeat(100),
+    ];
+    for sample in &samples {
+        for budget in [12, 40, 72] {
+            let cell = peer_cell(sample, budget);
+            assert!(columns(&cell) <= budget, "{budget}: {cell}");
+            assert!(cell.ends_with(CELL_CUT), "{cell}");
+        }
+    }
+}
+
+/// A budget under two holds only the mark, swoosh's own glyph: no peer text survives it.
+#[test]
+fn a_budget_under_two_is_the_mark_alone() {
+    for budget in [0, 1] {
+        assert_eq!(peer_cell("abc", budget), "\u{2026}");
+    }
+    assert_eq!(peer_cell("abc", 2), "\u{2026}");
+    assert_eq!(peer_cell("ab", 2), "ab");
+}
+
+/// Peer text beside swoosh's words stays on the line while the room left is at least the floor, and
+/// takes a detail line of its own, cut to that line's room, when less is left: a word the person can read
+/// rather than a mark.
+#[test]
+fn peer_text_takes_a_detail_line_when_the_room_is_under_the_floor() {
+    assert_eq!(
+        beside(
+            0,
+            "me/nas: reached, but refused (",
+            "unavailable: down",
+            ")"
+        ),
+        "me/nas: reached, but refused (unavailable: down)"
+    );
+    let words = format!("{}: reached, but refused (", "a".repeat(50));
+    assert_eq!(
+        beside(0, &words, "unavailable: down", ")"),
+        format!(
+            "{}: reached, but refused\n  unavailable: down",
+            "a".repeat(50)
+        )
+    );
+    let long = "x".repeat(200);
+    let detail = beside(0, &words, &long, ")");
+    let (_, last) = detail.split_once('\n').unwrap();
+    assert_eq!(columns(last), 2 + DETAIL_ROOM);
+    assert!(last.ends_with(CELL_CUT));
+}
+
+/// Text that fits is whole and unmarked; text that does not keeps its leading glyphs and ends in the mark.
+#[test]
+fn a_peer_cell_that_fits_is_whole() {
+    assert_eq!(peer_cell("photo.bin", 9), "photo.bin");
+    assert_eq!(peer_cell("photo.bin", 8), "photo.\u{2026}");
+    assert_eq!(peer_cell("\u{6587}\u{4ef6}", 4), "\u{6587}\u{4ef6}");
+    assert_eq!(peer_cell("\u{6587}\u{4ef6}\u{6587}", 5), "\u{6587}\u{2026}");
+}
+
+/// A cell escapes as `Escaped` does, and a cut never splits an escape.
+#[test]
+fn a_peer_cell_escapes_and_cuts_an_escape_whole() {
+    assert_eq!(peer_cell("a\nb", 10), r"a\nb");
+    assert_eq!(peer_cell("ab\u{1b}", 7), "ab\u{2026}");
+    assert_eq!(peer_cell("ab\u{1b}", 8), r"ab\u{1b}");
+}
+
+/// The most columns `text` can fill in any terminal, counted here apart from the code under test: one per
+/// ASCII scalar, two per any other.
+fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|scalar| if scalar.is_ascii() { 1 } else { 2 })
+        .sum()
 }

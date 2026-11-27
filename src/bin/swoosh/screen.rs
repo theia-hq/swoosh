@@ -13,10 +13,10 @@ use std::sync::OnceLock;
 
 use anstream::{AutoStream, ColorChoice};
 use clap::builder::styling::{self, AnsiColor, Color};
-use swoosh::escape::EscapedComplete;
+use swoosh::escape::{EscapedComplete, LINE_WIDTH};
 
 /// The widest line a screen prints, in escaped scalars.
-const WIDTH: usize = 80;
+const WIDTH: usize = LINE_WIDTH;
 
 /// How one of swoosh's own fixed words is styled at a terminal.
 #[derive(Clone, Copy)]

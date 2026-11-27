@@ -542,6 +542,33 @@ async fn a_refusal_through_serve_prints_the_own_binds_line() {
     assert!(!line.contains('\u{1b}'), "{line}");
 }
 
+/// A machine's refusal in wide glyphs, through `serve`, the path most dials take: the `error:` line is cut
+/// to its room, counted at two columns for every scalar that is not ASCII, so the reason cannot wrap and
+/// start a forged line of its own.
+#[tokio::test]
+async fn a_wide_refusal_through_serve_cannot_forge_a_line() {
+    let contacts = book();
+    let peer = machine(&contacts, "me/nas");
+    let service = "ssh".parse().unwrap();
+    let pipe = Dial {
+        machine: &peer,
+        service: &service,
+        contacts: &contacts,
+    };
+    let forged = "error: me/boss refused ssh";
+    let wide = format!("{}{forged}", "\u{6587}\u{4ef6}".repeat(40));
+    let wide = RefusalDetail::bounded(&wide);
+    for refusal in [
+        OpenRefusal::Peer(PeerRefusal::Unavailable(wide.clone())),
+        OpenRefusal::Unreachable(wide.clone()),
+        OpenRefusal::Broken(wide),
+    ] {
+        let line = printed(&pipe.refused(refusal, &Serve(None)).await);
+        assert!(columns_at_most(&line) < 80, "{line}");
+        assert!(!line.contains(forged), "{line}");
+    }
+}
+
 /// A dial that timed out, which the resident reports as Unreachable with the words `timed out`, prints
 /// what a `Timeout` prints, on both paths: only `stop` tells the two apart.
 #[tokio::test]
@@ -2308,4 +2335,17 @@ async fn the_probe_escapes_what_serve_says() {
         assert!(!line.contains('\x1b'), "{tag}: {line:?}");
         assert!(line.contains("[31mx"), "{tag}: {line:?}");
     }
+}
+
+/// The most columns any line of `text` can fill in any terminal, counted here apart from the code under
+/// test: one per ASCII scalar, two per any other.
+pub(crate) fn columns_at_most(text: &str) -> usize {
+    text.lines()
+        .map(|line| {
+            line.chars()
+                .map(|scalar| if scalar.is_ascii() { 1 } else { 2 })
+                .sum()
+        })
+        .max()
+        .unwrap_or(0)
 }

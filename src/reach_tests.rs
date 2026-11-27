@@ -3,6 +3,12 @@ use crate::contacts::Contacts;
 use crate::peer::Peer;
 use crate::testkit::{HostilePeer, Script, ScriptedPeer};
 
+/// The cause a list that is not one gives, as [`ListFailed::UnknownReply`] words it.
+const UNKNOWN_LIST_REPLY: &str = "it sent an unknown reply to the list request";
+
+/// The cause a list request that got no answer at all gives, as [`ListFailed::Ended`] words it.
+const LIST_ENDED: &str = "it ended the list request without an answer";
+
 /// A bind in the given mode with n0's two reach services: what every outcome test about the bind's
 /// remedy is bound as, so no reach line joins its message.
 fn bound(local: bool) -> transport::Bound {
@@ -113,11 +119,12 @@ async fn a_default_miss_is_unchanged() {
     for (bound, expected) in [
         (
             bound(false),
-            r"could not reach ed012txmdbu7…: connect to peer: closed by peer: no\r\u{1b}[2Kalice: 900 MiB/s\u{202e}",
+            // The peer's text is cut to the room its `error:` line leaves.
+            r"could not reach ed012txmdbu7…: connect to peer: closed by peer: no\r…",
         ),
         (
             over_own,
-            "could not reach ed012txmdbu7…: connect to peer: closed by peer: no\\r\\u{1b}[2Kalice: 900 MiB/s\\u{202e}\n  \
+            "could not reach ed012txmdbu7…: connect to peer: closed by peer: no\\r…\n  \
              resolver asked: https://dns.example/pkarr",
         ),
     ] {
@@ -223,7 +230,8 @@ fn unreachable() -> (bifrost::Node<HostilePeer, bifrost::NoDiscovery>, Machine) 
 /// on one line, with the words as they were.
 fn escaped_unreached(target: &Machine) -> String {
     format!(
-        r"could not reach {}: connect to peer: closed by peer: no\r\u{{1b}}[2Kalice: 900 MiB/s\u{{202e}}",
+        // Cut to the room its `error:` line leaves; an escape is cut whole.
+        r"could not reach {}: connect to peer: closed by peer: no\r…",
         target.label()
     )
 }

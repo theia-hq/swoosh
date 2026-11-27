@@ -38,7 +38,7 @@ use bifrost::{NodeId, Refusal, Session, WriteEnd};
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use swoosh::contacts::Contacts;
-use swoosh::escape::{Escaped, escaped_report};
+use swoosh::escape::{beside, causes, columns, escaped_report, head_room, peer_cell};
 use swoosh::peer::Machine as PeerMachine;
 use swoosh::peers::OpenError;
 use swoosh::serve::control_codec::OpenRefusal;
@@ -128,7 +128,7 @@ impl<S: StreamSource> Listener<'_, S> {
         };
         match opened.write.shutdown().await {
             Ok(()) => Ok(()),
-            Err(error) => Err(self.route.cut_or(escaped_report(error.into())).await),
+            Err(error) => Err(self.route.cut_or(cut_line(&error)).await),
         }
     }
 
@@ -368,24 +368,31 @@ impl<W: std::io::Write> PipeFailures<W> {
         if let Since::Warned = self.since.replace(Since::Warned) {
             return;
         }
+        let head = format!("warning: a connection to {} failed: ", self.machine);
+        let clause = failure.clause(columns(&head));
         let _ = writeln!(
             self.err.borrow_mut(),
-            "warning: a connection to {} failed: {failure}\n  Still listening for new connections.",
-            self.machine
+            "{head}{clause}\n  Still listening for new connections."
         );
     }
+}
+
+/// The line for an admission stream whose end failed: its cause chain, which can carry the peer's reason
+/// for a cut, escaped and cut to the room its `error:` line leaves.
+fn cut_line(error: &io::Error) -> eyre::Report {
+    eyre::eyre!("{}", peer_cell(&causes(error), head_room("")))
 }
 
 /// Why a pipe's Open failed, as its warning says it: one clause per kind of failure, the same on both
 /// paths, with the machine's text escaped as it is built.
 pub enum Failure {
     /// The machine answered and refused (`Unavailable`, `BadRequest`, or a kind this build cannot name):
-    /// the refusal as the wire words it, escaped.
+    /// the refusal as the wire words it, raw, so each place that prints it escapes it for that place.
     Refused(String),
     /// No session reached the machine, or the dial or the Open ran out of time.
     Unreachable,
-    /// The stream broke while it opened: with the wire's escaped detail through `serve`, and none by own
-    /// bind, where the cause can carry the host's reason for a cut.
+    /// The stream broke while it opened: with the wire's detail through `serve`, raw like a refusal's, and
+    /// none by own bind, where the cause can carry the host's reason for a cut.
     Interrupted(Option<String>),
     /// The lane, or `serve`, holds as many streams as it takes, here on this machine.
     Busy,
@@ -405,7 +412,7 @@ impl Failure {
             Unopened::Refused(OpenRefusal::Unreachable(_) | OpenRefusal::Timeout)
             | Unopened::Own(OpenError::Unreachable(_) | OpenError::Timeout) => Self::Unreachable,
             Unopened::Refused(OpenRefusal::Broken(detail)) => {
-                Self::Interrupted(Some(Escaped(detail.as_str()).to_string()))
+                Self::Interrupted(Some(detail.as_str().to_owned()))
             }
             Unopened::Refused(OpenRefusal::Busy) | Unopened::Own(OpenError::Busy) => Self::Busy,
             // A refusal this build cannot read, a stream that failed to open, a home that could not be
@@ -426,19 +433,29 @@ impl Failure {
 
     /// The machine's `refusal`.
     pub fn refused(refusal: &Refusal) -> Self {
-        Self::Refused(Escaped(&refusal.to_string()).to_string())
+        Self::Refused(refusal.to_string())
+    }
+
+    /// The clause as a line prints it after `taken` columns of its own words: a refusal's text goes last,
+    /// a peer cell cut to the room left before its `)`, so it never wraps onto a line of its own.
+    fn clause(&self, taken: usize) -> String {
+        match self {
+            Self::Refused(refusal) => beside(taken, "reached, but refused (", refusal, ")"),
+            Self::Unreachable => "unreachable".to_owned(),
+            Self::Interrupted(Some(detail)) => beside(taken, "interrupted (", detail, ")"),
+            Self::Interrupted(None) => "interrupted".to_owned(),
+            Self::Busy => "too many connections here".to_owned(),
+        }
     }
 }
 
+/// The clause as it reads at the start of a line: the machine's text escaped and cut as [`clause`]
+/// cuts it, so no way of printing a failure leaves it uncapped.
+///
+/// [`clause`]: Failure::clause
 impl core::fmt::Display for Failure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Refused(refusal) => write!(f, "reached, but refused ({refusal})"),
-            Self::Unreachable => f.write_str("unreachable"),
-            Self::Interrupted(Some(detail)) => write!(f, "interrupted ({detail})"),
-            Self::Interrupted(None) => f.write_str("interrupted"),
-            Self::Busy => f.write_str("too many connections here"),
-        }
+        f.write_str(&self.clause(0))
     }
 }
 
@@ -1470,7 +1487,8 @@ pub(crate) mod tests {
         let error = refused(Some(1)).await;
         assert_eq!(
             format!("{error:#}"),
-            format!("stream refused: unavailable: {ESCAPED}")
+            // Cut to the room its `error:` line leaves; the escape at the cut goes whole.
+            r"stream refused: unavailable: no\r\u{1b}[2Kforwarding 127.0.0.1:1 to x…"
         );
     }
 
@@ -1481,7 +1499,8 @@ pub(crate) mod tests {
         let error = refused(None).await;
         assert_eq!(
             format!("{error:#}"),
-            format!("stream refused: unavailable: {ESCAPED}")
+            // Cut to the room its `error:` line leaves; the escape at the cut goes whole.
+            r"stream refused: unavailable: no\r\u{1b}[2Kforwarding 127.0.0.1:1 to x…"
         );
     }
 
@@ -1813,7 +1832,8 @@ pub(crate) mod tests {
         .await;
         assert!(ended.is_none(), "still listening: {ended:?}");
         let down = crate::commands::through_serve::tests::warning(
-            "reached, but refused (unavailable: down)",
+            // The refusal is cut to the room the line leaves, so the warning stays inside 80 columns.
+            "reached, but refused (unavailable: d…)",
         );
         assert_eq!(err, format!("{down}{down}"));
     }
@@ -2661,5 +2681,40 @@ pub(crate) mod tests {
             .read_to_end(&mut got)
             .expect("the reader saw no end while another descriptor named the socket");
         assert_eq!(got, b"down");
+    }
+
+    /// A refusal in wide glyphs is cut to the room the warning's line leaves, counted at two columns for
+    /// every scalar that is not ASCII, so it cannot wrap into a forged line.
+    #[test]
+    fn a_wide_refusal_is_cut_to_its_room() {
+        // Wide glyphs to fill the room twice over, then a whole row shaped like swoosh's own.
+        let forged = "error: me/boss refused ssh";
+        let wide = format!("{}{forged}", "\u{6587}\u{4ef6}".repeat(40));
+        let head = "warning: a connection to me/nas failed: ";
+        for failure in [
+            super::Failure::Refused(wide.clone()),
+            super::Failure::Interrupted(Some(wide.clone())),
+        ] {
+            let line = format!("{head}{}", failure.clause(swoosh::escape::columns(head)));
+            assert!(
+                crate::commands::through_serve::tests::columns_at_most(&line) < 80,
+                "{line}"
+            );
+            assert!(!line.contains(forged), "{line}");
+        }
+    }
+
+    /// An admission stream whose end failed with the peer's reason in wide glyphs: the `error:` line is
+    /// cut to its room, so the reason cannot wrap into a forged line.
+    #[test]
+    fn a_wide_cut_at_admission_is_cut_to_its_room() {
+        let forged = "error: me/boss refused ssh";
+        let wide = format!("{}{forged}", "\u{6587}\u{4ef6}".repeat(40));
+        let line = format!("error: {:#}", super::cut_line(&io::Error::other(wide)));
+        assert!(
+            crate::commands::through_serve::tests::columns_at_most(&line) < 80,
+            "{line}"
+        );
+        assert!(!line.contains(forged), "{line}");
     }
 }

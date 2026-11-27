@@ -3,7 +3,7 @@
 //! own way only where the table of lines says so.
 
 use bifrost::{NodeId, Refusal};
-use swoosh::escape::{Escaped, causes, escaped_report};
+use swoosh::escape::{causes, head_room, peer_cell};
 use swoosh::node_client::UidSocket;
 use swoosh::peer::Machine;
 use swoosh::peers::OpenError;
@@ -91,7 +91,7 @@ impl Route<'_> {
             Unopened::Own(error) => peer_error(&error),
             Unopened::Home(report) => peer_error(report.as_ref()),
             // The resident's own outcomes, which a run that bound its own never meets.
-            Unopened::ServeError(reason) => escaped_report(eyre::eyre!(reason)),
+            Unopened::ServeError(reason) => eyre::eyre!("{}", peer_cell(&reason, head_room(""))),
             Unopened::Skew => Skew.into(),
             Unopened::Malformed(malformed) => malformed.into(),
             Unopened::ServeGone | Unopened::Control(_) => ConnectionLost.into(),
@@ -149,9 +149,14 @@ impl Route<'_> {
     }
 }
 
-/// A failed stream or transfer as a line prints it: the cause chain, `outer: inner`, through the shared
-/// escaper. The chain can carry the peer's text (a refusal detail, the reason it gave for closing), so it
-/// is escaped here, where it enters, and not on a skip line, which would escape a path it names twice.
+/// A failed stream or transfer as a line prints it: the cause chain, `outer: inner`, escaped and cut to
+/// the room an `error:` line leaves. The chain can carry the peer's text (a refusal detail, the reason it
+/// gave for closing), so it is escaped here, where it enters, and not on a skip line, which would escape
+/// a path it names twice.
 pub fn peer_error(error: &dyn core::error::Error) -> eyre::Report {
-    eyre::eyre!("{}", Escaped(&causes(error)))
+    eyre::eyre!("{}", peer_cell(&causes(error), head_room("")))
 }
+
+#[cfg(test)]
+#[path = "route_tests.rs"]
+mod route_tests;

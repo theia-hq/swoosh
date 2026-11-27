@@ -14,7 +14,7 @@ use nauthy::{Link, Service};
 use tightbeam::tunnel::{self, Connector};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-use crate::escape::{Escaped, causes, escaped_report};
+use crate::escape::{Escaped, beside, causes, escaped_report};
 use crate::peer::{Kind, Machine};
 use crate::peers::{Hints, OpenError};
 use crate::serve::CONTROL_SERVE_SERVICE;
@@ -51,13 +51,14 @@ pub fn open_failed(machine: &Machine, error: OpenError, bound: &transport::Bound
 }
 
 /// The error for a machine the dial did not reach: the connect's cause chain under `could not reach
-/// <machine>`. The chain can carry the peer's text (the reason it gave for closing), so it prints through
-/// the escaper; the label is this machine's own word for the peer and prints as it is.
+/// <machine>`. The chain can carry the peer's text (the reason it gave for closing), so it prints as a peer
+/// cell, escaped and cut to the room the `error:` line leaves; the label is this machine's own word for the
+/// peer and prints as it is.
 fn unreached(machine: &Machine, error: eyre::Report) -> eyre::Report {
+    let words = format!("could not reach {}: ", machine.label());
     eyre::eyre!(
-        "could not reach {}: {}",
-        machine.label(),
-        escaped_report(error)
+        "{}",
+        beside("error: ".len(), &words, &format!("{error:#}"), "")
     )
 }
 
@@ -160,22 +161,33 @@ async fn listed(
     }
 }
 
-/// The cause a list that is not one gives: the machine answered the list request with anything but
-/// [`Answer::Done`], or sent a list that does not decode. Whatever it sent stays in the log, since it is the
-/// machine's own bytes.
-const UNKNOWN_LIST_REPLY: &str = "it sent an unknown reply to the list request";
-
-/// The cause a list request that got no answer at all gives: the machine ended its side cleanly before it
-/// sent one. It sent nothing, so nothing it sent was unknown.
-const LIST_ENDED: &str = "it ended the list request without an answer";
+/// How a list request failed in a way swoosh tells in its own words, apart from a transport's cause chain,
+/// which can carry the peer's text: a caller that prints it knows it holds no text of the machine's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ListFailed {
+    /// The machine answered the list request with anything but [`Answer::Done`], or sent a list that does
+    /// not decode. Whatever it sent stays in the log, since it is the machine's own bytes.
+    #[error("it sent an unknown reply to the list request")]
+    UnknownReply,
+    /// The machine ended its side cleanly before it answered. It sent nothing, so nothing it sent was
+    /// unknown.
+    #[error("it ended the list request without an answer")]
+    Ended,
+    /// The machine sent more than a list can be, past the wire's own bound.
+    #[error(
+        "it sent more than a list of services can be, so the read stopped at {} bytes",
+        tunnel::MAX_CATALOG_BLOB
+    )]
+    TooLong,
+}
 
 /// Ask the machine on an opened `control.serve` stream for its list of services: write
 /// [`Request::List`] and end this side, then read the one answer byte and, after [`Answer::Done`], the
 /// list. The caller bounds the whole exchange.
 ///
 /// This side is ended, not dropped, since through `serve` a half dropped unended reaches the node as a
-/// reset. A transport failure keeps its cause; a clean end before any answer is [`LIST_ENDED`]; an answer
-/// that is not `Done` and a list that does not decode are both [`UNKNOWN_LIST_REPLY`]. A node answers a list `Done` whether or not
+/// reset. A transport failure keeps its cause; a clean end before any answer is [`ListFailed::Ended`]; an
+/// answer that is not `Done` and a list that does not decode are both [`ListFailed::UnknownReply`]. A node answers a list `Done` whether or not
 /// its first round has ended, so any other answer is one no conforming node gives.
 pub async fn ask_list(
     mut writer: impl AsyncWrite + Unpin,
@@ -193,7 +205,7 @@ pub async fn ask_list(
         // A conforming node resets a stream it does not answer, so a clean end is no answer at all.
         Err(error) if error.kind() == tokio::io::ErrorKind::UnexpectedEof => {
             tracing::debug!("the list request's stream ended before an answer");
-            eyre::bail!(LIST_ENDED);
+            return Err(ListFailed::Ended.into());
         }
         Err(error) => return Err(failed(error)),
     }
@@ -202,7 +214,7 @@ pub async fn ask_list(
             answer = answer[0],
             "the list request was answered with another code"
         );
-        eyre::bail!(UNKNOWN_LIST_REPLY);
+        return Err(ListFailed::UnknownReply.into());
     }
     read_catalog(reader).await
 }
@@ -223,14 +235,11 @@ async fn read_catalog(reader: impl AsyncRead + Unpin) -> eyre::Result<tunnel::Se
         .await
         .map_err(|error| eyre::eyre!("{}", causes(&error)))?;
     if bytes.len() as u64 > tunnel::MAX_CATALOG_BLOB {
-        eyre::bail!(
-            "it sent more than a list of services can be, so the read stopped at {} bytes",
-            tunnel::MAX_CATALOG_BLOB
-        );
+        return Err(ListFailed::TooLong.into());
     }
     tunnel::ServiceCatalog::decode(&bytes).map_err(|error| {
         tracing::debug!(%error, "the list did not decode");
-        eyre::eyre!(UNKNOWN_LIST_REPLY)
+        ListFailed::UnknownReply.into()
     })
 }
 

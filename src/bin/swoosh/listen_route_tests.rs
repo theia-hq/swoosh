@@ -257,7 +257,7 @@ pub(crate) fn table() -> [(Meet, Then); 23] {
                     PeerRefusal::Unavailable(down()),
                 )))
             },
-            Then::Warns("reached, but refused (unavailable: down)"),
+            Then::Warns("reached, but refused (unavailable: d…)"),
         ),
         (
             || {
@@ -265,7 +265,7 @@ pub(crate) fn table() -> [(Meet, Then); 23] {
                     PeerRefusal::BadRequest(down()),
                 )))
             },
-            Then::Warns("reached, but refused (bad request: down)"),
+            Then::Warns("reached, but refused (bad request: d…)"),
         ),
         (
             || Some(Unopened::Own(OpenError::Busy)),

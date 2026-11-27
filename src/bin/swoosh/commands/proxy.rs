@@ -360,7 +360,7 @@ impl Client<'_> {
                 // failed open.
                 let refused = match &failure {
                     Some(Failure::Refused(refusal)) => {
-                        Some(format!("proxy service refused: {refusal}"))
+                        Some(format!("proxy service refused: {}", Escaped(refusal)))
                     }
                     Some(Failure::Unreachable | Failure::Interrupted(_) | Failure::Busy) | None => {
                         None

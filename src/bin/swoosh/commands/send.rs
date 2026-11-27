@@ -22,7 +22,7 @@ use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::Service;
-use swoosh::escape::{Escaped, EscapedPath};
+use swoosh::escape::{DETAIL_ROOM, EscapedPath, LINE_WIDTH, PEER_FLOOR, columns, peer_cell, room};
 use swoosh::learn::Admitted;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::Hints;
@@ -206,7 +206,7 @@ impl SendCmd {
         while let Some(result) = sending.next().await {
             match result {
                 Ok((name, len)) => {
-                    writeln!(out, "sent {} ({len} bytes)", Escaped(&name))?;
+                    writeln!(out, "{}", sent_line(&name, len))?;
                     sent.set(true);
                 }
                 // No later file would be admitted: the run ends here with one line, and the files still
@@ -223,7 +223,7 @@ impl SendCmd {
                         drop(sending);
                         return Err(line);
                     }
-                    writeln!(err, "skip {}: {line:#}", Escaped(&name))?;
+                    writeln!(err, "{}", skip_line(&name, &format!("{line:#}")))?;
                     failures += 1;
                 }
                 // `serve` going cuts every stream it carries, so the run ends with its line once; a cut
@@ -234,11 +234,11 @@ impl SendCmd {
                         drop(sending);
                         return Err(left_unsent(line, sent));
                     }
-                    writeln!(err, "skip {}: {error:#}", Escaped(&name))?;
+                    writeln!(err, "{}", skip_line(&name, &format!("{error:#}")))?;
                     failures += 1;
                 }
                 Err((name, Unsent::Failed(error))) => {
-                    writeln!(err, "skip {}: {error:#}", Escaped(&name))?;
+                    writeln!(err, "{}", skip_line(&name, &format!("{error:#}")))?;
                     failures += 1;
                 }
             }
@@ -251,6 +251,28 @@ impl SendCmd {
             eyre::bail!("{failures} item(s) could not be sent");
         }
         Ok(())
+    }
+}
+
+/// The line for a file that was sent: `sent photo.bin (30000000 bytes)`. The name is the file's as found,
+/// which whoever made the directory chose, so it is a cell cut to the room the rest of the line leaves,
+/// and never under [`PEER_FLOOR`]: past the edge only swoosh's own words can wrap.
+fn sent_line(name: &str, len: u64) -> String {
+    let rest = format!(" ({len} bytes)");
+    let room = room("sent ".len() + columns(&rest)).max(PEER_FLOOR);
+    format!("sent {}{rest}", peer_cell(name, room))
+}
+
+/// The line for a file that was not sent: `skip <name>: <reason>`. The name is cut as a cell, and the
+/// reason, already escaped and cut where it entered, stays beside it when its first line fits, else takes
+/// a detail line of its own, so neither can wrap onto a line that reads as a row.
+fn skip_line(name: &str, reason: &str) -> String {
+    let head = format!("skip {}:", peer_cell(name, DETAIL_ROOM - "skip :".len()));
+    let first = reason.lines().next().unwrap_or_default();
+    if columns(&head) + " ".len() + columns(first) < LINE_WIDTH {
+        format!("{head} {reason}")
+    } else {
+        format!("{head}\n  {reason}")
     }
 }
 
