@@ -1,4 +1,4 @@
-use super::{Rule, read};
+use super::{Rule, holds, read};
 
 /// The ruled screens, verbatim, each under its name. A change to one of them is a change here.
 const SIGNED: &[(&str, &str)] = &[
@@ -308,4 +308,34 @@ fn each_breach_is_caught_by_its_predicate() {
     assert!(read("To make this machine one\nthat keeps your root:\n").is_ok());
     assert!(read("Invite: ").is_ok());
     assert!(read("error: Touch ID is not available").is_ok());
+}
+
+/// What a run printed, as a test captures it, is held line by line in its place: a head's case and period
+/// and a sentence's end are read on captured bytes the same as on a written screen, and a clean capture of
+/// a result, a refusal and a command holds.
+#[test]
+fn holds_reads_captured_output() {
+    let clean = "Sent a.txt to me/laptop.
+error: could not reach me/laptop
+  To try again:
+    swoosh send me/laptop a.txt
+";
+    assert!(holds(clean).is_ok(), "{clean}");
+    for (captured, rule) in [
+        (
+            "Sent a.txt to me/laptop.\nerror: Could not reach me/laptop\n",
+            Rule::HeadCase,
+        ),
+        (
+            "Sent a.txt to me/laptop.\nerror: could not reach me/laptop.\n",
+            Rule::HeadPeriod,
+        ),
+        (
+            "error: could not reach me/laptop\n  On me/laptop, run serve\n",
+            Rule::SentenceEnd,
+        ),
+    ] {
+        let caught = holds(captured).err().map(|breach| breach.rule);
+        assert_eq!(caught, Some(rule), "{captured}");
+    }
 }
