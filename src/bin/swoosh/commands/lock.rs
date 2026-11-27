@@ -335,6 +335,36 @@ fn steps(lead: &'static str, commands: &[&'static str]) -> Block<'static> {
         })
 }
 
+/// What this machine's key opens with, as `status`'s `key lock:` row records it: a passphrase without its
+/// article, Touch ID with how it reads here where that is not live. The bare read's first sentence reads the
+/// same [`Locks`].
+pub(crate) fn key_locks(locks: Locks) -> &'static str {
+    match locks {
+        Locks::None => "none",
+        Locks::Passphrase => "passphrase",
+        Locks::TouchId(Some(Health::Live)) => "Touch ID, on this Mac only",
+        Locks::TouchId(Some(Health::Dead)) => "Touch ID (does not open on this Mac now)",
+        Locks::TouchId(Some(Health::Unchecked)) => "Touch ID (cannot be checked now)",
+        Locks::TouchId(None) => "Touch ID (opens only on the Mac that set it)",
+        Locks::Both(Some(Health::Live)) => "Touch ID or a passphrase",
+        Locks::Both(Some(Health::Dead)) => {
+            "Touch ID (does not open on this Mac now) or a passphrase"
+        }
+        Locks::Both(Some(Health::Unchecked)) => "Touch ID (cannot be checked now) or a passphrase",
+        Locks::Both(None) => "Touch ID (opens only on the Mac that set it) or a passphrase",
+    }
+}
+
+/// What a root opens with, as `status`'s root line says it after `locked with`: a root always keeps its
+/// passphrase, so a Touch ID lock reads as beside it.
+pub(crate) fn root_locks(locks: Locks) -> &'static str {
+    match locks {
+        // A sealed root file read here holds its passphrase; a plain one is never read as a root.
+        Locks::None | Locks::Passphrase => "a passphrase",
+        Locks::TouchId(health) | Locks::Both(health) => key_locks(Locks::Both(health)),
+    }
+}
+
 /// A refusal whose key file this command could not confirm, or whose file is gone, drawn as a screen on
 /// `err`, then [`Reported`] for the exit 1; any other is returned as it is, for `main` to print.
 fn refused(report: eyre::Report, err: &mut impl Paint) -> eyre::Report {
