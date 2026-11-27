@@ -459,3 +459,31 @@ fn one_run_styles_each_stream_by_its_own_handle() {
         "{styled_err:?}"
     );
 }
+
+/// Bare `swoosh lock` through the real binary is a read: on a home never made it exits 0, prints the no-key
+/// screen on stdout and nothing on stderr, and leaves the home unmade, so it took no `home.lock` and made no
+/// key. Red when it prompts, writes, or exits non-zero.
+#[test]
+fn bare_lock_on_an_empty_home_is_a_read() {
+    let home = scratch("bare-lock");
+    let _ = std::fs::remove_dir_all(&home);
+    let out = swoosh(&["--home", home.to_str().unwrap(), "lock"], None);
+    let made = home.exists();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "");
+    #[cfg(target_os = "macos")]
+    let screen = "This machine has no key yet.\n\n\
+                  locks\n  \
+                  touch-id     a touch on this Mac's sensor; opens on this Mac only\n  \
+                  passphrase   typed at each use; a copy opens on any machine\n\n\
+                  To make the key with one of them:\n  swoosh lock touch-id\n  swoosh lock passphrase\n";
+    #[cfg(not(target_os = "macos"))]
+    let screen = "This machine has no key yet.\n\n\
+                  locks\n  \
+                  passphrase   typed at each use; a copy opens on any machine\n\n\
+                  To make the key with a passphrase:\n  swoosh lock passphrase\n";
+    assert_eq!(text(&out.stdout), screen);
+    assert!(!made, "the home was made");
+}

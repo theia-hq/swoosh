@@ -497,7 +497,8 @@ async fn piped_join_prints_no_key_lines() {
     let home = scratch("piped");
     let ran = join(&home, &for_me()).await;
     ran.joined();
-    assert!(!ran.err.contains("This machine's key"), "{}", ran.err);
+    // The key-made lines; the unlocked key's own line names the key too, and stays.
+    assert!(!ran.err.contains("This machine's key:"), "{}", ran.err);
 }
 
 // --- what the invite's hints can and cannot do ---
@@ -745,10 +746,33 @@ async fn an_offer_after_join_switch_under_serve_folds_the_new_roots_update() {
 
 // --- what it prints ---
 
+/// The unlocked key's lines on a build with no enclave: the passphrase's step alone, since `touch-id` is no
+/// value there. Red when Touch ID's step prints there.
+#[test]
+fn an_unlocked_key_off_a_mac_names_the_passphrase_alone() {
+    let mut out = Vec::new();
+    crate::screen::Screen::default()
+        .block(super::unlocked(crate::commands::lock::Enclave::Absent))
+        .write(&mut out)
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "This machine's key has no lock.\nTo lock it with a passphrase:\n  swoosh lock passphrase\n"
+    );
+}
+
+/// A first `join` on an unlocked key names a command per lock this build can put on, each alone on its line,
+/// never a bare `swoosh lock`, which only reads; a second says nothing of it. Red when a byte differs.
 #[tokio::test]
 async fn join_prints_the_lock_line_once() {
     let home = scratch("lock-line");
-    let line = "this machine's key is not locked; swoosh lock locks it.";
+    #[cfg(target_os = "macos")]
+    let line = "\nThis machine's key has no lock.\n\
+                To lock it with Touch ID:\n  swoosh lock touch-id\n\
+                To lock it with a passphrase:\n  swoosh lock passphrase\n";
+    #[cfg(not(target_os = "macos"))]
+    let line = "\nThis machine's key has no lock.\n\
+                To lock it with a passphrase:\n  swoosh lock passphrase\n";
     let first = join(&home, &bound(ROOT, node(OWN), "laptop", now() + 30 * DAY)).await;
     first.joined();
     assert!(first.err.contains(line), "{}", first.err);
@@ -1115,7 +1139,7 @@ async fn join_refuses_a_locked_key_over_pipes() {
     // At a terminal it joins, and says nothing about locking a key that is locked.
     let ran = join(&home, &for_me()).await;
     ran.joined();
-    assert!(!ran.err.contains("is not locked"), "{}", ran.err);
+    assert!(!ran.err.contains("has no lock"), "{}", ran.err);
 }
 
 #[tokio::test]

@@ -24,11 +24,30 @@ fn parse(args: &[&str]) -> Result<LockCmd, clap::Error> {
     }
 }
 
-/// Run `swoosh lock <args>` on `home` with `prompt`: the result, and stderr.
+/// Run `swoosh lock <args>` on `home` with `prompt`: the result, and stderr. An act prints nothing on
+/// stdout, which is the read's.
 async fn lock(home: &Home, args: &[&str], prompt: &mut Counting) -> (eyre::Result<()>, String) {
-    let mut err = Vec::new();
-    let result = parse(args).unwrap().lock(home, prompt, &mut err).await;
-    (result, String::from_utf8(err).unwrap())
+    let (result, out, err) = run(home, args, prompt).await;
+    assert_eq!(out, "", "an act prints nothing on stdout");
+    (result, err)
+}
+
+/// Run `swoosh lock <args>` on `home` with `prompt`: the result, stdout and stderr.
+async fn run(
+    home: &Home,
+    args: &[&str],
+    prompt: &mut Counting,
+) -> (eyre::Result<()>, String, String) {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let result = parse(args)
+        .unwrap()
+        .lock(home, prompt, &mut out, &mut err)
+        .await;
+    (
+        result,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
 }
 
 /// The locks on this machine's key file: none for a plain one.
@@ -90,7 +109,7 @@ fn lock_help_lists_exactly_the_lockmethod_values() {
 async fn lock_puts_a_passphrase_on_a_plain_key() {
     let home = scratch("lock-sets");
     let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
-    let (result, err) = lock(&home, &[], &mut Counting::new([LONG])).await;
+    let (result, err) = lock(&home, &["passphrase"], &mut Counting::new([LONG])).await;
     result.unwrap();
     assert_eq!(locks(&home), [Method::Passphrase]);
     assert_eq!(
@@ -110,20 +129,20 @@ async fn lock_puts_a_passphrase_on_a_plain_key() {
 #[tokio::test]
 async fn lock_changes_an_existing_one_after_the_current_one() {
     let home = scratch("lock-changes");
-    lock(&home, &[], &mut Counting::new([LONG]))
+    lock(&home, &["passphrase"], &mut Counting::new([LONG]))
         .await
         .0
         .unwrap();
     let before = snapshot(home.dir());
 
     let mut prompt = Counting::new(["wrong one", "wrong two", "wrong three", OTHER]);
-    let (refused, _) = lock(&home, &[], &mut prompt).await;
+    let (refused, _) = lock(&home, &["passphrase"], &mut prompt).await;
     let refusal = format!("{:#}", refused.unwrap_err());
     assert_eq!(refusal, "that passphrase does not open this machine's key.");
     assert_eq!(prompt.events(), 3, "no new passphrase is asked");
     assert!(snapshot(home.dir()) == before, "nothing changed");
 
-    let (result, err) = lock(&home, &[], &mut Counting::new([LONG, OTHER])).await;
+    let (result, err) = lock(&home, &["passphrase"], &mut Counting::new([LONG, OTHER])).await;
     result.unwrap();
     assert_eq!(
         err,
@@ -140,21 +159,26 @@ async fn lock_changes_an_existing_one_after_the_current_one() {
 #[tokio::test]
 async fn lock_remove_needs_the_current_one() {
     let home = scratch("lock-remove");
-    lock(&home, &[], &mut Counting::new([LONG]))
+    lock(&home, &["passphrase"], &mut Counting::new([LONG]))
         .await
         .0
         .unwrap();
     let before = snapshot(home.dir());
     let (refused, _) = lock(
         &home,
-        &["--remove"],
+        &["passphrase", "--remove"],
         &mut Counting::new(["no", "nope", "never"]),
     )
     .await;
     assert!(refused.is_err());
     assert!(snapshot(home.dir()) == before, "nothing removed");
 
-    let (result, err) = lock(&home, &["--remove"], &mut Counting::new([LONG])).await;
+    let (result, err) = lock(
+        &home,
+        &["passphrase", "--remove"],
+        &mut Counting::new([LONG]),
+    )
+    .await;
     result.unwrap();
     assert!(locks(&home).is_empty(), "plain now");
     assert_eq!(
@@ -169,7 +193,7 @@ async fn lock_remove_needs_the_current_one() {
 async fn lock_remove_on_an_unlocked_key_says_so_and_exits_0() {
     let home = scratch("lock-remove-plain");
     let mut prompt = Counting::refusing();
-    let (result, err) = lock(&home, &["--remove"], &mut prompt).await;
+    let (result, err) = lock(&home, &["passphrase", "--remove"], &mut prompt).await;
     result.unwrap();
     assert_eq!(
         err,
@@ -178,12 +202,18 @@ async fn lock_remove_on_an_unlocked_key_says_so_and_exits_0() {
     assert_eq!(prompt.events(), 0);
 }
 
-/// A bare `lock` is `lock passphrase`. Red when a method is required.
+/// A bare `lock` names no method, and so is the read; a bare `lock --remove` names no lock to take off, so it
+/// is clap's own usage error, exit 2, never a guess. Red when it parses, or picks a method.
 #[test]
-fn lock_with_no_method_uses_passphrase() {
+fn lock_remove_needs_a_method() {
     let bare = parse(&[]).unwrap();
-    assert!(matches!(bare.method, LockMethod::Passphrase));
-    assert!(!bare.remove);
+    assert!(bare.method.is_none() && !bare.remove);
+    let refused = parse(&["--remove"]).expect_err("--remove names no lock");
+    assert_eq!(refused.exit_code(), 2, "{refused}");
+    assert_eq!(
+        refused.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
 }
 
 /// `lock` is this machine's key only: `--root` is a usage error. Red when `lock` keeps a `--root`.
@@ -200,7 +230,7 @@ async fn lock_refuses_a_passphrase_below_the_minimum() {
     let home = scratch("lock-short");
     let before = snapshot(home.dir());
     let mut prompt = Counting::new(["fourteen chars", "short", "tiny"]);
-    let (refused, _) = lock(&home, &[], &mut prompt).await;
+    let (refused, _) = lock(&home, &["passphrase"], &mut prompt).await;
     assert_eq!(
         format!("{:#}", refused.unwrap_err()),
         swoosh::passphrase::TOO_SHORT_LAST
@@ -214,12 +244,12 @@ async fn lock_refuses_a_passphrase_below_the_minimum() {
 #[tokio::test]
 async fn no_prompt_or_passphrase_refusal_names_a_key_file() {
     let home = scratch("lock-no-path");
-    lock(&home, &[], &mut Counting::new([LONG]))
+    lock(&home, &["passphrase"], &mut Counting::new([LONG]))
         .await
         .0
         .unwrap();
     let home_dir = home.dir().to_str().unwrap().to_owned();
-    for args in [&[][..], &["--remove"][..]] {
+    for args in [&["passphrase"][..], &["passphrase", "--remove"][..]] {
         let (refused, err) = lock(&home, args, &mut Counting::new(["a", "b", "c"])).await;
         let refusal = format!("{:#}", refused.unwrap_err());
         assert!(!refusal.contains(&home_dir), "{refusal}");
@@ -267,22 +297,22 @@ impl swoosh::passphrase::Prompt for NoTerminal {
 async fn lock_at_no_terminal_says_it_needs_one() {
     let home = scratch("lock-no-tty");
     let mut err = Vec::new();
-    let set = parse(&[])
+    let set = parse(&["passphrase"])
         .unwrap()
-        .lock(&home, &mut NoTerminal, &mut err)
+        .lock(&home, &mut NoTerminal, &mut Vec::new(), &mut err)
         .await;
     assert_eq!(
         format!("{:#}", set.unwrap_err()),
         "setting a passphrase on this machine's key needs a terminal: over swoosh ssh, add -t after --"
     );
-    lock(&home, &[], &mut Counting::new([LONG]))
+    lock(&home, &["passphrase"], &mut Counting::new([LONG]))
         .await
         .0
         .unwrap();
-    for args in [&[][..], &["--remove"][..]] {
+    for args in [&["passphrase"][..], &["passphrase", "--remove"][..]] {
         let refused = parse(args)
             .unwrap()
-            .lock(&home, &mut NoTerminal, &mut Vec::new())
+            .lock(&home, &mut NoTerminal, &mut Vec::new(), &mut Vec::new())
             .await;
         let refusal = format!("{:#}", refused.unwrap_err());
         assert_eq!(
@@ -392,7 +422,7 @@ async fn an_added_lock_prints_its_result_screen() {
     #[cfg(target_os = "macos")]
     for root_kept in [false, true] {
         let home = scratch(&format!("lock-added-touch-id-{root_kept}"));
-        lock(&home, &[], &mut Counting::new([LONG]))
+        lock(&home, &["passphrase"], &mut Counting::new([LONG]))
             .await
             .0
             .unwrap();
@@ -452,7 +482,7 @@ async fn touch_id_alone_beside_a_root_names_the_passphrase_command() {
     assert!(snapshot(home.dir()) == before, "nothing written");
 }
 
-/// `lock --remove`'s help says it removes the lock named, whichever that is.
+/// `lock --remove`'s help says it takes off the lock named, whichever that is.
 #[test]
 fn lock_remove_help_names_this_lock() {
     let mut cli = Cli::command();
@@ -462,7 +492,11 @@ fn lock_remove_help_names_this_lock() {
         .unwrap()
         .render_help()
         .to_string();
-    assert!(help.contains("remove this lock instead"), "{help}");
+    assert!(help.contains("take this lock off"), "{help}");
+    assert!(
+        help.contains("the lock to add or, with --remove, take off; omit to show the locks"),
+        "{help}"
+    );
 }
 
 /// What a write that landed and could not be read back prints, under the act's own first line at `{act}`.
@@ -685,7 +719,7 @@ fn each_result_prints_its_ruled_lines() {
 #[tokio::test]
 async fn a_removal_down_to_no_lock_says_so() {
     let home = scratch("lock-remove-last-passphrase");
-    lock(&home, &[], &mut Counting::new([LONG]))
+    lock(&home, &["passphrase"], &mut Counting::new([LONG]))
         .await
         .0
         .unwrap();
@@ -819,4 +853,408 @@ fn a_file_this_command_cannot_confirm_refuses_as_a_screen() {
     let passed = super::refused(eyre::eyre!("another refusal"), &mut err);
     assert_eq!(format!("{passed:#}"), "another refusal");
     assert!(err.is_empty(), "main prints it");
+}
+
+// --- the bare read ---
+
+/// The read's `locks` rows for a key with no lock: both methods off.
+const ROWS_OFF: &str = "\
+locks
+  touch-id     off   a touch on this Mac's sensor; opens on this Mac only
+  passphrase   off   typed at each use; a copy opens on any machine
+";
+
+/// What the read prints on a home with no key, on a build with an enclave.
+const NO_KEY: &str = "\
+This machine has no key yet.
+
+locks
+  touch-id     a touch on this Mac's sensor; opens on this Mac only
+  passphrase   typed at each use; a copy opens on any machine
+
+To make the key with one of them:
+  swoosh lock touch-id
+  swoosh lock passphrase
+";
+
+/// What the read prints on a home with no key, on a build with no enclave.
+const NO_KEY_ABSENT: &str = "\
+This machine has no key yet.
+
+locks
+  passphrase   typed at each use; a copy opens on any machine
+
+To make the key with a passphrase:
+  swoosh lock passphrase
+";
+
+/// What the read prints on a home with no key, on this build.
+#[cfg(target_os = "macos")]
+const NO_KEY_BUILT: &str = NO_KEY;
+#[cfg(not(target_os = "macos"))]
+const NO_KEY_BUILT: &str = NO_KEY_ABSENT;
+
+/// The read's every state, byte for byte, through the screen law: the key's locks as `locks` and a kept root
+/// as `root`, on a build with and without an enclave. Every step is a command the state would not refuse.
+/// Red when a byte differs from the ruled words, or a `--remove` or `lock passphrase` that refuses is offered.
+#[test]
+fn bare_lock_reads_each_state() {
+    use keystore::Health::{Dead, Live, Unchecked};
+    use swoosh::identity::{Locks, Root};
+
+    use super::Enclave::{Absent, Here};
+
+    let plain = format!(
+        "This machine's key has no lock.\n\n{ROWS_OFF}\n\
+         To lock it with one of them:\n  swoosh lock touch-id\n  swoosh lock passphrase\n"
+    );
+    let passphrase = "This machine's key opens with a passphrase.\n\n\
+                      locks\n  \
+                      touch-id     off   a touch on this Mac's sensor; opens on this Mac only\n  \
+                      passphrase   on    typed at each use; a copy opens on any machine\n\n\
+                      To add Touch ID beside the passphrase:\n  swoosh lock touch-id\n";
+    let alone = |title: &str, state: &str, step: &str| {
+        format!(
+            "{title}\n\nlocks\n  touch-id     on    {state}\n  \
+             passphrase   off   typed at each use; a copy opens on any machine\n{step}"
+        )
+    };
+    let both = |title: &str, state: &str, step: &str| {
+        format!(
+            "{title}\n\nlocks\n  touch-id     on    {state}\n  \
+             passphrase   on    typed at each use; a copy opens on any machine\n\n{step}"
+        )
+    };
+    let gloss = "a touch on this Mac's sensor; opens on this Mac only";
+    let either = "This machine's key opens with Touch ID or a passphrase.";
+    let a_passphrase = "This machine's key opens with a passphrase.";
+    let take_one =
+        "To take one off:\n  swoosh lock touch-id --remove\n  swoosh lock passphrase --remove\n";
+    let take_touch_id = "To take Touch ID off:\n  swoosh lock touch-id --remove\n";
+    let change = "To change the passphrase:\n  swoosh lock passphrase\n";
+    let cases: Vec<(Option<Locks>, Root, super::Enclave, String)> = vec![
+        (None, Root::NotKept, Here, NO_KEY.to_owned()),
+        (None, Root::Kept, Here, NO_KEY.to_owned()),
+        (None, Root::NotKept, Absent, NO_KEY_ABSENT.to_owned()),
+        (Some(Locks::None), Root::NotKept, Here, plain),
+        (
+            Some(Locks::None),
+            Root::NotKept,
+            Absent,
+            "This machine's key has no lock.\n\n\
+             locks\n  passphrase   off   typed at each use; a copy opens on any machine\n\n\
+             To lock it with a passphrase:\n  swoosh lock passphrase\n"
+                .to_owned(),
+        ),
+        (
+            Some(Locks::Passphrase),
+            Root::NotKept,
+            Here,
+            passphrase.to_owned(),
+        ),
+        (
+            Some(Locks::Passphrase),
+            Root::Kept,
+            Here,
+            passphrase.to_owned(),
+        ),
+        (
+            Some(Locks::Passphrase),
+            Root::NotKept,
+            Absent,
+            format!(
+                "{a_passphrase}\n\n\
+                 locks\n  passphrase   on    typed at each use; a copy opens on any machine\n\n{change}"
+            ),
+        ),
+        (
+            Some(Locks::TouchId(Some(Live))),
+            Root::NotKept,
+            Here,
+            alone(
+                "This machine's key opens with Touch ID, on this Mac only.",
+                gloss,
+                "\nTo add a passphrase beside Touch ID:\n  swoosh lock passphrase\n",
+            ),
+        ),
+        (
+            Some(Locks::TouchId(Some(Live))),
+            Root::Kept,
+            Here,
+            alone(
+                "This machine's key opens with Touch ID, on this Mac only.",
+                gloss,
+                "\nTo add a passphrase beside Touch ID:\n  swoosh lock passphrase\n",
+            ),
+        ),
+        (
+            Some(Locks::TouchId(Some(Dead))),
+            Root::NotKept,
+            Here,
+            alone(
+                "This machine's key does not open on this Mac now.",
+                "does not open on this Mac now",
+                "\nswoosh status says how to mend it.\n",
+            ),
+        ),
+        (
+            Some(Locks::TouchId(Some(Unchecked))),
+            Root::NotKept,
+            Here,
+            alone(
+                "Touch ID on this machine's key cannot be checked now.",
+                "cannot be checked now",
+                "",
+            ),
+        ),
+        (
+            Some(Locks::TouchId(None)),
+            Root::NotKept,
+            Absent,
+            alone(
+                "Touch ID opens this machine's key only on the Mac that set it.",
+                "opens only on the Mac that set it",
+                "",
+            ),
+        ),
+        (
+            Some(Locks::Both(Some(Live))),
+            Root::NotKept,
+            Here,
+            both(either, gloss, take_one),
+        ),
+        (
+            Some(Locks::Both(Some(Live))),
+            Root::Kept,
+            Here,
+            both(either, gloss, take_touch_id),
+        ),
+        (
+            Some(Locks::Both(Some(Dead))),
+            Root::NotKept,
+            Here,
+            both(a_passphrase, "does not open on this Mac now", take_touch_id),
+        ),
+        (
+            Some(Locks::Both(Some(Unchecked))),
+            Root::NotKept,
+            Here,
+            both(a_passphrase, "cannot be checked now", take_touch_id),
+        ),
+        (
+            Some(Locks::Both(None)),
+            Root::NotKept,
+            Absent,
+            both(a_passphrase, "opens only on the Mac that set it", change),
+        ),
+    ];
+    for (locks, root, enclave, expected) in cases {
+        let mut out = Vec::new();
+        super::read(locks, root, enclave).write(&mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out, expected, "{locks:?} {root:?} {enclave:?}");
+        if enclave == Absent {
+            assert!(!out.contains("swoosh lock touch-id"), "{out}");
+        }
+    }
+}
+
+/// The read's row names are the values `lock` takes, and the key store's spelling of each method, which names
+/// the Touch ID row on a build that takes no such value, is the same word. Red when the two part.
+#[test]
+fn the_read_names_each_lock_as_it_is_typed() {
+    for value in LockMethod::value_variants() {
+        let typed = value.to_possible_value().unwrap();
+        assert_eq!(super::name(Method::from(*value)), typed.get_name());
+        assert_eq!(Method::from(*value).to_string(), typed.get_name());
+    }
+    assert_eq!(super::name(Method::TouchId), Method::TouchId.to_string());
+}
+
+/// `RISK` marks where nothing opens the key (Touch ID dead, or alone where it cannot open) or anyone with a
+/// copy opens it (plain), and a dead row; never a lock that could not be checked, nor a live one. Red when
+/// the style moves, or lands on `Unchecked`.
+#[test]
+fn the_read_paints_risk_only_where_the_key_is_at_risk() {
+    use anstream::AutoStream;
+    use keystore::Health::{Dead, Live, Unchecked};
+    use swoosh::identity::{Locks, Root};
+
+    use super::Enclave::{Absent, Here};
+
+    let risk = crate::screen::Style::RISK.paint("x", &AutoStream::always(Vec::new()));
+    let open = risk.to_string().split('x').next().unwrap().to_owned();
+    let painted = |locks, enclave| {
+        let mut out = AutoStream::always(Vec::new());
+        super::read(Some(locks), Root::NotKept, enclave)
+            .write(&mut out)
+            .unwrap();
+        let out = String::from_utf8(out.into_inner()).unwrap();
+        out.lines()
+            .filter(|line| line.contains(&open))
+            .map(|line| anstream::adapter::strip_str(line).to_string())
+            .collect::<Vec<_>>()
+    };
+    let dead_row = "  touch-id     on    does not open on this Mac now";
+    assert_eq!(
+        painted(Locks::None, Here),
+        ["This machine's key has no lock."]
+    );
+    assert_eq!(
+        painted(Locks::TouchId(Some(Dead)), Here),
+        [
+            "This machine's key does not open on this Mac now.",
+            dead_row
+        ]
+    );
+    assert_eq!(
+        painted(Locks::TouchId(None), Absent),
+        [
+            "Touch ID opens this machine's key only on the Mac that set it.",
+            "  touch-id     on    opens only on the Mac that set it"
+        ]
+    );
+    assert_eq!(painted(Locks::Both(Some(Dead)), Here), [dead_row]);
+    for calm in [
+        Locks::Passphrase,
+        Locks::TouchId(Some(Live)),
+        Locks::TouchId(Some(Unchecked)),
+        Locks::Both(Some(Live)),
+        Locks::Both(Some(Unchecked)),
+        Locks::Both(None),
+    ] {
+        assert!(painted(calm, Absent).is_empty(), "{calm:?}");
+    }
+}
+
+/// Bare `lock` on real homes, the wiring: the key's header, Touch ID's health as the prompt reads it, and a
+/// root kept beside it, or one that cannot be told kept, which drops the passphrase's `--remove`. Red when the
+/// read takes its state from anywhere else.
+#[tokio::test]
+async fn bare_lock_reads_the_home() {
+    let home = scratch("lock-read-none");
+    std::fs::remove_file(home.key()).unwrap();
+    let (result, out, err) = run(&home, &[], &mut Counting::refusing()).await;
+    result.unwrap();
+    assert_eq!((out.as_str(), err.as_str()), (NO_KEY_BUILT, ""));
+
+    let home = scratch("lock-read-plain");
+    let (_, out, _) = run(&home, &[], &mut Counting::refusing()).await;
+    assert!(
+        out.starts_with("This machine's key has no lock.\n"),
+        "{out}"
+    );
+
+    let home = scratch("lock-read-dead");
+    placed(
+        &home,
+        &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+        false,
+    );
+    let mut prompt = Counting::refusing().at_this_mac(keystore::Health::Dead);
+    let (_, out, _) = run(&home, &[], &mut prompt).await;
+    assert!(
+        out.ends_with("\nswoosh status says how to mend it.\n"),
+        "{out}"
+    );
+
+    let take_one =
+        "To take one off:\n  swoosh lock touch-id --remove\n  swoosh lock passphrase --remove\n";
+    let take_touch_id = "To take Touch ID off:\n  swoosh lock touch-id --remove\n";
+    for (root, step) in [
+        ("none", take_one),
+        ("kept", take_touch_id),
+        ("unknown", take_touch_id),
+    ] {
+        let home = scratch(&format!("lock-read-both-{root}"));
+        placed(
+            &home,
+            &swoosh::testkit::touch_id::DEVICE_PASSPHRASE_AND_TOUCH_ID,
+            root == "kept",
+        );
+        if root == "unknown" {
+            // A link to itself: whether a root is there cannot be told.
+            std::os::unix::fs::symlink(home.root_key(), home.root_key()).unwrap();
+            assert!(home.keeps_root().is_err());
+        }
+        let mut prompt = Counting::refusing().at_this_mac(keystore::Health::Live);
+        let (_, out, _) = run(&home, &[], &mut prompt).await;
+        assert!(
+            out.starts_with("This machine's key opens with Touch ID or a passphrase.\n"),
+            "{out}"
+        );
+        assert!(out.ends_with(&format!("\n\n{step}")), "{root}: {out}");
+    }
+}
+
+/// Bare `lock` asks, touches and writes nothing: on a home never made, the home, `home.lock` and
+/// `serve.lock` are all still absent after it; on a home with a key, under a passphrase or Touch ID, every
+/// file is byte for byte as it was. Red when the read mints, opens, locks the home, or asks.
+#[tokio::test]
+async fn bare_lock_writes_and_asks_nothing() {
+    let dir = std::env::temp_dir().join(format!("swoosh-lock-read-unmade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = Home::resolve(Some(dir.clone())).unwrap();
+    let mut prompt = Counting::refusing();
+    let (result, out, _) = run(&home, &[], &mut prompt).await;
+    result.unwrap();
+    assert_eq!(out, NO_KEY_BUILT);
+    for path in [dir.clone(), dir.join("home.lock"), dir.join("serve.lock")] {
+        assert!(!path.exists(), "{} was made", path.display());
+    }
+    assert_eq!(prompt.events(), 0);
+    assert!(prompt.touches().is_empty());
+
+    let sealed = scratch("lock-read-sealed");
+    lock(&sealed, &["passphrase"], &mut Counting::new([LONG]))
+        .await
+        .0
+        .unwrap();
+    let touch_id = scratch("lock-read-touch-id");
+    placed(
+        &touch_id,
+        &swoosh::testkit::touch_id::DEVICE_PASSPHRASE_AND_TOUCH_ID,
+        false,
+    );
+    for home in [sealed, touch_id] {
+        let before = snapshot(home.dir());
+        let mut prompt = Counting::refusing().at_this_mac(keystore::Health::Live);
+        run(&home, &[], &mut prompt).await.0.unwrap();
+        assert!(snapshot(home.dir()) == before, "nothing written");
+        assert_eq!(prompt.events(), 0);
+        assert!(prompt.touches().is_empty());
+    }
+}
+
+/// A key file the read cannot read refuses on stderr, exit 1, naming the file and the read's own error, and
+/// no command to look with, since `status` reads the same file. Red when it names `swoosh status`, or prints
+/// a screen of locks.
+#[tokio::test]
+async fn bare_lock_on_an_unreadable_key_file_refuses() {
+    let home = scratch("lock-read-unreadable");
+    std::fs::write(home.key(), b"not a key file").unwrap();
+    let error = KeyFile::new(home.key()).load().unwrap_err();
+    let (result, out, err) = run(&home, &[], &mut Counting::refusing()).await;
+    assert!(
+        result
+            .unwrap_err()
+            .is::<crate::commands::through_serve::Reported>()
+    );
+    assert_eq!(out, "");
+    // A row stacks where its value does not fit beside its label, as a long temporary path does here.
+    let row = |label: &str, value: &str| {
+        let line = format!("  {label}   {value}\n");
+        if line.chars().count() <= 81 {
+            line
+        } else {
+            format!("  {label}\n    {value}\n")
+        }
+    };
+    let expected = format!(
+        "error: this command could not read the key file\n{}{}",
+        row("file", &home.key().display().to_string()),
+        row("read", &swoosh::escape::causes(&error))
+    );
+    assert_eq!(err, expected);
+    assert!(!err.contains("swoosh status"), "{err}");
 }

@@ -22,6 +22,40 @@ fn rows<'a>(rows: impl IntoIterator<Item = (&'a str, Cell<'a>, &'a str)>) -> Scr
     Screen::default().block(block)
 }
 
+/// Each column after the first starts at its place or later: short values keep one place, a wider first cell
+/// moves the later columns right, never left, and one place is `column`'s. Red when a place past the first is
+/// dropped, or `column(17)` stops padding its first column to 13.
+#[test]
+fn columns_start_each_column_at_its_place_or_later() {
+    let table = |at: &[usize], first: &'static str| {
+        written(
+            &Screen::default().block(
+                Block::default()
+                    .columns(at.iter().copied())
+                    .row([Cell::Word(first), Cell::Word("on"), Cell::Word("gloss")])
+                    .row([Cell::Word("b"), Cell::Word("off"), Cell::Word("gloss")]),
+            ),
+        )
+    };
+    assert_eq!(
+        table(&[15, 21], "a"),
+        "  a            on    gloss\n  b            off   gloss\n"
+    );
+    assert_eq!(
+        table(&[15, 21], "a first cell past 15"),
+        "  a first cell past 15  on    gloss\n  b                     off   gloss\n"
+    );
+    assert_eq!(table(&[], "a"), "  a  on   gloss\n  b  off  gloss\n");
+    let one = |block: Block<'static>| {
+        written(&Screen::default().block(block.row([Cell::Word("key"), Cell::Word("value")])))
+    };
+    assert_eq!(one(Block::default().column(17)), "  key            value\n");
+    assert_eq!(
+        one(Block::default().column(17)),
+        one(Block::default().columns([17]))
+    );
+}
+
 #[test]
 fn blocks_sit_a_blank_line_apart_and_columns_align() {
     let screen = Screen::default()

@@ -48,13 +48,11 @@ fn root_help_row_and_leaves_match_the_sheet() {
         ),
         "{top}"
     );
-    assert!(
-        row(
-            "lock",
-            "set, change or remove the lock on this machine's key"
-        ),
-        "{top}"
-    );
+    #[cfg(target_os = "macos")]
+    let lock = "Lock this machine's key with a passphrase or Touch ID";
+    #[cfg(not(target_os = "macos"))]
+    let lock = "Lock this machine's key with a passphrase";
+    assert!(row("lock", lock), "{top}");
     assert!(!top.contains("identity"), "{top}");
 
     let help = root_help();

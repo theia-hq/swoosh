@@ -119,7 +119,15 @@ enum Command {
     /// Save or remove another person's key under a name.
     #[command(subcommand)]
     Contact(contact::ContactCmd),
-    /// set, change or remove the lock on this machine's key
+    // `touch-id` is a method on a macOS build only, so the summary names Touch ID there only.
+    #[cfg_attr(
+        target_os = "macos",
+        doc = "Lock this machine's key with a passphrase or Touch ID"
+    )]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        doc = "Lock this machine's key with a passphrase"
+    )]
     Lock(lock::LockCmd),
     /// copy, restore or forget your root, or change its locks
     #[command(
@@ -329,7 +337,7 @@ impl Command {
 enum Verb {
     /// Edits the address book; needs no transport.
     Contact(contact::ContactCmd),
-    /// Sets, changes or removes the passphrase on this machine's key; needs only the home.
+    /// Shows, adds, changes or removes a lock on this machine's key; needs only the home.
     Lock(lock::LockCmd),
     /// `root backup`, `forget` or `lock`: needs only the home.
     Root(root::Local),
