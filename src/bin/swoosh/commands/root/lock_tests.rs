@@ -427,7 +427,7 @@ async fn root_lock_touch_id_adds_it_beside_the_passphrase() {
         prompt.said(),
         [
             swoosh::touch::ROOT_BESIDE_PASSPHRASE,
-            "waiting for touch-id to check it opens your root…"
+            "Touch the sensor to add Touch ID…"
         ]
     );
     assert_eq!(
@@ -467,7 +467,7 @@ async fn root_lock_touch_id_over_ssh_is_refused_before_any_prompt() {
     let (result, _) = run(&home, None, false, &mut prompt).await;
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
-        "touch-id is set at this Mac's own screen, not over ssh (SSH_CONNECTION is set); run it there: \
+        "Touch ID is set at this Mac's own screen, not over ssh (SSH_CONNECTION is set); run it there: \
          swoosh root lock touch-id"
     );
     assert_eq!(prompt.events(), 0);
@@ -483,7 +483,7 @@ async fn root_lock_touch_id_declined_changes_nothing() {
     let (result, err) = run(&home, None, false, &mut prompt).await;
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
-        "touch-id did not open your root; nothing changed"
+        "Touch ID did not open your root; nothing changed"
     );
     assert!(err.is_empty());
 }
@@ -546,7 +546,7 @@ async fn root_lock_touch_id_over_a_dead_lock_says_to_check_touch_id_first() {
         prompt.warned(),
         [
             swoosh::touch::ROOT_BESIDE_PASSPHRASE,
-            "warning: touch-id does not open your root on this Mac now.\n\
+            "warning: Touch ID does not open your root on this Mac now.\n\
              the new lock will open with every fingerprint now in Touch ID & Password; if one is not yours, \
              press ctrl-c and remove it first."
         ]

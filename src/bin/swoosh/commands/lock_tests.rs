@@ -493,6 +493,7 @@ fn each_result_prints_its_ruled_lines() {
         method,
         now: Now::Read(now),
         root,
+        failed: None,
     };
     let unread = || {
         Now::Unread(Unread {
@@ -537,32 +538,32 @@ fn each_result_prints_its_ruled_lines() {
                 .to_owned(),
         ),
         (
-            Locked::Changed { method: Method::Passphrase, now: Now::Read(Locks::Both(Some(Live))) },
+            Locked::Changed { method: Method::Passphrase, now: Now::Read(Locks::Both(Some(Live))), failed: None },
             "Changed the passphrase on this machine's key.\n\
              A copy made earlier still opens with the old passphrase.\n"
                 .to_owned(),
         ),
-        (Locked::Changed { method: Method::TouchId, now: Now::Read(Locks::Both(Some(Live))) }, "Changed Touch ID on this machine's key.\n".to_owned()),
+        (Locked::Changed { method: Method::TouchId, now: Now::Read(Locks::Both(Some(Live))), failed: None }, "Changed Touch ID on this machine's key.\n".to_owned()),
         (
-            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::TouchId(Some(Live))) },
+            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::TouchId(Some(Live))), failed: None },
             "Removed the passphrase from this machine's key.\n\
              It now opens with Touch ID, on this Mac only.\n\
              A copy made earlier still opens with the passphrase.\n"
                 .to_owned(),
         ),
         (
-            Locked::Removed { method: Method::TouchId, now: Now::Read(Locks::Passphrase) },
+            Locked::Removed { method: Method::TouchId, now: Now::Read(Locks::Passphrase), failed: None },
             "Removed Touch ID from this machine's key.\n\
              It now opens with the passphrase.\n\
              A copy made earlier still opens with Touch ID on this Mac.\n"
                 .to_owned(),
         ),
         (
-            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::None) },
+            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::None), failed: None },
             "Removed the passphrase from this machine's key.\nIt now has no lock.\n".to_owned(),
         ),
         (
-            Locked::Removed { method: Method::TouchId, now: Now::Read(Locks::None) },
+            Locked::Removed { method: Method::TouchId, now: Now::Read(Locks::None), failed: None },
             "Removed Touch ID from this machine's key.\nIt now has no lock.\n".to_owned(),
         ),
         // A key made with a failure after it in place says so under the key.
@@ -573,6 +574,37 @@ fn each_result_prints_its_ruled_lines() {
                  warning: the key file was written, but a step after it failed\n  \
                  failure   the directory could not be synced\n"
             ),
+        ),
+        // Every other written result with a failure after it says so after what was done, before any step.
+        (
+            Locked::Added { method: Methods::TouchId, now: Now::Read(Locks::Both(Some(Live))), root: Root::NotKept, failed: Some("the directory could not be synced".to_owned()) },
+            "Added Touch ID to this machine's key.\n\
+             It now opens with Touch ID or the passphrase.\n\
+             \n\
+             warning: the key file was written, but a step after it failed\n  \
+             failure   the directory could not be synced\n\
+             \n\
+             To make Touch ID its only lock:\n  \
+             swoosh lock passphrase --remove\n"
+                .to_owned(),
+        ),
+        (
+            Locked::Changed { method: Method::Passphrase, now: Now::Read(Locks::Passphrase), failed: Some("the directory could not be synced".to_owned()) },
+            "Changed the passphrase on this machine's key.\n\
+             A copy made earlier still opens with the old passphrase.\n\
+             \n\
+             warning: the key file was written, but a step after it failed\n  \
+             failure   the directory could not be synced\n"
+                .to_owned(),
+        ),
+        (
+            Locked::Removed { method: Method::TouchId, now: Now::Read(Locks::None), failed: Some("the directory could not be synced".to_owned()) },
+            "Removed Touch ID from this machine's key.\n\
+             It now has no lock.\n\
+             \n\
+             warning: the key file was written, but a step after it failed\n  \
+             failure   the directory could not be synced\n"
+                .to_owned(),
         ),
         // Over a Touch ID lock that reads dead, no step offers the removal the key store would refuse.
         (
@@ -589,7 +621,7 @@ fn each_result_prints_its_ruled_lines() {
                 .to_owned(),
         ),
         (
-            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::TouchId(Some(Dead))) },
+            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::TouchId(Some(Dead))), failed: None },
             "Removed the passphrase from this machine's key.\n\
              Touch ID does not open on this Mac now, so nothing opens this machine's key.\n\
              A copy made earlier still opens with the passphrase.\n"
@@ -597,15 +629,15 @@ fn each_result_prints_its_ruled_lines() {
         ),
         // A write that landed and could not be read back says the act, then that it could not confirm it.
         (
-            Locked::Added { method: Methods::TouchId, now: unread(), root: Root::NotKept },
+            Locked::Added { method: Methods::TouchId, now: unread(), root: Root::NotKept, failed: None },
             UNREAD.replace("{act}", "Added Touch ID to this machine's key."),
         ),
         (
-            Locked::Changed { method: Method::Passphrase, now: unread() },
+            Locked::Changed { method: Method::Passphrase, now: unread(), failed: None },
             UNREAD.replace("{act}", "Changed the passphrase on this machine's key."),
         ),
         (
-            Locked::Removed { method: Method::TouchId, now: unread() },
+            Locked::Removed { method: Method::TouchId, now: unread(), failed: None },
             UNREAD.replace("{act}", "Removed Touch ID from this machine's key."),
         ),
         (
@@ -723,12 +755,14 @@ async fn lock_after_a_missed_make_shows_the_made_key() {
 /// A key file this command could not confirm, or that is gone, refuses as a screen through the law, with its
 /// path and the read's error as rows where a read failed, and exits 1 without `main` printing it again; any
 /// other refusal is `main`'s to print. Red when a row is missing, a `read` row prints with no read error, or
-/// the refusal is printed twice.
+/// the refusal is printed twice. A first key beside a root whose touch never ran shows the key, the failure,
+/// and how to add Touch ID, and still exits 1.
 #[test]
 fn a_file_this_command_cannot_confirm_refuses_as_a_screen() {
-    use swoosh::identity::{Gone, Unconfirmed};
+    use swoosh::identity::{Gone, TouchIdNotAdded, Unconfirmed};
 
     let path = std::path::PathBuf::from("/h/machine/key");
+    let key = swoosh::testkit::TestNode::seeded(0x11).node_id();
     for (report, expected) in [
         (
             eyre::Report::new(Unconfirmed {
@@ -738,7 +772,8 @@ fn a_file_this_command_cannot_confirm_refuses_as_a_screen() {
             "error: this command could not confirm the key file\n  \
              swoosh status shows what is there.\n  \
              file   /h/machine/key\n  \
-             read   there is no key file at /h/machine/key\n",
+             read   there is no key file at /h/machine/key\n"
+                .to_owned(),
         ),
         (
             eyre::Report::new(Unconfirmed {
@@ -747,12 +782,29 @@ fn a_file_this_command_cannot_confirm_refuses_as_a_screen() {
             }),
             "error: this command could not confirm the key file\n  \
              swoosh status shows what is there.\n  \
-             file   /h/machine/key\n",
+             file   /h/machine/key\n"
+                .to_owned(),
         ),
         (
             eyre::Report::new(Gone { path: path.clone() }),
             "error: the key file this command wrote is gone\n  \
-             swoosh status shows what is there.\n",
+             swoosh status shows what is there.\n"
+                .to_owned(),
+        ),
+        // A first key beside a root, made under the passphrase, whose touch never ran.
+        (
+            eyre::Report::new(TouchIdNotAdded {
+                key,
+                failed: "the directory could not be synced".to_owned(),
+            }),
+            format!(
+                "Made this machine's key, locked with a passphrase:\n  {key}\n\n\
+                 warning: the key file was written, but a step after it failed\n  \
+                 failure   the directory could not be synced\n\n\
+                 Touch ID was not added.\n\
+                 To add it:\n  \
+                 swoosh lock touch-id\n"
+            ),
         ),
     ] {
         let mut err = Vec::new();

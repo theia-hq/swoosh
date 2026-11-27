@@ -6,7 +6,8 @@
 //! change. And style takes only text fixed at build time, so a peer's text can never carry it.
 //!
 //! A third, of the same kind: a lock comes off a key file only where a person asked for that by name, so
-//! every call that takes one off is counted, by file.
+//! every call that takes one off is counted, by file. And a fourth: the lock lines name the lock a removal
+//! takes off, and say Touch ID the way a person does.
 //!
 //! Test files, inline `mod tests` blocks and comments are skipped: only what ships is read.
 
@@ -187,6 +188,39 @@ fn no_lock_act_drops_the_other_lock() {
         let code = scan(&text).code;
         for word in ["Then", "HalfDone"] {
             assert!(words(&code, word).is_empty(), "{file}: `{word}`");
+        }
+    }
+}
+
+/// The files that print a lock act's lines.
+const LOCK_FILES: [&str; 5] = [
+    "bin/swoosh/commands/lock.rs",
+    "identity.rs",
+    "passphrase.rs",
+    "root/lock.rs",
+    "touch.rs",
+];
+
+/// Every `--remove` a line prints names its method, since a bare one refuses or picks a lock the reader did
+/// not name; and the lock files spell Touch ID as the reader says it, `touch-id` only inside a command, as
+/// it is typed.
+#[test]
+fn a_lock_line_names_its_method_and_spells_touch_id() {
+    for (file, text) in shipped() {
+        for (line, literal) in scan(&text).literals {
+            assert!(
+                !literal.contains("swoosh lock --remove"),
+                "{file}:{line}: a bare --remove in {literal:?}"
+            );
+            if !LOCK_FILES.contains(&file.as_str()) {
+                continue;
+            }
+            for (at, _) in literal.match_indices("touch-id") {
+                assert!(
+                    literal[..at].ends_with("lock "),
+                    "{file}:{line}: `touch-id` in prose in {literal:?}"
+                );
+            }
         }
     }
 }

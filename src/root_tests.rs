@@ -318,8 +318,7 @@ async fn a_root_made_beside_a_touch_id_only_key_says_to_add_a_passphrase() {
         .unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(
-        out.lines()
-            .any(|line| line == crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        out.contains(crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
         "{out}"
     );
 

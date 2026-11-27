@@ -1030,8 +1030,8 @@ fn overwrite(path: &Path, bytes: &[u8]) {
 
 /// The line a restore prints when the copy's `touch-id` lock does not open on this Mac: the line every use
 /// of it says, with the check on a fingerprint nobody added before setting it again.
-const DEAD_COPY: &str = "touch-id does not open your root on this Mac now.\n\
-     check Touch ID & Password for a fingerprint you did not add, then set touch-id again: swoosh root lock \
+const DEAD_COPY: &str = "Touch ID does not open your root on this Mac now.\n\
+     check Touch ID & Password for a fingerprint you did not add, then set Touch ID again: swoosh root lock \
      touch-id";
 
 /// A copy whose `touch-id` lock does not open here is restored byte for byte, and one line says how to use
@@ -1082,9 +1082,10 @@ async fn restore_onto_a_touch_id_only_machine_key_names_lock_touch_id() {
     let (result, err) = restore(&home, &dir, &Answering::nobody()).await;
     result.unwrap();
     assert!(
-        err.lines().any(|line| line
-            == "this machine's key needs a passphrase beside touch-id while your root is on this \
-                machine: swoosh lock passphrase"),
+        err.contains(
+            "this machine's key needs a passphrase beside Touch ID while your root is here:\n  \
+             swoosh lock passphrase\n"
+        ),
         "{err}"
     );
 }

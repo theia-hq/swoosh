@@ -181,7 +181,7 @@ impl Script {
     fn shown(&self) -> Option<String> {
         self.said
             .iter()
-            .find_map(|line| line.strip_prefix("your passphrase: "))
+            .find_map(|line| line.strip_prefix("Your passphrase: "))
             .map(str::to_owned)
     }
 }
@@ -194,7 +194,7 @@ impl super::Lines for Script {
 
     fn ask(&mut self, prompt: &str) -> eyre::Result<Zeroizing<String>> {
         self.asked.push(prompt.to_owned());
-        if prompt == "again: "
+        if prompt == "Type it again: "
             && let Some(shown) = self.shown()
         {
             return Ok(Zeroizing::new(shown));
@@ -207,32 +207,29 @@ impl super::Lines for Script {
     }
 }
 
-/// A short first entry ends the round before `again:` is asked: the floor runs on the first entry, and one
-/// entry is read. Red when the floor moves after `again:`.
+/// A short first entry ends the round before the second is asked: the floor runs on the first entry, and one
+/// entry is read. Red when the floor moves after the second entry.
 #[test]
 fn the_floor_runs_before_again() {
     let mut lines = Script::new(["fourteen chars", "fourteen chars"]);
-    let choice = super::round(&mut lines, Asked::Root).expect("a round");
+    let choice = super::round(&mut lines, Asked::MachineKey).expect("a round");
     assert!(matches!(choice, Choice::Short));
-    assert_eq!(lines.asked, ["new root passphrase: "]);
+    assert_eq!(lines.asked, ["Passphrase: "]);
     assert_eq!(
         lines.said,
-        ["Choose a passphrase of at least 15 characters, or press Enter and swoosh makes one."]
+        ["Choose a passphrase of at least 15 characters, or press Enter for one."]
     );
 }
 
 /// An empty Enter makes a passphrase of five listed words, shows it where the person types, and asks for it
-/// once more; typed back, it is the one chosen. Red when the made phrase is skipped or `again:` is not
-/// asked.
+/// once more; typed back, it is the one chosen. Red when the made phrase is skipped or the second entry is
+/// not asked.
 #[test]
 fn an_empty_enter_makes_a_phrase_and_asks_for_it_once_more() {
     let mut lines = Script::new([""]);
     let choice = super::round(&mut lines, Asked::MachineKey).expect("a round");
     assert!(matches!(choice, Choice::Chosen(_)));
-    assert_eq!(
-        lines.asked,
-        ["new passphrase for this machine's key: ", "again: "]
-    );
+    assert_eq!(lines.asked, ["Passphrase: ", "Type it again: "]);
     let shown = lines.shown().expect("the phrase is shown");
     let list: BTreeSet<&str> = WORD_LIST.lines().collect();
     let words: Vec<&str> = shown.split(' ').collect();
@@ -244,18 +241,34 @@ fn an_empty_enter_makes_a_phrase_and_asks_for_it_once_more() {
     );
 }
 
-/// Two entries that differ end the round as a mismatch, after two reads; a copy's round names the copy.
-/// Red when the second entry is not compared.
+/// Two entries that differ end the round as a mismatch, after two reads; a copy's round names the copy,
+/// and the root's does not. Red when the second entry is not compared, or the copy goes unnamed.
 #[test]
 fn a_round_whose_entries_differ_is_a_mismatch() {
     let dir = std::path::Path::new("/tmp/stick");
-    let mut lines = Script::new(["a passphrase long enough", "another passphrase entirely"]);
-    let choice = super::round(&mut lines, Asked::Copy(dir)).expect("a round");
-    assert!(matches!(choice, Choice::Mismatch));
-    assert_eq!(
-        lines.asked,
-        ["new passphrase for the copy in /tmp/stick: ", "again: "]
-    );
+    for (asked, first) in [
+        (Asked::Copy(dir), "Passphrase for the copy in /tmp/stick: "),
+        (Asked::Root, "Passphrase: "),
+    ] {
+        let mut lines = Script::new(["a passphrase long enough", "another passphrase entirely"]);
+        let choice = super::round(&mut lines, asked).expect("a round");
+        assert!(matches!(choice, Choice::Mismatch));
+        assert_eq!(lines.asked, [first, "Type it again: "]);
+    }
+}
+
+/// Each key's unlock prompt names it, and starts with a capital. Red when a prompt is left lowercase or names
+/// another key.
+#[test]
+fn each_unlock_prompt_names_its_key() {
+    let dir = std::path::Path::new("/tmp/stick");
+    for (asked, prompt) in [
+        (Asked::Root, "Root passphrase: "),
+        (Asked::Copy(dir), "Passphrase for the copy in /tmp/stick: "),
+        (Asked::MachineKey, "Passphrase for this machine's key: "),
+    ] {
+        assert_eq!(asked.prompt(), prompt);
+    }
 }
 
 /// An answer to a confirmation past the cap reads as no answer, and the rest of its line is read and dropped,

@@ -627,7 +627,7 @@ async fn lock_touch_id_over_ssh_refuses_naming_the_variable() {
     let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
     assert_eq!(
         format!("{refused:#}"),
-        "touch-id is set at this Mac's own screen, not over ssh (SSH_CLIENT is set); run it there: swoosh \
+        "Touch ID is set at this Mac's own screen, not over ssh (SSH_CLIENT is set); run it there: swoosh \
          lock touch-id"
     );
     assert_eq!(prompt.events(), 0);
@@ -674,13 +674,13 @@ async fn lock_touch_id_on_a_touch_id_only_key_that_does_not_open_is_refused() {
     for (health, refusal) in [
         (
             keystore::Health::Dead,
-            "touch-id does not open this machine's key on this Mac now.\n\
-             if you added a fingerprint, removing it lets touch-id open the key again.\n\
+            "Touch ID does not open this machine's key on this Mac now.\n\
+             if you added a fingerprint, removing it lets Touch ID open the key again.\n\
              otherwise, give this machine a new key and join again: swoosh leave --new-key",
         ),
         (
             keystore::Health::Unchecked,
-            "touch-id cannot be checked now (the screen may be locked, or Touch ID locked out), and this \
+            "Touch ID cannot be checked now (the screen may be locked, or Touch ID locked out), and this \
              machine's key has no other lock; unlock this Mac and run this again",
         ),
     ] {
@@ -723,7 +723,7 @@ async fn lock_passphrase_on_a_touch_id_only_key_beside_a_root_goes_beside_it() {
     assert_eq!(added_as(locked), Some((Methods::Passphrase, Root::Kept)));
     assert_eq!(
         prompt.touches()[0].reason,
-        crate::touch::SET_PASSPHRASE_ON_MACHINE_KEY
+        crate::touch::ADD_PASSPHRASE_TO_MACHINE_KEY
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -811,7 +811,7 @@ async fn adding_a_lock_never_drops_one() {
     ));
     assert_eq!(
         prompt.touches()[0].reason,
-        crate::touch::SET_PASSPHRASE_ON_MACHINE_KEY
+        crate::touch::ADD_PASSPHRASE_TO_MACHINE_KEY
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -847,7 +847,8 @@ async fn lock_touch_id_remove_leaves_the_passphrase() {
         locked,
         super::Locked::Removed {
             method: Method::TouchId,
-            now: super::Now::Read(super::Locks::Passphrase)
+            now: super::Now::Read(super::Locks::Passphrase),
+            failed: None,
         }
     );
     assert_eq!(locks(&home), [Method::Passphrase]);
@@ -902,7 +903,7 @@ async fn a_dead_touch_id_only_key_refuses_before_a_passphrase_is_chosen() {
         .await
         .unwrap_err();
     assert!(
-        format!("{refused:#}").starts_with("touch-id does not open this machine's key"),
+        format!("{refused:#}").starts_with("Touch ID does not open this machine's key"),
         "{refused:#}"
     );
     assert_eq!(prompt.events(), 0, "no passphrase chosen");
@@ -916,7 +917,7 @@ async fn a_dead_touch_id_only_key_refuses_before_a_passphrase_is_chosen() {
     let mut prompt = Counting::new([LONG]).at_this_mac(keystore::Health::Dead);
     let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
     assert!(
-        format!("{refused:#}").starts_with("touch-id does not open this machine's key"),
+        format!("{refused:#}").starts_with("Touch ID does not open this machine's key"),
         "{refused:#}"
     );
     assert_eq!(prompt.events(), 0, "no passphrase chosen beside a root");
@@ -939,13 +940,14 @@ async fn setting_a_dead_touch_id_again_says_to_check_touch_id_first() {
         super::Locked::Changed {
             method: Method::TouchId,
             now: super::Now::Read(super::Locks::Both(Some(keystore::Health::Dead))),
+            failed: None,
         }
     );
     assert_eq!(
         prompt.warned(),
         [
             crate::touch::CHANGES_TOUCH_ID.to_owned(),
-            "warning: touch-id does not open this machine's key on this Mac now.\n\
+            "warning: Touch ID does not open this machine's key on this Mac now.\n\
              the new lock will open with every fingerprint now in Touch ID & Password; if one is not yours, \
              press ctrl-c and remove it first."
                 .to_owned(),
@@ -1077,93 +1079,103 @@ fn logged(inner: Counting) -> Logged<impl FnMut()> {
     }
 }
 
-/// Each add that leaves a passphrase beside `touch-id` says first what the key will open with, and that a
-/// copy of its file opens with the passphrase anywhere, with or without a root kept: the first thing heard,
-/// then a blank line, before any passphrase is asked or chosen and before the touch; and a blank line after
-/// the touch, before the result. The whole conversation, exactly. Red when the line is missing, comes after an
-/// ask or a touch, or either blank line is dropped.
+/// Every change that moves the lock set says first what the key opens with now and after: the first thing
+/// heard, warned, before any passphrase is asked or chosen and before the touch, a blank line after it where
+/// a prompt follows; and a waiting line, said where the prompts are, that names the act its dialog's reason
+/// names. A passphrase change keeps the lock set, so its first event is the ask. The whole conversation,
+/// exactly, the blank line between the wait and the result included. Red when a line is missing, extra, or
+/// comes after an ask or a touch, when a blank line is dropped, or when a waiting line is warned, or it or a
+/// reason names another act. `home.lock` is not seen by the log, so this does not show the lines come
+/// before it.
 #[tokio::test]
-async fn the_floor_is_said_before_any_prompt() {
-    const FLOOR: [&str; 2] = [
-        "A copy of the key file would then open with the passphrase on any machine.",
-        "A copy of the key file still opens with the passphrase on any machine.",
-    ];
+async fn every_change_says_now_and_after_first() {
+    use crate::touch as t;
     let line = |text: &str| Heard::Line(text.to_owned());
-    let checking = "waiting for touch-id to check it opens this machine's key…";
-    let waiting = "waiting for touch-id to use this machine's key…";
-    for root_kept in [false, true] {
-        for (tag, key, method, answers, heard) in [
-            (
-                "t-plus-p",
-                &DEVICE_TOUCH_ID_ALONE[..],
-                Method::Passphrase,
-                [LONG],
-                vec![
-                    line(crate::touch::BESIDE_TOUCH_ID),
-                    line(""),
-                    Heard::Choose,
-                    line(waiting),
-                    Heard::Touch,
-                    line(""),
-                ],
-            ),
-            (
-                "p-plus-t",
-                &[][..],
-                Method::TouchId,
-                [PASSPHRASE],
-                vec![
-                    line(crate::touch::TOUCH_ID_BESIDE),
-                    line(""),
-                    Heard::Unlock,
-                    line(checking),
-                    Heard::Touch,
-                    line(""),
-                ],
-            ),
-            (
-                "pt-plus-t",
-                &DEVICE_PASSPHRASE_AND_TOUCH_ID[..],
-                Method::TouchId,
-                [PASSPHRASE],
-                vec![
-                    line(crate::touch::CHANGES_TOUCH_ID),
-                    line(crate::touch::EVERY_FINGERPRINT),
-                    line(""),
-                    Heard::Unlock,
-                    line(checking),
-                    Heard::Touch,
-                    line(""),
-                ],
-            ),
-        ] {
-            let (home, dir) = home(&format!("floor-{tag}-{root_kept}"));
-            if key.is_empty() {
-                sealed(&home, PASSPHRASE).await;
-            } else {
-                placed(&home, key);
-            }
-            if root_kept {
-                std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
-            }
-            let mut prompt = logged(proving(answers));
-            super::lock(&home, method, false, &mut prompt)
-                .await
-                .unwrap_or_else(|error| panic!("{tag}: {error:#}"));
-            assert_eq!(prompt.heard, heard, "{tag}, root kept {root_kept}");
-            let Some(Heard::Line(first)) = prompt.heard.first() else {
-                panic!("{tag}: {:?}", prompt.heard);
-            };
-            assert!(
-                first.lines().any(|line| FLOOR.contains(&line)),
-                "{tag}: {first}"
-            );
-            assert!(
-                prompt.inner.warned().first() == Some(first),
-                "{tag}: a warning"
-            );
-            let _ = std::fs::remove_dir_all(&dir);
+    let add = "Touch the sensor to add Touch ID…";
+    // One cell a line: tag, start, root kept, method, remove, what is heard through the first touch, and the
+    // dialog's reason.
+    #[rustfmt::skip]
+    let cells = [
+        ("none-p", Start::None, false, Method::Passphrase, false, vec![line(t::MAKES_UNDER_PASSPHRASE), line(""), Heard::Choose], None),
+        ("plain-p", Start::Plain, false, Method::Passphrase, false, vec![line(t::SEALS_UNDER_PASSPHRASE), line(""), Heard::Choose], None),
+        ("none-t", Start::None, false, Method::TouchId, false, vec![line(t::MAKES_UNDER_TOUCH_ID), line("Touch the sensor to make this machine's key…"), Heard::Touch, line("")], Some(t::MAKE_MACHINE_KEY)),
+        ("none-root-t", Start::None, true, Method::TouchId, false, vec![line(t::MAKES_BESIDE_ROOT), line(""), Heard::Choose, line(add), Heard::Touch, line("")], Some(t::CHECK_MACHINE_KEY)),
+        ("plain-t", Start::Plain, false, Method::TouchId, false, vec![line(t::SEALS_UNDER_TOUCH_ID), line(add), Heard::Touch, line("")], Some(t::CHECK_MACHINE_KEY)),
+        ("plain-root-t", Start::Plain, true, Method::TouchId, false, vec![line(t::SEALS_BESIDE_ROOT), line(""), Heard::Choose, line(add), Heard::Touch, line("")], Some(t::CHECK_MACHINE_KEY)),
+        ("p-t", Start::P, false, Method::TouchId, false, vec![line(t::TOUCH_ID_BESIDE), line(""), Heard::Unlock, line(add), Heard::Touch, line("")], Some(t::CHECK_MACHINE_KEY)),
+        ("p-root-t", Start::P, true, Method::TouchId, false, vec![line(t::TOUCH_ID_BESIDE), line(""), Heard::Unlock, line(add), Heard::Touch, line("")], Some(t::CHECK_MACHINE_KEY)),
+        ("t-p", Start::T, false, Method::Passphrase, false, vec![line(t::BESIDE_TOUCH_ID), line(""), Heard::Choose, line("Touch the sensor to add the passphrase…"), Heard::Touch, line("")], Some(t::ADD_PASSPHRASE_TO_MACHINE_KEY)),
+        ("t-root-p", Start::T, true, Method::Passphrase, false, vec![line(t::BESIDE_TOUCH_ID), line(""), Heard::Choose, line("Touch the sensor to add the passphrase…"), Heard::Touch, line("")], Some(t::ADD_PASSPHRASE_TO_MACHINE_KEY)),
+        ("pt-t", Start::Pt, false, Method::TouchId, false, vec![line(t::CHANGES_TOUCH_ID), line(t::EVERY_FINGERPRINT), line(""), Heard::Unlock, line(add), Heard::Touch, line("")], Some(t::CHECK_MACHINE_KEY)),
+        ("pt-root-t", Start::Pt, true, Method::TouchId, false, vec![line(t::CHANGES_TOUCH_ID), line(t::EVERY_FINGERPRINT), line(""), Heard::Unlock, line(add), Heard::Touch, line("")], Some(t::CHECK_MACHINE_KEY)),
+        ("p-p", Start::P, false, Method::Passphrase, false, vec![Heard::Unlock, Heard::Choose], None),
+        ("p-less-p", Start::P, false, Method::Passphrase, true, vec![line(t::TAKES_LAST_LOCK_OFF), line(""), Heard::Unlock], None),
+        ("t-less-t", Start::T, false, Method::TouchId, true, vec![line(t::TAKES_LAST_LOCK_OFF), line("Touch the sensor to remove Touch ID…"), Heard::Touch, line("")], Some(t::REMOVE_TOUCH_ID_FROM_MACHINE_KEY)),
+        ("pt-less-p", Start::Pt, false, Method::Passphrase, true, vec![line(t::TAKES_PASSPHRASE_OFF), line(""), Heard::Unlock], None),
+        ("pt-less-t", Start::Pt, false, Method::TouchId, true, vec![line(t::TAKES_TOUCH_ID_OFF), line(""), Heard::Unlock], None),
+    ];
+    for (tag, start, root, method, remove, heard, reason) in cells {
+        let (home, dir) = home(&format!("now-and-after-{tag}"));
+        match start {
+            Start::None => {}
+            Start::Plain => drop(super::inspect(&home).expect("a plain key")),
+            Start::P => drop(sealed(&home, PASSPHRASE).await),
+            Start::T => placed(&home, &DEVICE_TOUCH_ID_ALONE),
+            Start::Pt => placed(&home, &DEVICE_PASSPHRASE_AND_TOUCH_ID),
         }
+        if root {
+            std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+        }
+        let mut counting = proving([PASSPHRASE, LONG]);
+        if tag == "none-t" {
+            // The make is written by the touch itself, so the file it leaves stands in for it.
+            counting = counting.publishing(landing_as(&DEVICE_TOUCH_ID_ALONE));
+        }
+        let mut prompt = logged(counting);
+        // A run that ends Ok is heard whole. Taking the passphrase off a key whose Touch ID opens on no
+        // enclave (the fixtures') is refused by the key store after the ask, so that one is heard through it.
+        match super::lock(&home, method, remove, &mut prompt).await {
+            Ok(_) => assert_eq!(prompt.heard, heard, "{tag}, {start:?}"),
+            Err(_) => assert_eq!(
+                prompt.heard.get(..heard.len()),
+                Some(&heard[..]),
+                "{tag}, {start:?}: {:?}",
+                prompt.heard
+            ),
+        }
+        assert!(
+            !prompt
+                .inner
+                .warned()
+                .iter()
+                .any(|line| line.starts_with("Touch the sensor")),
+            "{tag}: a waiting line rides with the prompts, not the warnings"
+        );
+        let asked = heard
+            .iter()
+            .position(|heard| !matches!(heard, Heard::Line(_)))
+            .unwrap_or(heard.len());
+        // The waiting line attends the touch, where the person looks for the dialog; the rest are warnings.
+        let before: Vec<&String> = prompt.inner.said()[..asked]
+            .iter()
+            .filter(|line| !line.starts_with("Touch the sensor"))
+            .collect();
+        assert_eq!(
+            prompt
+                .inner
+                .warned()
+                .iter()
+                .take(before.len())
+                .collect::<Vec<_>>(),
+            before,
+            "{tag}: the lines before the first ask are warnings"
+        );
+        assert_eq!(
+            prompt.inner.touches().first().map(|touch| touch.reason),
+            reason,
+            "{tag}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1185,6 +1197,7 @@ async fn touch_id_beside_a_passphrase_answers_by_the_file_under_the_lock() {
                 method: Methods::TouchId,
                 now: super::Now::Read(super::Locks::Passphrase),
                 root: Root::NotKept,
+                failed: None,
             },
         ),
         (
@@ -1194,6 +1207,7 @@ async fn touch_id_beside_a_passphrase_answers_by_the_file_under_the_lock() {
             super::Locked::Changed {
                 method: Method::TouchId,
                 now: super::Now::Read(super::Locks::Both(Some(keystore::Health::Live))),
+                failed: None,
             },
         ),
     ] {
@@ -1358,23 +1372,23 @@ async fn each_cell_has_its_own_outcome() {
         ("none-p", Start::None, false, Method::Passphrase, false, None, &[LONG], Box::new(made(Methods::Passphrase))),
         ("none-t", Start::None, false, Method::TouchId, false, Some(t), &[], Box::new(made(Methods::TouchId))),
         ("none-root-t", Start::None, true, Method::TouchId, false, Some(pt), &[LONG], Box::new(made(Methods::Both))),
-        ("plain-p", Start::Plain, false, Method::Passphrase, false, None, &[LONG], Box::new(fixed(Locked::Added { method: Methods::Passphrase, now: super::Now::Read(super::Locks::Passphrase), root: Root::NotKept }))),
-        ("plain-t", Start::Plain, false, Method::TouchId, false, Some(t), &[], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::TouchId(Some(Live))), root: Root::NotKept }))),
-        ("plain-root-t", Start::Plain, true, Method::TouchId, false, Some(pt), &[LONG], Box::new(fixed(Locked::Added { method: Methods::Both, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::Kept }))),
-        ("p-p", Start::P, false, Method::Passphrase, false, None, &[PASSPHRASE, LONG], Box::new(fixed(Locked::Changed { method: Method::Passphrase, now: super::Now::Read(super::Locks::Passphrase) }))),
-        ("p-t", Start::P, false, Method::TouchId, false, Some(pt), &[PASSPHRASE], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::NotKept }))),
-        ("p-p-remove", Start::P, false, Method::Passphrase, true, None, &[PASSPHRASE], Box::new(fixed(Locked::Removed { method: Method::Passphrase, now: super::Now::Read(super::Locks::None) }))),
-        ("p-t-unlanded", Start::P, false, Method::TouchId, false, None, &[PASSPHRASE], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::Passphrase), root: Root::NotKept }))),
+        ("plain-p", Start::Plain, false, Method::Passphrase, false, None, &[LONG], Box::new(fixed(Locked::Added { method: Methods::Passphrase, now: super::Now::Read(super::Locks::Passphrase), root: Root::NotKept, failed: None }))),
+        ("plain-t", Start::Plain, false, Method::TouchId, false, Some(t), &[], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::TouchId(Some(Live))), root: Root::NotKept, failed: None }))),
+        ("plain-root-t", Start::Plain, true, Method::TouchId, false, Some(pt), &[LONG], Box::new(fixed(Locked::Added { method: Methods::Both, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::Kept, failed: None }))),
+        ("p-p", Start::P, false, Method::Passphrase, false, None, &[PASSPHRASE, LONG], Box::new(fixed(Locked::Changed { method: Method::Passphrase, now: super::Now::Read(super::Locks::Passphrase), failed: None }))),
+        ("p-t", Start::P, false, Method::TouchId, false, Some(pt), &[PASSPHRASE], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::NotKept, failed: None }))),
+        ("p-p-remove", Start::P, false, Method::Passphrase, true, None, &[PASSPHRASE], Box::new(fixed(Locked::Removed { method: Method::Passphrase, now: super::Now::Read(super::Locks::None), failed: None }))),
+        ("p-t-unlanded", Start::P, false, Method::TouchId, false, None, &[PASSPHRASE], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::Passphrase), root: Root::NotKept, failed: None }))),
         ("p-t-remove", Start::P, false, Method::TouchId, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoSuchLock(Method::TouchId))))),
-        ("t-p", Start::T, false, Method::Passphrase, false, Some(pt), &[LONG], Box::new(fixed(Locked::Added { method: Methods::Passphrase, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::NotKept }))),
+        ("t-p", Start::T, false, Method::Passphrase, false, Some(pt), &[LONG], Box::new(fixed(Locked::Added { method: Methods::Passphrase, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::NotKept, failed: None }))),
         ("t-t", Start::T, false, Method::TouchId, false, None, &[], Box::new(fixed(Locked::Unchanged(Why::TouchIdAlone)))),
         ("t-root-t", Start::T, true, Method::TouchId, false, None, &[], Box::new(fixed(Locked::Unchanged(Why::NeedsPassphrase)))),
         ("t-p-remove", Start::T, false, Method::Passphrase, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoSuchLock(Method::Passphrase))))),
-        ("t-t-remove", Start::T, false, Method::TouchId, true, Some(&PLAIN), &[], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::None) }))),
-        ("t-t-remove-unlanded", Start::T, false, Method::TouchId, true, None, &[], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::TouchId(Some(Live))) }))),
-        ("pt-p", Start::Pt, false, Method::Passphrase, false, None, &[PASSPHRASE, LONG], Box::new(fixed(Locked::Changed { method: Method::Passphrase, now: Now::Read(Locks::Both(Some(Live))) }))),
-        ("pt-t", Start::Pt, false, Method::TouchId, false, Some(pt), &[PASSPHRASE], Box::new(fixed(Locked::Changed { method: Method::TouchId, now: Now::Read(Locks::Both(Some(Live))) }))),
-        ("pt-t-remove", Start::Pt, false, Method::TouchId, true, None, &[PASSPHRASE], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::Passphrase) }))),
+        ("t-t-remove", Start::T, false, Method::TouchId, true, Some(&PLAIN), &[], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::None), failed: None }))),
+        ("t-t-remove-unlanded", Start::T, false, Method::TouchId, true, None, &[], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::TouchId(Some(Live))), failed: None }))),
+        ("pt-p", Start::Pt, false, Method::Passphrase, false, None, &[PASSPHRASE, LONG], Box::new(fixed(Locked::Changed { method: Method::Passphrase, now: Now::Read(Locks::Both(Some(Live))), failed: None }))),
+        ("pt-t", Start::Pt, false, Method::TouchId, false, Some(pt), &[PASSPHRASE], Box::new(fixed(Locked::Changed { method: Method::TouchId, now: Now::Read(Locks::Both(Some(Live))), failed: None }))),
+        ("pt-t-remove", Start::Pt, false, Method::TouchId, true, None, &[PASSPHRASE], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::Passphrase), failed: None }))),
         ("plain-p-remove", Start::Plain, false, Method::Passphrase, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoLock)))),
         ("none-p-remove", Start::None, false, Method::Passphrase, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoKey)))),
         ("none-t-remove", Start::None, false, Method::TouchId, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoKey)))),
@@ -1797,6 +1811,7 @@ async fn a_sealed_make_that_times_out_keeps_its_last_line() {
                 method: Methods::Both,
                 now: super::Now::Read(super::Locks::Both(Some(keystore::Health::Live))),
                 root: Root::Kept,
+                failed: Some("the directory was not synced".to_owned()),
             }
         } else {
             super::Locked::Made {
@@ -1828,6 +1843,146 @@ async fn lock_after_a_missed_make_says_made() {
             key: crate::testkit::stored_key(&keystore::KeyFile::new(home.key())),
             now: Methods::Passphrase,
             failed: None,
+        }
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Taking the passphrase off both locks is refused before a word where Touch ID does not open here, or cannot
+/// be checked: the key store would refuse the removal after the passphrase, which a line would already have
+/// said leaves Touch ID to open the key. Red when the line or the ask comes first, or the refusal is another.
+#[tokio::test]
+async fn a_passphrase_removal_over_a_touch_id_that_does_not_open_says_nothing_first() {
+    for (tag, health) in [
+        ("dead", keystore::Health::Dead),
+        ("unchecked", keystore::Health::Unchecked),
+    ] {
+        let (home, dir) = home(&format!("remove-passphrase-{tag}"));
+        placed(&home, &DEVICE_PASSPHRASE_AND_TOUCH_ID);
+        let mut prompt = logged(Counting::new([PASSPHRASE]).at_this_mac(health));
+        let refused = super::lock(&home, Method::Passphrase, true, &mut prompt)
+            .await
+            .expect_err("refused");
+        let lines = crate::touch::Lines::of(
+            crate::passphrase::Asked::MachineKey,
+            &keystore::KeyFile::new(home.key()),
+            true,
+        );
+        let said = match health {
+            keystore::Health::Unchecked => lines.unchecked(),
+            _ => lines.dead(),
+        };
+        assert_eq!(format!("{refused:#}"), said, "{tag}");
+        assert!(prompt.heard.is_empty(), "{tag}: {:?}", prompt.heard);
+        assert_eq!(locks(&home), [Method::Passphrase, Method::TouchId], "{tag}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // A build with no enclave, where Touch ID opens nothing, says the passphrase stays.
+    let (home, dir) = home("remove-passphrase-no-enclave");
+    placed(&home, &DEVICE_PASSPHRASE_AND_TOUCH_ID);
+    let mut prompt = logged(Counting::new([PASSPHRASE]).here(TouchHere::NoEnclave));
+    let refused = super::lock(&home, Method::Passphrase, true, &mut prompt)
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        format!("{refused:#}"),
+        "the passphrase stays: Touch ID opens this key only on the Mac that set it"
+    );
+    assert!(prompt.heard.is_empty(), "{:?}", prompt.heard);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A write whose key store answered that its directory was not synced is in place: a written result, its
+/// failure said beside it; any other failure is the write's. A first key beside a root made so is made under
+/// the passphrase alone, and says Touch ID was not added; a file there that is not this run's is not
+/// confirmed. Red when an unsynced write reads as a miss, or another file is called made.
+#[test]
+fn a_write_in_place_but_unsynced_is_a_written_result() {
+    let unsynced = || keystore::Error::Unsynced {
+        path: PathBuf::from("/h/machine/key"),
+        source: std::io::Error::other("the disk went away"),
+    };
+    let failed = super::written(Err(unsynced())).expect("in place");
+    assert!(failed.is_some_and(|failed| failed.contains("the disk went away")));
+    assert!(super::written(Ok(())).expect("done").is_none());
+    assert!(
+        super::written(Err(keystore::Error::Absent {
+            path: PathBuf::from("/h/machine/key")
+        }))
+        .is_err()
+    );
+
+    let (home, dir) = home("unsynced-first-key");
+    super::make_machine_dir(&home).expect("the key's dir");
+    let file = keystore::KeyFile::new(home.key());
+    let secret = keystore::Secret::generate().unwrap();
+    let passphrase =
+        keystore::Passphrase::try_from(zeroize::Zeroizing::new(LONG.to_owned())).unwrap();
+    file.write(&secret, keystore::Protection::Passphrase(&passphrase))
+        .unwrap();
+    let drawn = super::Drawn::of(&secret);
+    let made = drawn.touch_id_not_added(&file, "synced nothing".to_owned());
+    let made = made
+        .downcast_ref::<super::TouchIdNotAdded>()
+        .expect("made, without Touch ID");
+    assert_eq!(made.key, drawn.key);
+    assert_eq!(made.failed, "synced nothing");
+    let other = super::Drawn::of(&keystore::Secret::generate().unwrap());
+    let refused = other.touch_id_not_added(&file, "synced nothing".to_owned());
+    assert!(refused.is::<super::Unconfirmed>(), "{refused:#}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Touch ID put on a key whose key store answered, after the touch, that the directory was not synced: the
+/// lock is in place, so it is added, with the failure said beside it. Red when it reads as a touch that did
+/// not open.
+#[tokio::test]
+async fn an_added_lock_whose_write_is_unsynced_is_added_with_its_failure() {
+    let (home, dir) = home("touch-id-unsynced");
+    sealed(&home, PASSPHRASE).await;
+    let unsynced = keystore::Error::Unsynced {
+        path: home.key(),
+        source: std::io::Error::other("the disk went away"),
+    };
+    let mut prompt = Counting::new([PASSPHRASE])
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Failed(eyre::Report::new(unsynced))]);
+    let locked = lock_touch_id(&home, &mut prompt).await.expect("added");
+    let super::Locked::Added {
+        failed: Some(failed),
+        ..
+    } = locked
+    else {
+        panic!("{locked:?}");
+    };
+    assert!(failed.contains("the disk went away"), "{failed}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plain key beside a root, sealed under the passphrase with a failure after the seal was in place, keeps
+/// that failure to its result, whether or not the touch after it landed. Red when the seal's failure is
+/// dropped. The key store's own write cannot be made to answer so here; this holds what follows it.
+#[tokio::test]
+async fn a_seal_in_place_but_unsynced_says_so_on_its_result() {
+    let (home, dir) = home("sealed-unsynced");
+    sealed(&home, PASSPHRASE).await;
+    let file = keystore::KeyFile::new(home.key());
+    let prompt = Counting::new([]).at_this_mac(keystore::Health::Live);
+    let locked = super::sealed_then_touched(
+        Touched::Opened(None),
+        Some("synced nothing".to_owned()),
+        &file,
+        &prompt,
+        Root::Kept,
+    )
+    .expect("added");
+    assert_eq!(
+        locked,
+        super::Locked::Added {
+            method: Methods::Passphrase,
+            now: super::Now::Read(super::Locks::Passphrase),
+            root: Root::Kept,
+            failed: Some("synced nothing".to_owned()),
         }
     );
     let _ = std::fs::remove_dir_all(&dir);

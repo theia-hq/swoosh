@@ -38,10 +38,14 @@ pub const CHECK_MACHINE_KEY: &str = "add Touch ID to this machine's key";
 
 /// The reason a dialog shows to open this machine's key, under `touch-id` alone, to put a passphrase on it.
 /// One reason per act, so the dialog names the change the person asked for.
-pub const SET_PASSPHRASE_ON_MACHINE_KEY: &str = "set a passphrase on this machine's key";
+pub const ADD_PASSPHRASE_TO_MACHINE_KEY: &str = "add a passphrase to this machine's key";
 
 /// The reason a dialog shows to open this machine's key, under `touch-id` alone, to take that lock off.
 pub const REMOVE_TOUCH_ID_FROM_MACHINE_KEY: &str = "remove Touch ID from this machine's key";
+
+/// The reason a dialog shows to write this machine's first key under `touch-id`: its own, so the dialog does
+/// not say `add` while the terminal says `make`.
+pub const MAKE_MACHINE_KEY: &str = "make this machine's key";
 
 /// The reason a dialog shows to open your root.
 pub const USE_ROOT: &str = "use your root";
@@ -49,28 +53,14 @@ pub const USE_ROOT: &str = "use your root";
 /// The reason a dialog shows to prove a new `touch-id` lock on your root.
 pub const CHECK_ROOT: &str = "add Touch ID to your root";
 
-/// The second line of each notice before a `touch-id` lock is set: what a new fingerprint does to it. A
-/// macro, so `concat!` can join it into each notice as one constant.
+/// What a new fingerprint does to a `touch-id` lock, said only where that lock will be the key's only one:
+/// beside a passphrase a lock that stops opening costs a prompt, alone it costs the key. A macro, so
+/// `concat!` can join it into each notice as one constant.
 macro_rules! finger_added_later {
     () => {
-        "a fingerprint added later in Touch ID & Password stops touch-id opening it until that fingerprint is \
-         removed."
+        "A fingerprint added later stops Touch ID opening this key until it is removed."
     };
 }
-
-/// Said before `lock touch-id` asks or writes anything on a key with no lock yet, where no root is kept: the
-/// key will have one lock. Two lines, said as one warning.
-pub const ONE_LOCK: &str = concat!(
-    "this machine's key will open with touch-id only.\n",
-    finger_added_later!()
-);
-
-/// Said before `lock touch-id` asks or writes anything on a key with no lock yet, where a root is kept: a
-/// passphrase goes beside it.
-pub const BESIDE_PASSPHRASE: &str = concat!(
-    "this machine's key will open with touch-id or a passphrase, since your root is on this machine.\n",
-    finger_added_later!()
-);
 
 /// Who may open a `touch-id` lock: every finger enrolled when it is made, someone else's included, so it is
 /// said before an act puts one on this machine's key or changes it. A macro, so `concat!` can join it into a
@@ -80,6 +70,61 @@ macro_rules! every_fingerprint {
         "Every fingerprint in Touch ID & Password opens it."
     };
 }
+
+/// Why a key beside a kept root keeps a passphrase, and what that costs: the two lines every add that puts
+/// one there says. A macro, so `concat!` can join it into each notice as one constant.
+macro_rules! root_keeps_passphrase {
+    () => {
+        "Your root is on this machine, so the key keeps a passphrase.\n\
+         A copy of the key file opens with the passphrase on any machine.\n"
+    };
+}
+
+/// Said before `lock passphrase` on a home with no key asks for anything.
+pub const MAKES_UNDER_PASSPHRASE: &str = "This machine has no key yet.\n\
+     This makes one that opens with a passphrase.";
+
+/// Said before `lock touch-id` on a home with no key, where no root is kept, asks for anything: the key will
+/// have one lock.
+pub const MAKES_UNDER_TOUCH_ID: &str = concat!(
+    "This machine has no key yet.\n",
+    "This makes one that only Touch ID on this Mac opens.\n",
+    every_fingerprint!(),
+    "\n",
+    finger_added_later!()
+);
+
+/// Said before `lock touch-id` on a home with no key, where a root is kept, asks for anything: a passphrase
+/// goes beside Touch ID, and a copy of the file opens with it anywhere.
+pub const MAKES_BESIDE_ROOT: &str = concat!(
+    "This machine has no key yet.\n",
+    "This makes one that opens with Touch ID or a passphrase.\n",
+    root_keeps_passphrase!(),
+    every_fingerprint!()
+);
+
+/// Said before `lock passphrase` on a plain key asks for anything.
+pub const SEALS_UNDER_PASSPHRASE: &str = "This machine's key has no lock.\n\
+     This adds a passphrase.";
+
+/// Said before `lock touch-id` on a plain key, where no root is kept, asks for anything: Touch ID will be its
+/// only lock.
+pub const SEALS_UNDER_TOUCH_ID: &str = concat!(
+    "This machine's key has no lock.\n",
+    "This adds Touch ID, so only Touch ID on this Mac opens it.\n",
+    every_fingerprint!(),
+    "\n",
+    finger_added_later!()
+);
+
+/// Said before `lock touch-id` on a plain key, where a root is kept, asks for anything: a passphrase goes
+/// beside Touch ID, and a copy of the file opens with it anywhere.
+pub const SEALS_BESIDE_ROOT: &str = concat!(
+    "This machine's key has no lock.\n",
+    "This adds Touch ID and a passphrase.\n",
+    root_keeps_passphrase!(),
+    every_fingerprint!()
+);
 
 /// Said before `lock passphrase` on a key under `touch-id` alone asks for anything: the passphrase goes
 /// beside the lock it has, and a copy of the file then opens with it anywhere.
@@ -104,31 +149,53 @@ pub const CHANGES_TOUCH_ID: &str = "This changes Touch ID on this machine's key.
 /// Who may open the new `touch-id` lock, said on its own after [`CHANGES_TOUCH_ID`].
 pub const EVERY_FINGERPRINT: &str = every_fingerprint!();
 
-/// Said before `root lock touch-id` asks or writes anything.
-pub const ROOT_BESIDE_PASSPHRASE: &str = concat!(
-    "your root will open with touch-id or its passphrase.\n",
+/// Said before `lock --remove` takes the passphrase off a key that keeps Touch ID: Touch ID will be its only
+/// lock.
+pub const TAKES_PASSPHRASE_OFF: &str = concat!(
+    "This takes the passphrase off.\n",
+    "Only Touch ID on this Mac will then open this machine's key.\n",
     finger_added_later!()
+);
+
+/// Said before `lock touch-id --remove` takes Touch ID off a key that keeps its passphrase.
+pub const TAKES_TOUCH_ID_OFF: &str = "This takes Touch ID off.\n\
+     Only the passphrase will then open this machine's key.";
+
+/// Said before a removal takes off the one lock the key has: a copy of its file then acts as this machine.
+pub const TAKES_LAST_LOCK_OFF: &str = "This takes the last lock off this machine's key.\n\
+     Anyone with a copy of its key file could then act as this machine.";
+
+/// The refusal of taking the passphrase off a key that keeps Touch ID, on a build with no enclave: no lock but
+/// the passphrase opens it here.
+pub const PASSPHRASE_STAYS_OFF_THE_MAC: &str =
+    "the passphrase stays: Touch ID opens this key only on the Mac that set it";
+
+/// Said before `root lock touch-id` asks or writes anything: who may open the new lock. The root always keeps
+/// its passphrase, so a new fingerprint never costs it, and that line is not said.
+pub const ROOT_BESIDE_PASSPHRASE: &str = concat!(
+    "Your root will open with Touch ID or its passphrase.\n",
+    every_fingerprint!()
 );
 
 /// Said when your root and this machine's key come to open with `touch-id` both: a dialog shows whatever
 /// words its asker gives, so it cannot tell the two apart for the person.
-pub const SHARED_FINGER: &str = "your root and this machine's key will both open with touch-id on this Mac.\n\
-     any program running as you can ask for a touch with any words in the dialog, so touch it only for a \
-     command you just ran.";
+pub const SHARED_FINGER: &str = "Your root and this machine's key will both open with Touch ID on this Mac.\n\
+     Any program running as you can ask for a touch with any words in the dialog,\n  \
+     so touch it only for a command you just ran.";
 
 /// The refusal of a change by touch on a key file with no `touch-id` lock left to open it: it changed since
 /// it was read.
 pub const TOUCH_ID_GONE: &str =
-    "this machine's key lost its touch-id lock while this ran; run this again.";
+    "this machine's key lost its Touch ID lock while this ran; run this again.";
 
 /// The refusal of setting `touch-id` anywhere but at this Mac's own screen, naming `command` to run there.
 pub fn set_elsewhere(here: TouchHere, command: &str) -> String {
     match here {
         TouchHere::OverSsh(variable) => format!(
-            "touch-id is set at this Mac's own screen, not over ssh ({variable} is set); run it there: {command}"
+            "Touch ID is set at this Mac's own screen, not over ssh ({variable} is set); run it there: {command}"
         ),
         TouchHere::Here | TouchHere::NoEnclave | TouchHere::NoTerminal => {
-            format!("touch-id is set at this Mac's own screen, unlocked; run it there: {command}")
+            format!("Touch ID is set at this Mac's own screen, unlocked; run it there: {command}")
         }
     }
 }
@@ -144,11 +211,32 @@ pub(crate) fn changed(touched: Touched, lines: &Lines<'_>) -> eyre::Result<()> {
     match touched {
         Touched::Opened(_) => Ok(()),
         Touched::Declined | Touched::NotHere => {
-            eyre::bail!("touch-id did not open {}; nothing changed", lines.key())
+            eyre::bail!("Touch ID did not open {}; nothing changed", lines.key())
         }
-        Touched::Failed(why) => Err(why.wrap_err(format!("touch-id did not open {}", lines.key()))),
+        Touched::Failed(why) => Err(why.wrap_err(format!("Touch ID did not open {}", lines.key()))),
         Touched::TimedOut => eyre::bail!("{TIMED_OUT}"),
     }
+}
+
+/// [`changed`], but for an act whose write is in place though the key store answered a failure after it
+/// (its directory not synced): that is a written result, its failure's chain handed back to be said beside it.
+///
+/// # Errors
+///
+/// As [`changed`], for every other end.
+pub(crate) fn landed(touched: Touched, lines: &Lines<'_>) -> eyre::Result<Option<String>> {
+    match touched {
+        Touched::Failed(why) if unsynced(&why) => Ok(Some(format!("{why:#}"))),
+        other => changed(other, lines).map(|()| None),
+    }
+}
+
+/// Whether `why` is the key store's answer that a write is in place but its directory was not synced.
+pub(crate) fn unsynced(why: &eyre::Report) -> bool {
+    matches!(
+        why.downcast_ref::<keystore::Error>(),
+        Some(keystore::Error::Unsynced { .. })
+    )
 }
 
 /// The variables an ssh session sets, read in this order. Present and not empty, any of them means no touch.
@@ -217,6 +305,48 @@ pub enum TouchAct {
     RemoveTouchId,
 }
 
+/// What a dialog asks the touch for, as the person reads it twice: in the dialog's reason and on the line
+/// that waits for it. Both come from one act, so the two never name different changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Act {
+    /// Open the key, to use it.
+    Use,
+    /// Write this machine's first key.
+    Make,
+    /// Put a new `touch-id` lock on the key.
+    Add,
+    /// Put a passphrase beside the key's `touch-id` lock.
+    AddPassphrase,
+    /// Take the key's `touch-id` lock off.
+    Remove,
+}
+
+impl Act {
+    /// The dialog's reason for this act on this machine's key.
+    pub const fn machine_key_reason(self) -> &'static str {
+        match self {
+            Self::Use => USE_MACHINE_KEY,
+            Self::Make => MAKE_MACHINE_KEY,
+            Self::Add => CHECK_MACHINE_KEY,
+            Self::AddPassphrase => ADD_PASSPHRASE_TO_MACHINE_KEY,
+            Self::Remove => REMOVE_TOUCH_ID_FROM_MACHINE_KEY,
+        }
+    }
+}
+
+impl TouchAct {
+    /// What the dialog for this act asks the touch for.
+    pub const fn act(&self) -> Act {
+        match self {
+            Self::Open => Act::Use,
+            Self::Write(_) => Act::Make,
+            Self::SealPlain | Self::BesidePassphrase { .. } => Act::Add,
+            Self::AddPassphrase { .. } => Act::AddPassphrase,
+            Self::RemoveTouchId => Act::Remove,
+        }
+    }
+}
+
 /// How a touch ended.
 #[derive(Debug)]
 pub enum Touched {
@@ -234,6 +364,15 @@ pub enum Touched {
 }
 
 impl Touch {
+    /// A touch for `act` on this machine's key `file`, its dialog's reason the act's own.
+    pub fn on_machine_key(file: KeyFile, act: TouchAct) -> Self {
+        Self {
+            file,
+            reason: act.act().machine_key_reason(),
+            act,
+        }
+    }
+
     /// Run the act against the key store. Blocks for as long as the dialog is up.
     ///
     /// # Errors
@@ -412,7 +551,7 @@ pub fn open(
             }
         }
         Route::Touch => {
-            prompt.say(&lines.waiting());
+            prompt.say(&lines.waiting(Act::Use));
             let touch = Touch {
                 file: file.clone(),
                 reason,
@@ -459,7 +598,7 @@ pub fn holds_passphrase(locked: &Locked) -> bool {
 /// answering as one, so the act the touch was for wrote nothing. It still never says nothing changed: a lock
 /// change may have been written before the touch (a key sealed under a chosen passphrase first), which stands,
 /// so the caller says what is left.
-pub const TIMED_OUT: &str = "touch-id waited 60 seconds and no touch came";
+pub const TIMED_OUT: &str = "Touch ID waited 60 seconds and no touch came";
 
 /// The lines a touch on one key file says, in the words of whose key it is.
 #[derive(Debug, Clone, Copy)]
@@ -496,14 +635,17 @@ impl<'a> Lines<'a> {
         }
     }
 
-    /// Said before the dialog, which may come up on another screen.
-    pub(crate) fn waiting(&self) -> String {
-        format!("waiting for touch-id to use {}…", self.key())
-    }
-
-    /// Said before the dialog that proves a new lock.
-    pub(crate) fn checking(&self) -> String {
-        format!("waiting for touch-id to check it opens {}…", self.key())
+    /// Said before the dialog for `act`, which may come up on another screen: what to do, and the change the
+    /// dialog names.
+    pub fn waiting(&self, act: Act) -> String {
+        let what = match act {
+            Act::Use => return format!("Touch the sensor to use {}…", self.key()),
+            Act::Make => "make this machine's key",
+            Act::Add => "add Touch ID",
+            Act::AddPassphrase => "add the passphrase",
+            Act::Remove => "remove Touch ID",
+        };
+        format!("Touch the sensor to {what}…")
     }
 
     /// The lock does not open on this Mac now. A file with a passphrase leads with setting it again, which
@@ -517,19 +659,19 @@ impl<'a> Lines<'a> {
         let key = self.key();
         if self.passphrase {
             return format!(
-                "touch-id does not open {key} on this Mac now.\n\
-                 check Touch ID & Password for a fingerprint you did not add, then set touch-id again: {}",
+                "Touch ID does not open {key} on this Mac now.\n\
+                 check Touch ID & Password for a fingerprint you did not add, then set Touch ID again: {}",
                 self.again()
             );
         }
         match self.whose {
-            Whose::Machine => "touch-id does not open this machine's key on this Mac now.\n\
-                 if you added a fingerprint, removing it lets touch-id open the key again.\n\
+            Whose::Machine => "Touch ID does not open this machine's key on this Mac now.\n\
+                 if you added a fingerprint, removing it lets Touch ID open the key again.\n\
                  otherwise, give this machine a new key and join again: swoosh leave --new-key"
                 .to_owned(),
             Whose::MachineKeepingRoot | Whose::Root => format!(
-                "touch-id does not open {key} on this Mac now.\n\
-                 if you added a fingerprint, removing it lets touch-id open the key again."
+                "Touch ID does not open {key} on this Mac now.\n\
+                 if you added a fingerprint, removing it lets Touch ID open the key again."
             ),
         }
     }
@@ -544,7 +686,7 @@ impl<'a> Lines<'a> {
     /// names no command, and says what the new lock will open with while there is still time to stop.
     pub fn before_set_again(&self) -> String {
         format!(
-            "warning: touch-id does not open {} on this Mac now.\n\
+            "warning: Touch ID does not open {} on this Mac now.\n\
              the new lock will open with every fingerprint now in Touch ID & Password; if one is not yours, \
              press ctrl-c and remove it first.",
             self.key()
@@ -565,11 +707,11 @@ impl<'a> Lines<'a> {
     /// lockout. Never read as dead.
     pub(crate) fn unchecked(&self) -> String {
         if self.passphrase {
-            return "touch-id cannot be checked now (the screen may be locked, or Touch ID locked out)."
+            return "Touch ID cannot be checked now (the screen may be locked, or Touch ID locked out)."
                 .to_owned();
         }
         format!(
-            "touch-id cannot be checked now (the screen may be locked, or Touch ID locked out), and {} has \
+            "Touch ID cannot be checked now (the screen may be locked, or Touch ID locked out), and {} has \
              no other lock; unlock this Mac and run this again",
             self.key()
         )
@@ -577,10 +719,10 @@ impl<'a> Lines<'a> {
 
     fn over_ssh(&self, variable: &str) -> String {
         if self.passphrase {
-            return format!("touch-id is not asked over ssh ({variable} is set).");
+            return format!("Touch ID is not asked over ssh ({variable} is set).");
         }
         format!(
-            "{} opens only with touch-id, which is not asked over ssh ({variable} is set); run this at the \
+            "{} opens only with Touch ID, which is not asked over ssh ({variable} is set); run this at the \
              Mac's own screen",
             self.key()
         )
@@ -588,7 +730,7 @@ impl<'a> Lines<'a> {
 
     fn no_terminal(&self) -> String {
         format!(
-            "{} opens with touch-id, which needs a person at a terminal on this Mac; start this from a \
+            "{} opens with Touch ID, which needs a person at a terminal on this Mac; start this from a \
              terminal there",
             self.key()
         )
@@ -596,18 +738,18 @@ impl<'a> Lines<'a> {
 
     fn no_enclave(&self) -> String {
         format!(
-            "{} opens only with touch-id, on the Mac that set it",
+            "{} opens only with Touch ID, on the Mac that set it",
             self.key()
         )
     }
 
     /// The touch was cancelled, on a file with no passphrase to fall to.
     fn declined(&self) -> String {
-        format!("touch-id was cancelled; {} was not opened", self.key())
+        format!("Touch ID was cancelled; {} was not opened", self.key())
     }
 
     fn failed(&self, why: &eyre::Report) -> String {
-        format!("touch-id did not open {}: {why:#}", self.key())
+        format!("Touch ID did not open {}: {why:#}", self.key())
     }
 }
 
