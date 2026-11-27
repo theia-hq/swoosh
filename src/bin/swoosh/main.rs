@@ -237,6 +237,48 @@ reaching_verbs! {
 }
 
 impl Command {
+    /// This command's path in swoosh's command table, without `swoosh` (`serve`, `root lock`): the words the
+    /// Touch ID dialog names. Literals from a match with no wildcard at any level, so a new command does not
+    /// build until it names itself, and nothing typed after the command (a peer, a service, a path) is in it.
+    const fn path(&self) -> &'static str {
+        match self {
+            Self::Serve(_) => "serve",
+            Self::Stop(_) => "stop",
+            Self::Service { command } => match command {
+                None => "service",
+                Some(service::ServiceCmd::Add(_)) => "service add",
+                Some(service::ServiceCmd::Rm(_)) => "service rm",
+                Some(service::ServiceCmd::On(_)) => "service on",
+                Some(service::ServiceCmd::Off(_)) => "service off",
+            },
+            Self::Ping(_) => "ping",
+            Self::Speed(_) => "speed",
+            Self::Status(_) => "status",
+            Self::Forward(_) => "forward",
+            Self::Proxy(_) => "proxy",
+            Self::Send(_) => "send",
+            Self::Sync(_) => "sync",
+            Self::Contact(cmd) => match cmd {
+                contact::ContactCmd::Add(_) => "contact add",
+                contact::ContactCmd::Rm(_) => "contact rm",
+            },
+            Self::Lock(_) => "lock",
+            Self::Root(cmd) => match cmd {
+                root::RootCmd::Backup(_) => "root backup",
+                root::RootCmd::Forget(_) => "root forget",
+                root::RootCmd::Restore(_) => "root restore",
+                root::RootCmd::Lock(_) => "root lock",
+            },
+            Self::Invite(_) => "invite",
+            Self::Join(_) => "join",
+            Self::Leave(_) => "leave",
+            Self::Revoke(_) => "revoke",
+            Self::Ssh(_) => "ssh",
+            Self::Share(_) => "share",
+            Self::Tree(_) => "tree",
+        }
+    }
+
     /// Split the parsed verb into the local `contact` group (no transport) or a reaching verb (binds
     /// one). The two paths diverge before any transport is composed, so `contact add` never spins up an
     /// endpoint it does not need.
@@ -727,6 +769,8 @@ async fn run() -> eyre::Result<()> {
         eprint!("{}", Cli::command().render_help());
         std::process::exit(2);
     };
+    // Named before the split, which consumes the command, and before any verb can open a key.
+    swoosh::touch::for_command(command.path());
     let verb = command.split();
 
     // The node home, resolved ONCE from `--home`/`SWOOSH_HOME` (else the platform default): every
@@ -1990,6 +2034,9 @@ mod bearer_dial_tests;
 #[cfg(test)]
 #[path = "bridge_route_tests.rs"]
 mod bridge_route_tests;
+#[cfg(test)]
+#[path = "command_path_tests.rs"]
+mod command_path_tests;
 #[cfg(test)]
 #[path = "dial_route_tests.rs"]
 mod dial_route_tests;

@@ -421,7 +421,10 @@ async fn root_lock_touch_id_adds_it_beside_the_passphrase() {
         touch.act,
         swoosh::touch::TouchAct::BesidePassphrase { .. }
     ));
-    assert_eq!(touch.reason, swoosh::touch::CHECK_ROOT);
+    assert_eq!(
+        touch.reason,
+        swoosh::touch::Reason::Change(swoosh::touch::CHECK_ROOT)
+    );
     assert_eq!(touch.file.path(), home.root_key());
     assert_eq!(
         prompt.said(),

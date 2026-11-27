@@ -1251,7 +1251,7 @@ fn open(file: &KeyFile, prompt: &mut impl Prompt) -> eyre::Result<Option<Secret>
             file,
             &locked,
             Asked::MachineKey,
-            touch::USE_MACHINE_KEY,
+            touch::Reason::to_use(touch::USE_MACHINE_KEY),
         )?)),
     })
 }
@@ -1406,7 +1406,7 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
             &file,
             &locked,
             Asked::MachineKey,
-            touch::USE_MACHINE_KEY,
+            touch::Reason::to_use(touch::USE_MACHINE_KEY),
         )?;
         return Ok(());
     }

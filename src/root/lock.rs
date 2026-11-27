@@ -134,7 +134,7 @@ pub async fn lock_touch_id(
     prompt.say(&lines.waiting(touch::Act::Add));
     let touch = Touch {
         file,
-        reason: touch::CHECK_ROOT,
+        reason: touch::Reason::Change(touch::CHECK_ROOT),
         act: TouchAct::BesidePassphrase { current },
     };
     touch::changed(prompt.touch(touch), &lines).map_err(prompt_error)?;

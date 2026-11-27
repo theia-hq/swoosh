@@ -13,8 +13,8 @@ use keystore::{Health, KeyFile, Method, Stored};
 #[cfg(target_os = "macos")]
 use super::Touch;
 use super::{
-    Route, SSH_VARIABLES, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere, Touched, USE_ROOT, open,
-    over_ssh, route,
+    Reason, Route, SSH_VARIABLES, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere, Touched,
+    USE_MACHINE_KEY, USE_ROOT, open, over_ssh, route,
 };
 use crate::passphrase::Asked;
 use crate::testkit::Counting;
@@ -79,7 +79,7 @@ fn opened(
     locked: &keystore::Locked,
     asked: Asked<'_>,
 ) -> eyre::Result<keystore::PublicKey> {
-    open(prompt, file, locked, asked, USE_ROOT).map(|secret| secret.public_key())
+    open(prompt, file, locked, asked, Reason::to_use(USE_ROOT)).map(|secret| secret.public_key())
 }
 
 /// No ssh variable set reads as no ssh session.
@@ -214,7 +214,11 @@ fn a_live_lock_opens_by_one_touch_and_asks_no_passphrase() {
     assert_eq!(prompt.events(), 0, "no passphrase asked");
     assert_eq!(prompt.touches().len(), 1);
     assert!(matches!(prompt.touches()[0].act, TouchAct::Open));
-    assert_eq!(prompt.touches()[0].reason, USE_ROOT);
+    // The act, not the command: the command is a process's, set or not by whatever ran first.
+    assert!(matches!(
+        prompt.touches()[0].reason,
+        Reason::Use { act: USE_ROOT, .. }
+    ));
     assert_eq!(prompt.said(), ["Touch the sensor to use your root…"]);
     assert!(prompt.warned().is_empty(), "the wait attends the touch");
 }
@@ -510,7 +514,7 @@ fn the_terminal_touch_locks_then_opens_a_key() {
     let file = KeyFile::new(scratch("hardware-opens").join("machine").join("key"));
     let made = Touch {
         file: file.clone(),
-        reason: "make a test key (touch to allow)",
+        reason: Reason::Change("make a test key (touch to allow)"),
         act: TouchAct::Write(secret(0x51)),
     };
     assert!(matches!(Terminal.touch(made), Touched::Opened(None)));
@@ -518,7 +522,7 @@ fn the_terminal_touch_locks_then_opens_a_key() {
     assert_eq!(Terminal.health(&locked), Some(Health::Live));
     let open = Touch {
         file,
-        reason: "open the test key (touch to allow)",
+        reason: Reason::Change("open the test key (touch to allow)"),
         act: TouchAct::Open,
     };
     let Touched::Opened(Some(opened)) = Terminal.touch(open) else {
@@ -538,13 +542,13 @@ fn the_terminal_touch_reads_a_cancel_as_declined() {
     let file = KeyFile::new(scratch("hardware-cancel").join("machine").join("key"));
     let made = Touch {
         file: file.clone(),
-        reason: "make a test key (touch to allow)",
+        reason: Reason::Change("make a test key (touch to allow)"),
         act: TouchAct::Write(secret(0x52)),
     };
     assert!(matches!(Terminal.touch(made), Touched::Opened(None)));
     let open = Touch {
         file,
-        reason: "open the test key (press Cancel)",
+        reason: Reason::Change("open the test key (press Cancel)"),
         act: TouchAct::Open,
     };
     assert!(matches!(Terminal.touch(open), Touched::Declined));
@@ -562,14 +566,14 @@ fn the_terminal_touch_times_out_after_a_minute() {
     let file = KeyFile::new(scratch("hardware-timeout").join("machine").join("key"));
     let made = Touch {
         file: file.clone(),
-        reason: "make a test key (touch to allow)",
+        reason: Reason::Change("make a test key (touch to allow)"),
         act: TouchAct::Write(secret(0x53)),
     };
     assert!(matches!(Terminal.touch(made), Touched::Opened(None)));
     let started = std::time::Instant::now();
     let open = Touch {
         file,
-        reason: "open the test key (touch nothing)",
+        reason: Reason::Change("open the test key (touch nothing)"),
         act: TouchAct::Open,
     };
     assert!(matches!(Terminal.touch(open), Touched::TimedOut));
@@ -583,7 +587,7 @@ fn the_terminal_touch_times_out_after_a_minute() {
 mod hardware_acts {
     use keystore::{KeyFile, Method, Protection, Stored};
 
-    use super::{PASSPHRASE, Touch, TouchAct, Touched, scratch, secret};
+    use super::{PASSPHRASE, Reason, Touch, TouchAct, Touched, scratch, secret};
     use crate::passphrase::{Prompt as _, Terminal};
 
     fn passphrase(text: &str) -> keystore::Passphrase {
@@ -602,7 +606,7 @@ mod hardware_acts {
         let file = KeyFile::new(scratch(tag).join("machine").join("key"));
         let made = Touch {
             file: file.clone(),
-            reason: "make a test key (touch to allow)",
+            reason: Reason::Change("make a test key (touch to allow)"),
             act: TouchAct::Write(secret(0x61)),
         };
         assert!(matches!(Terminal.touch(made), Touched::Opened(None)));
@@ -613,7 +617,7 @@ mod hardware_acts {
     fn after(file: &KeyFile, act: TouchAct) -> Vec<Method> {
         let touch = Touch {
             file: file.clone(),
-            reason: "change the test key's locks (touch to allow)",
+            reason: Reason::Change("change the test key's locks (touch to allow)"),
             act,
         };
         let touched = Terminal.touch(touch);
@@ -712,10 +716,15 @@ fn the_waiting_line_names_the_dialogs_act() {
             waiting.starts_with(&format!("Touch the sensor to {verb} ")),
             "{waiting}"
         );
-        assert_eq!(
-            super::Touch::on_machine_key(file.clone(), act).reason,
-            reason
-        );
+        // Only opening the key to use it may name a command; a change names itself alone.
+        let opens = matches!(act, TouchAct::Open);
+        // The act's words, read apart from any command this process may have named.
+        let (words, uses) = match super::Touch::on_machine_key(file.clone(), act).reason {
+            Reason::Change(words) => (words, false),
+            Reason::Use { act, .. } => (act, true),
+        };
+        assert_eq!(words, reason);
+        assert_eq!(uses, opens, "{reason}");
     }
     // Your root is used and gets Touch ID, by the reasons its callers name.
     assert_eq!(
@@ -728,6 +737,36 @@ fn the_waiting_line_names_the_dialogs_act() {
         "Touch the sensor to add Touch ID…"
     );
     assert_eq!(super::CHECK_ROOT, "add Touch ID to your root");
+}
+
+/// A dialog that opens a key to use it names the command that asked, by its path, and only then: unnamed (a
+/// library caller, a test) it says the bare act, and a change never carries a path. Red when the path is
+/// dropped or moves off its words.
+#[test]
+fn the_use_reasons_name_the_command() {
+    let named = |act, command| Reason::Use {
+        act,
+        command: Some(command),
+    };
+    assert_eq!(
+        named(USE_MACHINE_KEY, "serve").to_string(),
+        "use this machine's key for swoosh serve"
+    );
+    assert_eq!(
+        named(USE_ROOT, "root restore").to_string(),
+        "use your root for swoosh root restore"
+    );
+    // Unnamed, the bare act. Built whole rather than read from this process, so no other test can set it.
+    let unnamed = |act| Reason::Use { act, command: None };
+    assert_eq!(
+        unnamed(USE_MACHINE_KEY).to_string(),
+        "use this machine's key"
+    );
+    assert_eq!(unnamed(USE_ROOT).to_string(), "use your root");
+    assert_eq!(
+        Reason::Change(super::CHECK_ROOT).to_string(),
+        "add Touch ID to your root"
+    );
 }
 
 /// The lines said before a lock act, byte for byte: each is the ruled words, so a constant that drifts from

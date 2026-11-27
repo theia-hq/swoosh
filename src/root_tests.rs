@@ -2868,7 +2868,14 @@ async fn present_opens_a_root_by_its_touch() {
     let [touch] = prompt.touches() else {
         panic!("one touch");
     };
-    assert_eq!(touch.reason, crate::touch::USE_ROOT);
+    // The act, not the command: the command is a process's, set or not by whatever ran first.
+    assert!(matches!(
+        touch.reason,
+        crate::touch::Reason::Use {
+            act: crate::touch::USE_ROOT,
+            ..
+        }
+    ));
     assert_eq!(touch.file.path(), home.root_key());
 }
 

@@ -17,8 +17,10 @@
 //! the dialog is closed and nothing was written, a touch in the last instant is acted on, and `home.lock`
 //! holds until the call ends.
 
+use core::fmt;
 use core::time::Duration;
 use std::ffi::OsString;
+use std::sync::OnceLock;
 
 use keystore::{Health, KeyFile, Locked, Method, NewLock, Passphrase, Protection, Stored, Unlock};
 
@@ -30,7 +32,8 @@ use crate::passphrase::{Asked, Prompt};
 /// enough that a parked command lets go of what it holds.
 pub const TOUCH_WAIT: Duration = Duration::from_secs(60);
 
-/// The reason a dialog shows to open this machine's key: `<program> is trying to <reason>`.
+/// The reason a dialog shows to open this machine's key: `<program> is trying to <reason>`, followed by the
+/// command that asked where one is named ([`Reason::Use`]).
 pub const USE_MACHINE_KEY: &str = "use this machine's key";
 
 /// The reason a dialog shows to prove a new `touch-id` lock on this machine's key.
@@ -47,7 +50,7 @@ pub const REMOVE_TOUCH_ID_FROM_MACHINE_KEY: &str = "remove Touch ID from this ma
 /// not say `add` while the terminal says `make`.
 pub const MAKE_MACHINE_KEY: &str = "make this machine's key";
 
-/// The reason a dialog shows to open your root.
+/// The reason a dialog shows to open your root, followed by the command that asked where one is named.
 pub const USE_ROOT: &str = "use your root";
 
 /// The reason a dialog shows to prove a new `touch-id` lock on your root.
@@ -267,6 +270,58 @@ pub fn over_ssh(variable: impl Fn(&str) -> Option<OsString>) -> Option<&'static 
         .find(|name| variable(name).is_some_and(|value| !value.is_empty()))
 }
 
+/// The command this process runs, by its path in swoosh's own command table (`serve`, `root restore`). A
+/// static set once rather than a field threaded to each open: the key is opened from three sites that build
+/// their own prompt, and only the binary, after its parse, knows the command.
+static COMMAND: OnceLock<&'static str> = OnceLock::new();
+
+/// Name the command this process runs, so a dialog that opens a key to use it says which command asked:
+/// `use your root for swoosh invite`. The name is a label, not a check: any program running as you can show
+/// a dialog with any words. It takes only `&'static` words, the binary's own command table, so nothing typed
+/// after the command and no peer's text can reach a dialog. The first call stands.
+pub fn for_command(path: &'static str) {
+    // A second call is ignored: one process runs one command, and its first name is that command's.
+    let _ = COMMAND.set(path);
+}
+
+/// What a dialog says a touch is for, shown as `<program> is trying to <reason>`. Only opening a key to use it
+/// names the command that asked; a change names itself (`add Touch ID to your root`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// A change to a key's locks, said alone.
+    Change(&'static str),
+    /// A key opened to use it, `act` naming the key, for `command` where one is named.
+    Use {
+        /// The act on the key: [`USE_MACHINE_KEY`] or [`USE_ROOT`].
+        act: &'static str,
+        /// The command's path, as [`for_command`] named it.
+        command: Option<&'static str>,
+    },
+}
+
+impl Reason {
+    /// A key opened to use it, for the command this process runs where one is named.
+    pub fn to_use(act: &'static str) -> Self {
+        Self::Use {
+            act,
+            command: COMMAND.get().copied(),
+        }
+    }
+}
+
+/// The words the key store shows: the bare act, or `<act> for swoosh <path>`.
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Change(act) | Self::Use { act, command: None } => f.write_str(act),
+            Self::Use {
+                act,
+                command: Some(command),
+            } => write!(f, "{act} for swoosh {command}"),
+        }
+    }
+}
+
 /// One touch to ask for: the act it opens the way to, on `file`, with `reason` in the dialog. Owned whole,
 /// so the thread that waits on the enclave needs nothing of the caller's.
 #[derive(Debug)]
@@ -274,7 +329,7 @@ pub struct Touch {
     /// The key file the act is on.
     pub file: KeyFile,
     /// Why the touch is asked, shown in the dialog as `<program> is trying to <reason>`.
-    pub reason: &'static str,
+    pub reason: Reason,
     /// What the touch is for.
     pub act: TouchAct,
 }
@@ -323,13 +378,13 @@ pub enum Act {
 
 impl Act {
     /// The dialog's reason for this act on this machine's key.
-    pub const fn machine_key_reason(self) -> &'static str {
+    pub fn machine_key_reason(self) -> Reason {
         match self {
-            Self::Use => USE_MACHINE_KEY,
-            Self::Make => MAKE_MACHINE_KEY,
-            Self::Add => CHECK_MACHINE_KEY,
-            Self::AddPassphrase => ADD_PASSPHRASE_TO_MACHINE_KEY,
-            Self::Remove => REMOVE_TOUCH_ID_FROM_MACHINE_KEY,
+            Self::Use => Reason::to_use(USE_MACHINE_KEY),
+            Self::Make => Reason::Change(MAKE_MACHINE_KEY),
+            Self::Add => Reason::Change(CHECK_MACHINE_KEY),
+            Self::AddPassphrase => Reason::Change(ADD_PASSPHRASE_TO_MACHINE_KEY),
+            Self::Remove => Reason::Change(REMOVE_TOUCH_ID_FROM_MACHINE_KEY),
         }
     }
 }
@@ -380,6 +435,9 @@ impl Touch {
     /// The key store's refusal, the touch's own included.
     pub(crate) fn run(self) -> Result<Option<keystore::Secret>, keystore::Error> {
         let Self { file, reason, act } = self;
+        // Rendered here, once, to the words the key store takes.
+        let reason = reason.to_string();
+        let reason = reason.as_str();
         let touch = Unlock::TouchId {
             reason,
             wait: TOUCH_WAIT,
@@ -540,7 +598,7 @@ pub fn open(
     file: &KeyFile,
     locked: &Locked,
     asked: Asked<'_>,
-    reason: &'static str,
+    reason: Reason,
 ) -> eyre::Result<keystore::Secret> {
     let lines = Lines::of(asked, file, holds_passphrase(locked));
     match route(prompt, file, locked, asked) {

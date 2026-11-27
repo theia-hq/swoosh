@@ -9,6 +9,7 @@ All notable changes to swoosh, newest first.
   touch-id` each add a lock beside the ones the key has, and any one opens it. `--remove` takes one off.
   `swoosh root lock touch-id` adds the same lock beside your root's passphrase. `status` says whether each
   lock opens here.
+- **The Touch ID dialog says which command asked.** It reads `use this machine's key for swoosh serve`.
 - **`revoke root:<key>` ends a root for good on the machine it runs on.** It needs a terminal and the
   8 characters after the key's `ed01` typed back. Where the root is kept, it asks for the root's passphrase
   and deletes the root; on one of its devices, the machine leaves it; anywhere else, this machine never
