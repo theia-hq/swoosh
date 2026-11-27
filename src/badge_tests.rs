@@ -127,3 +127,18 @@ fn a_real_signed_badge_reads_its_own_minted_expiry() {
         "the reading is the minted TTL, got {left:?}"
     );
 }
+
+/// The remedy is the detail under a head, word for word: each sentence on its own line at indent two, each
+/// command alone at indent four, and the key whole. Every surface that prints it compares against this
+/// function, so only this test sees its bytes change. Red when a sentence and its command share a line.
+#[test]
+fn the_remedy_is_a_detail_block() {
+    let node = TestNode::seeded(1).node_id();
+    assert_eq!(
+        super::remedy(node),
+        format!(
+            "  Renew it where your root is kept:\n    swoosh invite <name> {node}\n  This machine picks it \
+             up the next time it reaches one of your devices.\n  To pick it up now:\n    swoosh sync"
+        )
+    );
+}

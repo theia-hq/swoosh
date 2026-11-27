@@ -151,21 +151,21 @@ fn status_never_dials_and_runs_with_no_node() {
     let out = swoosh(&scratch.home(), &["status"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).contains("this machine: not one of your devices yet"),
+        text(&out.stdout).starts_with("this machine     not one of your devices yet\n"),
         "{}",
         text(&out.stdout)
     );
 }
 
-/// On a home with no key, `status` prints `key: none yet` and makes no key: no `machine/` appears.
+/// On a home with no key, `status` says `none yet` on its `key` row and makes no key: no `machine/` appears.
 #[test]
 fn status_on_a_home_with_no_key_makes_none() {
     let scratch = Scratch::new("no-key");
     let out = swoosh(&scratch.home(), &["status"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
-        text(&out.stdout).lines().next(),
-        Some("key: none yet"),
+        text(&out.stdout).lines().nth(1),
+        Some("  key            none yet"),
         "{}",
         text(&out.stdout)
     );
@@ -204,19 +204,39 @@ fn status_key_stdout_is_the_key_alone() {
     assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
 }
 
-/// Line 1 is exactly `key: <key>`, line 2 `key lock: none` on a plain key, and line 3 `home: <dir>`.
+/// The `this machine` block is its title, then exactly `key <key>` and `lock none` on a plain key, each
+/// value at column 17, then `serving`, then the home last.
 #[test]
-fn status_prints_key_lock_then_home() {
+fn status_prints_key_then_its_lock() {
     let scratch = Scratch::new("line-one");
     let key = keyed(&scratch.home());
     let out = swoosh(&scratch.home(), &["status"]);
     let stdout = text(&out.stdout);
     let mut lines = stdout.lines();
-    assert_eq!(lines.next(), Some(format!("key: {key}").as_str()));
-    assert_eq!(lines.next(), Some("key lock: none"));
     assert_eq!(
         lines.next(),
-        Some(format!("home: {}", scratch.home().display()).as_str())
+        Some("this machine     not one of your devices yet")
+    );
+    assert_eq!(
+        lines.next(),
+        Some(format!("  key            {key}").as_str())
+    );
+    assert_eq!(lines.next(), Some("  lock           none"));
+    assert!(
+        lines
+            .next()
+            .is_some_and(|line| line.starts_with("  serving        ")),
+        "{stdout}"
+    );
+    let dir = scratch.home().display().to_string();
+    let home = if 17 + dir.chars().count() <= 80 {
+        format!("  home           {dir}\n")
+    } else {
+        format!("  home\n    {dir}\n")
+    };
+    assert!(
+        stdout.contains(&format!("{home}\n")),
+        "the home row ends the block: {stdout}"
     );
 }
 
@@ -228,7 +248,7 @@ fn status_report_is_on_stdout_and_its_notices_on_stderr() {
     let out = swoosh(&scratch.home(), &["status"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-    assert!(stdout.starts_with("key: "), "{stdout}");
+    assert!(stdout.starts_with("this machine "), "{stdout}");
     assert!(
         stdout.contains("to join yours, paste its invite into: swoosh join"),
         "{stdout}"
@@ -256,10 +276,19 @@ fn status_with_a_root_copy_never_prompts() {
         "status reads a sealed root without asking for it: {}",
         text(&out.stderr)
     );
-    assert!(
-        text(&out.stdout).contains("on this machine, locked with a passphrase."),
-        "{}",
-        text(&out.stdout)
+    let stdout = text(&out.stdout);
+    let root: Vec<&str> = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("your root"))
+        .map(|block| block.lines().collect())
+        .unwrap_or_default();
+    assert_eq!(
+        (root.first(), root.get(2)),
+        (
+            Some(&"your root        on this machine"),
+            Some(&"  lock           passphrase")
+        ),
+        "{stdout}"
     );
 
     let moved = Scratch::new("root-elsewhere");
@@ -285,7 +314,10 @@ fn status_with_a_root_copy_never_prompts() {
     let out = swoosh(&moved.home(), &["status"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).contains(&format!("root:{} not on this machine.", root.node_id())),
+        text(&out.stdout).contains(&format!(
+            "\n\nyour root        on another machine\n  key            root:{}\n",
+            root.node_id()
+        )),
         "{}",
         text(&out.stdout)
     );

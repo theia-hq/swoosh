@@ -37,7 +37,7 @@ use crate::commands::connect::{
 };
 use crate::commands::machine;
 use crate::commands::route::{Pipe, Route};
-use crate::commands::through_serve::raise_open_files;
+use crate::commands::through_serve::{StandingEnded, raise_open_files};
 
 /// Mint a local URL that reaches an origin through a machine you name (your own exit, over the overlay).
 #[derive(Debug, Args)]
@@ -392,12 +392,53 @@ impl Client<'_> {
     }
 }
 
-/// The body of a failed request's `502`: one line, `proxy failed: ` and the first line of the error,
-/// which for an ended standing carries its remedy. The lines below it address the person at the
-/// terminal and stay there.
+/// The body of a failed request's `502`: one line, `proxy failed: ` and the first line of the error, its
+/// head. An ended standing's remedy is the detail under that head, so a program reading the body, which
+/// never sees the terminal, gets it after the head as one clause. Every other detail line addresses the
+/// person at the terminal and stays there.
 fn failed(error: &eyre::Report) -> String {
-    let error = format!("{error:#}");
-    format!("proxy failed: {}", error.lines().next().unwrap_or_default())
+    let text = format!("{error:#}");
+    let head = text.lines().next().unwrap_or_default();
+    match ended_remedy(error) {
+        Some(remedy) => format!("proxy failed: {head}; {}", clause(&remedy)),
+        None => format!("proxy failed: {head}"),
+    }
+}
+
+/// The remedy an ended standing names, keyed to the machine it names; `None` for any other error, and for
+/// an ended standing that could not tell which key `serve` runs as.
+fn ended_remedy(error: &eyre::Report) -> Option<String> {
+    error
+        .chain()
+        .find_map(|cause| {
+            if let Some(StandingEnded(node)) = cause.downcast_ref::<StandingEnded>() {
+                return *node;
+            }
+            match cause.downcast_ref::<swoosh::reaching::ResolveError>() {
+                Some(swoosh::reaching::ResolveError::Ended { node, .. }) => Some(*node),
+                _ => None,
+            }
+        })
+        .map(swoosh::badge::remedy)
+}
+
+/// A detail block's first sentence as one clause after a head: lowercase, no closing mark, and the
+/// command it introduces after `: ` when the next line is that command.
+fn clause(detail: &str) -> String {
+    let mut lines = detail.lines().map(str::trim);
+    let sentence = lines.next().unwrap_or_default();
+    let mut chars = sentence.chars();
+    let lowered: String = chars
+        .next()
+        .map(|first| first.to_lowercase().chain(chars).collect())
+        .unwrap_or_default();
+    match lowered.strip_suffix(':') {
+        Some(lead) => match lines.next().filter(|line| line.starts_with("swoosh ")) {
+            Some(command) => format!("{lead}: {command}"),
+            None => lead.to_owned(),
+        },
+        None => lowered.trim_end_matches('.').to_owned(),
+    }
 }
 
 /// One local client's connection, and how far its answer got, so that a client dropped mid-answer

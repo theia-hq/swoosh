@@ -379,9 +379,9 @@ async fn the_bridge_carries_its_peer_hints_through_serve() {
 /// both.)
 #[tokio::test]
 async fn an_expiring_badge_warns_once_through_serve() {
-    let warning = "swoosh: this device's membership badge expires in";
+    let warning = "warning: this device's standing expires in";
     let remedy = format!(
-        "renew it where your root is kept: swoosh invite <name> {}.",
+        "\n  Renew it where your root is kept:\n    swoosh invite <name> {}\n",
         TestNode::seeded(RESIDENT).node_id()
     );
     for (days, warns) in [(3, true), (60, false)] {
@@ -421,7 +421,7 @@ async fn an_expiring_badge_warns_once_through_serve() {
 /// say nothing more.
 #[tokio::test]
 async fn an_expiring_badge_warns_once_by_own_bind() {
-    let warning = "swoosh: this device's membership badge expires in";
+    let warning = "warning: this device's standing expires in";
     let home = device_keyed("warn-own", 3, false).await;
     let (status, stderr) = swoosh(&home, &["ping", "me/nas", "-c", "1", "--local"]).await;
     assert_eq!(status, Some(1), "{stderr}");
@@ -433,7 +433,7 @@ async fn an_expiring_badge_warns_once_by_own_bind() {
 /// with no Open, no exchange and no warning for a badge inside its window.
 #[tokio::test]
 async fn a_reach_flag_refuses_a_dialing_verb_before_anything() {
-    let warning = "swoosh: this device's membership badge expires in";
+    let warning = "warning: this device's standing expires in";
     let home = device("moot", 3).await;
     let file = a_file(&home);
     for mut argv in dialing(&file) {
@@ -1033,7 +1033,7 @@ async fn a_stalled_probe_is_unresponsive() {
 /// badge inside its window first.
 #[tokio::test]
 async fn the_self_dial_check_mints_no_key() {
-    let warning = "swoosh: this device's membership badge expires in";
+    let warning = "warning: this device's standing expires in";
     let home = device("self-nokey", 3).await;
     std::fs::remove_file(home.key()).unwrap();
     // A port nothing answers on, so the own bind's dial fails here without asking the internet.

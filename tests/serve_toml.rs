@@ -242,7 +242,7 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
     );
     let status = swoosh_in(&home, &run, &["status"]);
     assert!(
-        String::from_utf8_lossy(&status.stdout).contains("serving: ping\n"),
+        String::from_utf8_lossy(&status.stdout).contains("\n  serving        ping\n"),
         "the route stays absent: {}",
         String::from_utf8_lossy(&status.stdout)
     );

@@ -12,25 +12,33 @@ Usage: swoosh status [OPTIONS] [machine]
   --key    Print this machine's key and nothing else
 ```
 
-**Example.** With a key, no saved service list and nothing running, `swoosh status` includes this row:
+**Example.** With a key, no saved service list and nothing running, `swoosh status` starts with this block:
 
-<!-- live-run: local status with a key, no saved service list and no running serve; only the serving row captured -->
+<!-- live-run: local status with a key, no saved service list and no running serve; only the first block captured -->
 ```console
-serving: ping, speed, when swoosh serve runs
+this machine     not one of your devices yet
+  key            ed01slc6uxmtglqlm77rtvyq6mkcwkd5nhumkipcpkgoemdmxchhoa6a
+  lock           none
+  serving        ping, speed, when swoosh serve runs
+  home           /home/ada/.local/state/swoosh
 ```
 
 **Things to know.** Bare `status` reads this machine's own files and never dials, so it runs with nothing
 serving and never asks for a passphrase. The report is on stdout; a line such as `made this machine's key`
-is on stderr. `swoosh status --key` prints the key alone, for a script. Sections with no row are left out.
-On a device, `devices:` is your root's list as of the last sync.
+is on stderr. `swoosh status --key` prints the key alone, for a script.
 
-`serving:` appears on every home with a key. It shows service names, with `(off)` beside those turned off.
+The report is blocks a blank line apart: `this machine`, `your root`, `reach`, `internal routes`, `devices`,
+`contacts` and `links you shared`, in that order. A block with no row is left out, and `this machine` always
+ends with its `home` row. On a device, `devices` is your root's list, and its title reads
+`devices (as of the last sync, …)`. A contact saved as one machine reads `one machine` beside its key.
+
+The `serving` row appears on every home with a key. It shows service names, with `(off)` beside those turned off.
 Use those names with `swoosh service on` or `swoosh service off`. While serving, it names what is bound: a bound service that is not saved is listed after the saved ones, and a saved one not yet bound is left out. A name the serve is refusing reads `(refusing new connections)`; retargeted names still refer to the old route. When nothing runs, the row says
 what `swoosh serve` would start. An emptied list says `nothing, even when swoosh serve runs`. If
 `serve.toml` cannot be read or its service list is invalid, the row says `unknown`; stderr names the file
 and the reason, and `status` still exits 0. When admitting devices, `admitting root:` and the root key
 follow the service list.
-With `swoosh serve` running here, bare `status` also lists how it is reached under `reach:`, with the public, tunnel and
+With `swoosh serve` running here, bare `status` also lists how it is reached under `reach`, with the public, tunnel and
 this computer addresses the banner can leave out, and the routes it answers under `internal routes`, and who reaches each.
 Both are left out when the serving row says `unknown`.
 

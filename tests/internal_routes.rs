@@ -434,7 +434,7 @@ fn a_running_serve_binds_exactly_the_internal_table() {
         shown.iter().any(|row| row.starts_with("  this computer  ")),
         "{banner}"
     );
-    assert_eq!(reach_rows(&status, "reach:"), shown, "{banner}\n{status}");
+    assert_eq!(reach_rows(&status, "reach"), shown, "{banner}\n{status}");
 
     let mut bound: Vec<String> = menu
         .unwrap()

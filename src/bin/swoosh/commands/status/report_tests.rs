@@ -21,6 +21,7 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use zeroize::Zeroizing;
 
 use super::{Print, run_to, unix_now};
+use crate::screen::law::Rule;
 
 /// This machine's key.
 const OWN: u8 = 0x11;
@@ -114,13 +115,89 @@ fn gone(seed: u8, label: &str) -> RevokedDevice {
     }
 }
 
-/// The report `status` prints on stdout for `home`.
+/// The report `status` prints on stdout for `home`, its stdout and stderr held to the screen law.
 async fn status(home: &Home) -> String {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     run_to(home, Print::Report, &mut out, &mut err)
         .await
         .expect("status reads the home");
-    String::from_utf8(out).expect("the report is text")
+    held(&String::from_utf8(err).expect("the notices are text"));
+    held(&String::from_utf8(out).expect("the report is text")).to_owned()
+}
+
+/// Lines `status` prints as another module words them for every command that prints them, and that break
+/// the screen law: who words each, how it starts, and the rule it breaks. [`held`] holds every other line,
+/// and holds each of these to breaking exactly its rule, so a change to one goes red here: fixed, it no
+/// longer breaks, and reworded, it no longer matches. [`every_unheld_line_still_breaks`] fails when one is
+/// no longer printed. The first match wins.
+const UNHELD: [(&str, &str, Rule); 4] = [
+    // `standing`'s line for a torn root key runs past 80.
+    (
+        "standing",
+        "this machine's records disagree (root.key is not a root key); swoosh cannot tell which root it \
+         trusts",
+        Rule::Width,
+    ),
+    // `standing`'s line for any other disagreement is two sentences, then its command.
+    (
+        "standing",
+        "this machine's records disagree (",
+        Rule::TwoSentences,
+    ),
+    // `touch`'s line for a dead Touch ID lock beside a passphrase runs past 80.
+    (
+        "touch",
+        "check Touch ID & Password for a fingerprint you did not add, then set Touch ID again: swoosh ",
+        Rule::Width,
+    ),
+    // A `serve.toml` that cannot be used is named on stderr by its whole path, then why.
+    ("serve_toml", "/serve.toml", Rule::Width),
+];
+
+/// The [`UNHELD`] entry `line` is, by its start (a path for a `serve.toml` notice, which leads with one).
+fn unheld(line: &str) -> Option<&'static (&'static str, &'static str, Rule)> {
+    UNHELD.iter().find(|(_, start, _)| {
+        line.starts_with(start) || (start.starts_with('/') && line.contains(start))
+    })
+}
+
+/// `line` with a `serve.toml` notice's home, the temp directory a runner chose, put in a fixed 64-column
+/// stand-in, so the rule it breaks is the same on every runner: a notice that names a home of that length
+/// runs past 80 by its path alone. Any other line as it is.
+fn runner_free(line: &str) -> String {
+    match line.split_once("/serve.toml") {
+        Some((_, rest)) => format!("/{}/serve.toml{rest}", "h".repeat(52)),
+        None => line.to_owned(),
+    }
+}
+
+/// Hold `captured`, what `status` printed on one stream, to the screen law: each line [`UNHELD`] names to
+/// breaking its rule, and the rest together; give it back as it was.
+fn held(captured: &str) -> &str {
+    let mut rest = String::new();
+    for line in captured.lines() {
+        match unheld(line) {
+            Some((owner, _, rule)) => match crate::screen::law::read(&runner_free(line)) {
+                Err(breach) if breach.rule == *rule => {}
+                held => {
+                    panic!("{owner}'s {line:?} no longer breaks {rule:?} ({held:?}): fix UNHELD")
+                }
+            },
+            None => {
+                rest.push_str(line);
+                rest.push('\n');
+            }
+        }
+    }
+    if let Err(breach) = crate::screen::law::holds(&rest) {
+        panic!("{breach}\n{captured}");
+    }
+    captured
+}
+
+/// A row of a head block, `label` and its value at column 17, as `status` prints it.
+fn head_row(label: &str, value: &str) -> String {
+    format!("  {label:<13}  {value}")
 }
 
 /// A device with no recorded list reports the default when no resident runs.
@@ -131,12 +208,13 @@ async fn status_with_no_node_prints_the_default() {
     let out = status(&home).await;
     assert!(
         out.lines()
-            .any(|line| line == "serving: ping, speed, when swoosh serve runs"),
-        "the serving line is printed with nothing running: {out}"
+            .any(|line| line == head_row("serving", "ping, speed, when swoosh serve runs")),
+        "the serving row is printed with nothing running: {out}"
     );
 }
 
-/// While a `serve --admit` runs here, `serving:` names the root it admits.
+/// While a `serve --admit` runs here, the `serving` row names the root it admits: past 80 beside the label,
+/// so the row stacks, wrapped between its words and never inside the key.
 #[tokio::test]
 async fn status_names_the_root_a_running_serve_admits() {
     let home = home("admitting");
@@ -144,14 +222,16 @@ async fn status_names_the_root_a_running_serve_admits() {
     let running = LocalResident::start(&home, &["ping", "speed"], Some(root));
     let out = status(&home).await;
     assert!(
-        out.lines()
-            .any(|line| line == format!("serving: ping, speed, admitting root:{root}")),
+        out.contains(&format!(
+            "\n  serving\n    ping, speed, admitting\n    root:{root}\n"
+        )),
         "{out}"
     );
     drop(running);
     let out = status(&home).await;
     assert!(
-        out.contains("serving: ping, speed, when swoosh serve runs"),
+        out.lines()
+            .any(|line| line == head_row("serving", "ping, speed, when swoosh serve runs")),
         "once it stops, a non-device still reports the default: {out}"
     );
 }
@@ -162,14 +242,15 @@ async fn status_names_the_root_a_running_serve_admits() {
 async fn status_warns_while_two_copies_disagree() {
     let home = home("fork");
     device_of(&home).await;
-    let warning = "two copies of your root have been used: your devices hold two different lists. Keep \
-                   one copy; the next time you use it, it settles this. If you did not use two copies, \
-                   your root may be stolen: swoosh revoke --help";
-    assert!(!status(&home).await.contains("two copies"));
+    let warning = "Two copies of your root have been used: your devices hold two different lists.\n\
+                   Keep one copy; the next time you use it, it settles this.\n\
+                   If you did not use two copies, your root may be stolen:\n  \
+                   swoosh revoke --help\n";
+    assert!(!status(&home).await.contains("copies"));
 
     std::fs::write(home.devices_conflict(), b"").expect("an empty fork file");
     assert!(
-        !status(&home).await.contains("two copies"),
+        !status(&home).await.contains("copies"),
         "an empty file holds no update"
     );
 
@@ -181,12 +262,12 @@ async fn status_warns_while_two_copies_disagree() {
     .expect("the fork");
     let out = status(&home).await;
     assert!(
-        out.lines().any(|line| line == warning),
-        "the warning prints while two copies disagree: {out}"
+        out.ends_with(&format!("\n\n{warning}")),
+        "the warning prints, its own block, while two copies disagree: {out}"
     );
 }
 
-/// No standing prints a `revocations:` line: a revoked device stays a row under `devices:` instead.
+/// No standing prints a `revocations` line: a revoked device stays a row under `devices` instead.
 #[tokio::test]
 async fn status_prints_no_revocations_line() {
     let unpinned = home("unrevoked-none");
@@ -227,14 +308,17 @@ async fn status_prints_no_revocations_line() {
     );
     assert!(
         out.contains(&format!(
-            "root:{} on this machine",
-            TestRoot::seeded(ROOT).node_id()
+            "your root        on this machine\n{}\n",
+            head_row("key", &format!("root:{}", TestRoot::seeded(ROOT).node_id()))
         )),
         "{out}"
     );
     let out = status(&device).await;
     assert!(
-        out.contains("devices (as of the last sync, "),
+        out.contains(&format!(
+            "\n\ndevices (as of the last sync, {})\n",
+            swoosh::sync::ago(&device)
+        )),
         "a device's list is as of its last sync: {out}"
     );
     assert!(
@@ -328,7 +412,10 @@ async fn status_prints_a_damaged_or_unfinished_root_last() {
     ] {
         let out = status(home).await;
         let lines: Vec<&str> = out.lines().collect();
-        assert!(!lines[3].starts_with("root"), "{out}");
+        assert!(
+            !lines.iter().any(|line| line.starts_with("your root")),
+            "{out}"
+        );
         assert!(
             lines.last().is_some_and(|line| line.starts_with(start)),
             "{out}"
@@ -427,19 +514,19 @@ async fn status_warns_before_a_key_carrying_invite_ends() {
     )
     .await;
     let out = status(&home).await;
-    let warned: Vec<&str> = out
-        .lines()
-        .filter(|line| line.contains("key came in its invite"))
-        .collect();
     assert_eq!(
-        warned,
-        [format!(
-            "me/ci's key came in its invite, which ends on {}. If it starts from that invite each time (a \
-             runner summoned from a secret): swoosh invite ci --new-key, then set its secret again.",
-            Date(now + 10 * DAY)
-        )],
-        "{out}"
+        out.matches("key came in its invite").count(),
+        1,
+        "one device is warned for: {out}"
     );
+    let warned = format!(
+        "\n\nme/ci's key came in its invite, which ends on {}.\n\
+         If it starts from that invite each time (a CI job, for example), run:\n  \
+         swoosh invite ci --new-key\n\
+         Then set its secret again.\n",
+        Date(now + 10 * DAY)
+    );
+    assert!(out.ends_with(&warned), "{out}");
 }
 
 /// Where the root is kept, a due line is printed for each device the renewal renews: a device in its window
@@ -474,18 +561,12 @@ async fn status_counts_only_what_the_renewal_renews() {
     )
     .await;
     let out = status(&home).await;
-    let due: Vec<&str> = out
-        .lines()
-        .filter(|line| line.starts_with("renew me/"))
-        .collect();
-    assert_eq!(
-        due,
-        [format!(
-            "renew me/nas by {}: swoosh invite nas",
-            Date(now - 25 * DAY)
-        )],
-        "{out}"
+    assert_eq!(out.matches("Renew me/").count(), 1, "{out}");
+    let due = format!(
+        "\n\nRenew me/nas by {}:\n  swoosh invite nas\n",
+        Date(now - 25 * DAY)
     );
+    assert!(out.ends_with(&due), "{out}");
 }
 
 /// A device reads each due line from the update it holds, not only where the root is kept, and names the
@@ -512,11 +593,11 @@ async fn a_device_shows_the_due_lines_from_the_update() {
     .await
     .expect("the device holds the update");
     let out = status(&home).await;
-    let line = format!(
-        "renew me/laptop by {}: swoosh invite laptop --root <dir>",
+    let due = format!(
+        "\n\nRenew me/laptop by {}:\n  swoosh invite laptop --root <dir>\n",
         Date(until - 45 * DAY)
     );
-    assert!(out.lines().any(|found| found == line), "{out}");
+    assert!(out.contains(&due), "{out}");
     assert!(!out.contains("use your root"), "{out}");
 }
 
@@ -530,9 +611,15 @@ fn keyless(tag: &str) -> Home {
     Home::resolve(Some(dir)).expect("the scratch home resolves")
 }
 
-/// `home`'s directory as `home:` prints it.
+/// `home`'s directory as its `home` row prints it, escaped: beside the label where it fits 80, else on the
+/// line below at indent four, since a path never splits.
 fn home_line(home: &Home) -> String {
-    format!("home: {}", home.dir().display())
+    let dir = swoosh::escape::EscapedPath(home.dir()).to_string();
+    if 17 + dir.chars().count() <= 80 {
+        head_row("home", &dir)
+    } else {
+        format!("  home\n    {dir}")
+    }
 }
 
 /// `home` as a device of `ROOT` whose standing ends at `until`, in unix seconds.
@@ -747,27 +834,44 @@ async fn status_writes_nothing() {
     }
 }
 
-/// `status` names no path inside the home but on `home:`: in every state, no other line holds the home's
-/// directory.
+/// `status` names no path inside the home but on its `home` row: in every state, no other line holds the
+/// home's directory.
 #[tokio::test]
 async fn status_prints_no_path_in_the_home_but_home() {
     for (state, home) in every_state().await {
         let dir = home.dir().display().to_string();
         let out = status(&home).await;
-        let named: Vec<&str> = out
-            .lines()
-            .filter(|line| !line.starts_with("home: ") && line.contains(&dir))
-            .collect();
-        assert!(named.is_empty(), "the {state} home names its path: {out}");
+        let row = home_line(&home);
+        let named = out.replace(&row, "").matches(&dir).count();
+        assert_eq!(named, 0, "the {state} home names its path: {out}");
     }
 }
 
-/// A home with no key prints `key: none yet` and makes none: no `machine/` appears.
+/// `home` is the `this machine` block's last row on every home, whatever else the block holds. Red when it
+/// is dropped or moved.
+#[tokio::test]
+async fn home_row_is_last_and_always() {
+    for (state, home) in every_state().await {
+        let out = status(&home).await;
+        let head = out.split("\n\n").next().unwrap_or_default().trim_end();
+        assert!(
+            head.starts_with("this machine") && head.ends_with(&home_line(&home)),
+            "the {state} home's head block ends with its home row: {out}"
+        );
+        assert_eq!(out.matches(&home_line(&home)).count(), 1, "{out}");
+    }
+}
+
+/// A home with no key says `none yet` on its `key` row and makes none: no `machine/` appears.
 #[tokio::test]
 async fn status_on_a_home_with_no_key_makes_none() {
     let home = keyless("no-key-made");
     let out = status(&home).await;
-    assert_eq!(out.lines().next(), Some("key: none yet"), "{out}");
+    assert_eq!(
+        out.lines().nth(1),
+        Some(head_row("key", "none yet").as_str()),
+        "{out}"
+    );
     assert!(!home.machine().exists(), "status made a key");
 }
 
@@ -787,9 +891,10 @@ async fn status_key_with_no_key_refuses_and_names_join() {
     assert!(!home.machine().exists(), "status made a key");
 }
 
-/// Line 2 is `key lock:` naming the method, and line 3 `home:`, on every home with a key.
+/// Under the `this machine` title come the `key` row and the `lock` row naming the method, on every home
+/// with a key.
 #[tokio::test]
-async fn status_prints_key_lock_then_home() {
+async fn status_prints_key_then_its_lock() {
     let plain = home("lock-plain");
     let sealed = keyless("lock-sealed");
     swoosh::identity::make_machine_dir(&sealed).unwrap();
@@ -802,13 +907,15 @@ async fn status_prints_key_lock_then_home() {
             Protection::Passphrase(&passphrase),
         )
         .expect("a sealed key");
-    for (home, lock) in [
-        (&plain, "key lock: none"),
-        (&sealed, "key lock: passphrase"),
-    ] {
+    let own = TestNode::seeded(OWN).node_id().to_string();
+    for (home, lock) in [(&plain, "none"), (&sealed, "passphrase")] {
         let out = status(home).await;
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[1..3], [lock, home_line(home).as_str()], "{out}");
+        assert_eq!(
+            lines[1..3],
+            [head_row("key", &own), head_row("lock", lock)],
+            "{out}"
+        );
     }
 }
 
@@ -857,12 +964,17 @@ async fn status_prints_every_state_verbatim() {
     assert_eq!(
         status(keeps).await,
         [
-            format!("key: {own}"),
-            "key lock: none".to_owned(),
+            "this machine     me/desk".to_owned(),
+            head_row("key", &own.to_string()),
+            head_row("lock", "none"),
+            head_row("serving", "ping, speed, when swoosh serve runs"),
             home_line(keeps),
-            format!("root:{root} on this machine, locked with a passphrase."),
             String::new(),
-            "devices:".to_owned(),
+            "your root        on this machine".to_owned(),
+            head_row("key", &format!("root:{root}")),
+            head_row("lock", "passphrase"),
+            String::new(),
+            "devices".to_owned(),
             format!(
                 "  me/desk  {}  {:<state$}  until {until}",
                 short_key(OWN),
@@ -873,12 +985,9 @@ async fn status_prints_every_state_verbatim() {
                 short_key(LAPTOP),
                 Date(now + 20 * DAY)
             ),
-            "serving: ping, speed, when swoosh serve runs".to_owned(),
             String::new(),
-            format!(
-                "renew me/nas by {}: swoosh invite nas",
-                Date(now - 25 * DAY)
-            ),
+            format!("Renew me/nas by {}:", Date(now - 25 * DAY)),
+            "  swoosh invite nas".to_owned(),
         ]
         .map(|line| line + "\n")
         .concat()
@@ -888,13 +997,17 @@ async fn status_prints_every_state_verbatim() {
     assert_eq!(
         status(device).await,
         [
-            format!("key: {own}"),
-            "key lock: none".to_owned(),
+            "this machine     me/nas".to_owned(),
+            head_row("key", &own.to_string()),
+            head_row("lock", "none"),
+            head_row("serving", "ping, speed, when swoosh serve runs"),
             home_line(device),
-            format!("root:{root} not on this machine."),
+            String::new(),
+            "your root        on another machine".to_owned(),
+            head_row("key", &format!("root:{root}")),
             String::new(),
             format!(
-                "devices (as of the last sync, {}):",
+                "devices (as of the last sync, {})",
                 swoosh::sync::ago(device)
             ),
             format!("  me/nas   {}  this machine  until {until}", short_key(OWN)),
@@ -902,7 +1015,6 @@ async fn status_prints_every_state_verbatim() {
                 "  me/desk  {}                until {until}",
                 short_key(LAPTOP)
             ),
-            "serving: ping, speed, when swoosh serve runs".to_owned(),
         ]
         .map(|line| line + "\n")
         .concat()
@@ -912,14 +1024,14 @@ async fn status_prints_every_state_verbatim() {
     assert_eq!(
         status(unpinned).await,
         [
-            format!("key: {own}"),
-            "key lock: none".to_owned(),
+            "this machine     not one of your devices yet".to_owned(),
+            head_row("key", &own.to_string()),
+            head_row("lock", "none"),
+            head_row("serving", "ping, speed, when swoosh serve runs"),
             home_line(unpinned),
-            "this machine: not one of your devices yet".to_owned(),
+            String::new(),
             "to join yours, paste its invite into: swoosh join".to_owned(),
             "to make your root on this machine: swoosh invite <name> <key>".to_owned(),
-            String::new(),
-            "serving: ping, speed, when swoosh serve runs".to_owned(),
         ]
         .map(|line| line + "\n")
         .concat()
@@ -929,9 +1041,10 @@ async fn status_prints_every_state_verbatim() {
     assert_eq!(
         status(keyless).await,
         [
-            "key: none yet".to_owned(),
+            "this machine     not one of your devices yet".to_owned(),
+            head_row("key", "none yet"),
             home_line(keyless),
-            "this machine: not one of your devices yet".to_owned(),
+            String::new(),
             "to join yours, paste its invite into: swoosh join".to_owned(),
             "to make your root on this machine: swoosh invite <name> <key>".to_owned(),
         ]
@@ -939,47 +1052,38 @@ async fn status_prints_every_state_verbatim() {
         .concat()
     );
 
-    let missing = "this machine's key is not in this home, because system backups leave it out.";
-    let kept = format!("{missing} A root kept on this machine stays. To start over: swoosh leave");
+    let missing = "This machine's key is not in this home, because system backups leave it out.";
     // A torn `root.key` names no command: `leave` keeps the root, so it would print the same line again.
     let torn = "this machine's records disagree (root.key is not a root key); swoosh cannot \
                 tell which root it trusts"
         .to_owned();
-    let restored: [(&str, &[String]); 4] = [
+    let restored: [(&str, String); 4] = [
         (
             "restored",
-            &[
-                format!("{missing} To start over: swoosh leave"),
-                "then: swoosh join".to_owned(),
-            ],
+            format!("{missing}\nTo start over:\n  swoosh leave\nThen:\n  swoosh join"),
         ),
         (
             "restored keeper",
-            &[kept, "then: swoosh invite <name> <key>".to_owned()],
+            format!(
+                "{missing}\nA root kept on this machine stays.\nTo start over:\n  swoosh leave\nThen:\n  \
+                 swoosh invite <name> <key>"
+            ),
         ),
-        ("keyless torn root", core::slice::from_ref(&torn)),
+        ("keyless torn root", torn.clone()),
         (
             "left keeper",
-            &[
-                "making your root did not finish; to finish it: swoosh invite <name> <key>"
-                    .to_owned(),
-            ],
+            "making your root did not finish; to finish it: swoosh invite <name> <key>".to_owned(),
         ),
     ];
     for (state, last) in restored {
         let restored = home(state);
-        let mut lines = vec![
-            "key: none yet".to_owned(),
-            home_line(restored),
-            String::new(),
-        ];
-        lines.extend_from_slice(last);
         assert_eq!(
             status(restored).await,
-            lines
-                .into_iter()
-                .map(|line| line + "\n")
-                .collect::<String>(),
+            format!(
+                "this machine\n{}\n{}\n\n{last}\n",
+                head_row("key", "none yet"),
+                home_line(restored)
+            ),
             "the {state} home"
         );
     }
@@ -997,75 +1101,68 @@ async fn status_prints_every_state_verbatim() {
             swoosh::credential::short(&TestRoot::seeded(seed).node_id())
         )
     };
-    let last: [(&str, &[String]); 11] = [
+    let last: [(&str, String); 11] = [
         (
             "conflict",
-            &["two copies of your root have been used: your devices hold two different lists. Keep one \
-               copy; the next time you use it, it settles this. If you did not use two copies, your root \
-               may be stolen: swoosh revoke --help"
-                .to_owned()],
+            "Two copies of your root have been used: your devices hold two different lists.\n\
+             Keep one copy; the next time you use it, it settles this.\n\
+             If you did not use two copies, your root may be stolen:\n  \
+             swoosh revoke --help"
+                .to_owned(),
         ),
         (
             "removed",
-            &[
-                "this machine is no longer one of your devices: your root revoked it. To join again: \
-                 swoosh leave --new-key"
-                    .to_owned(),
-                "then: swoosh join".to_owned(),
-            ],
+            "This machine is no longer one of your devices: your root revoked it.\nTo join again:\n  \
+             swoosh leave --new-key\nThen:\n  swoosh join"
+                .to_owned(),
         ),
         (
             "ended",
-            &[
-                format!(
-                    "me/desk ended on {ended}; your devices refuse it. Where your root is kept: swoosh \
-                     invite desk"
-                ),
-                "this machine picks it up the next time it reaches one of your devices, or now with \
-                 swoosh sync"
-                    .to_owned(),
-            ],
+            format!(
+                "me/desk ended on {ended}; your devices refuse it.\nWhere your root is kept:\n  swoosh \
+                 invite desk\nThis machine picks up the renewal the next time it reaches one of your \
+                 devices.\nTo pick it up now:\n  swoosh sync"
+            ),
         ),
         (
             "mint",
-            &["making your root did not finish; to finish it: swoosh invite <name> <key>".to_owned()],
+            "making your root did not finish; to finish it: swoosh invite <name> <key>".to_owned(),
         ),
         (
             "join",
-            &["joining did not finish; to finish it: swoosh join".to_owned()],
+            "joining did not finish; to finish it: swoosh join".to_owned(),
         ),
         (
             "switch",
-            &["joining did not finish; to finish it: swoosh join".to_owned()],
+            "joining did not finish; to finish it: swoosh join".to_owned(),
         ),
         (
             "leave",
-            &["leaving did not finish; to finish it: swoosh leave".to_owned()],
+            "leaving did not finish; to finish it: swoosh leave".to_owned(),
         ),
         (
             "revoked root",
-            &[format!(
-                "a revoked root is still on this machine; to delete it: swoosh revoke root:{}",
+            format!(
+                "A revoked root is still on this machine; to delete it:\n  swoosh revoke root:{}",
                 TestRoot::seeded(ROOT).node_id()
-            )],
+            ),
         ),
-        ("damaged", &[disagree("root.pub is not one root key")]),
-        ("torn root", &[torn]),
+        ("damaged", disagree("root.pub is not one root key")),
+        ("torn root", torn),
         (
             "another root",
-            &[disagree(&format!(
+            disagree(&format!(
                 "this machine keeps {}, and trusts {}",
                 root_short(ROOT),
                 root_short(OTHER)
-            ))],
+            )),
         ),
     ];
-    for (state, lines) in last {
+    for (state, last) in last {
         let out = status(home(state)).await;
-        let printed: Vec<&str> = out.lines().collect();
         assert!(
-            printed.ends_with(&lines.iter().map(String::as_str).collect::<Vec<_>>()),
-            "the {state} home ends with its lines: {out}"
+            out.ends_with(&format!("\n\n{last}\n")),
+            "the {state} home ends with its own block: {out}"
         );
     }
 }
@@ -1082,12 +1179,15 @@ async fn a_device_before_its_first_sync_is_named_by_its_invite() {
     )
     .expect("invited-by");
     let out = status(&home).await;
-    assert!(
-        out.lines().any(|line| line
-            == format!(
-                "this machine: me/b, your device until {}",
+    assert_eq!(
+        out.lines().next(),
+        Some(
+            format!(
+                "this machine     me/b, your device until {}",
                 Date(STANDING_UNTIL)
-            )),
+            )
+            .as_str()
+        ),
         "{out}"
     );
 
@@ -1101,39 +1201,45 @@ async fn a_device_before_its_first_sync_is_named_by_its_invite() {
     )
     .expect("invited-by");
     let out = status(&ended).await;
-    assert!(
-        out.lines()
-            .any(|line| line == format!("this machine: me/b, ended {}", Date(now - DAY))),
+    assert_eq!(
+        out.lines().next(),
+        Some(format!("this machine     me/b, ended {}", Date(now - DAY)).as_str()),
         "{out}"
     );
     assert!(
-        out.lines().any(|line| line
-            == format!(
-                "this machine ended on {}; your devices refuse it. Where your root is kept: swoosh invite \
-                 <name>",
-                Date(now - DAY)
-            )),
+        out.contains(&format!(
+            "\n\nThis machine ended on {}; your devices refuse it.\nWhere your root is kept:\n  swoosh \
+             invite <name>\nThis machine picks up the renewal the next time it reaches one of your \
+             devices.\nTo pick it up now:\n  swoosh sync\n",
+            Date(now - DAY)
+        )),
         "{out}"
     );
     assert!(!out.contains("invite b"), "{out}");
 
     std::fs::remove_file(home.invited_by()).expect("no invite to name it");
     let out = status(&home).await;
-    assert!(
-        out.lines().any(|line| line
-            == format!(
-                "this machine: {}, your device until {}",
+    assert_eq!(
+        out.lines().next(),
+        Some(
+            format!(
+                "this machine     {}, your device until {}",
                 short_key(OWN),
                 Date(STANDING_UNTIL)
-            )),
+            )
+            .as_str()
+        ),
         "{out}"
     );
 }
 
-/// The command a line gives, after its last `: swoosh `, with each placeholder filled the way a person
-/// fills it; `None` when the line gives none.
+/// The command a line gives, alone on it at indent two or after its last `: swoosh `, with each placeholder
+/// filled the way a person fills it; `None` when the line gives none.
 fn command(line: &str) -> Option<Vec<String>> {
-    let (_, command) = line.rsplit_once(": swoosh ")?;
+    let command = match line.strip_prefix("  swoosh ") {
+        Some(command) => command,
+        None => line.rsplit_once(": swoosh ")?.1,
+    };
     let key = TestNode::seeded(LAPTOP).node_id().to_string();
     Some(
         core::iter::once("swoosh".to_owned())
@@ -1226,13 +1332,14 @@ fn overwrite(path: &std::path::Path, bytes: &[u8]) {
 async fn status_reading(home: &Home, health: keystore::Health) -> String {
     let key = KeyFile::new(home.key()).load().unwrap();
     let prompt = swoosh::testkit::Counting::refusing().at_this_mac(health);
-    super::Report::gather_with(home, key.as_ref(), unix_now(), &prompt)
+    let out = super::Report::gather_with(home, key.as_ref(), unix_now(), &prompt)
         .await
         .unwrap()
-        .render()
+        .render();
+    held(&out).to_owned()
 }
 
-/// `key lock:` reads OR as OR: each lock set, and Touch ID with how it reads here, gives its one value, never a
+/// The `lock` row reads OR as OR: each lock set, and Touch ID with how it reads here, gives its one value, never a
 /// comma list, an `and`, or `touch-id` in prose; and an unchecked lock never reads as dead. Red when any value
 /// differs.
 #[tokio::test]
@@ -1288,8 +1395,12 @@ async fn the_lock_row_reads_or_as_or() {
             .await
             .unwrap()
             .render();
-        let line = format!("key lock: {value}");
-        assert_eq!(out.lines().nth(1), Some(line.as_str()), "{out}");
+        let out = held(&out);
+        assert_eq!(
+            out.lines().nth(2),
+            Some(head_row("lock", value).as_str()),
+            "{out}"
+        );
     }
 }
 
@@ -1313,7 +1424,7 @@ async fn a_dead_touch_id_key_says_how_to_mend_it() {
 }
 
 /// A dead Touch ID lock on this machine's key still prints the line that says how to mend it, alone or beside
-/// a passphrase, below the lock row: the bare `lock` read points here for it. Red when the nag is dropped.
+/// a passphrase, below the `lock` row: the bare `lock` read points here for it. Red when the nag is dropped.
 #[tokio::test]
 async fn a_dead_key_lock_still_says_how_to_mend_it() {
     let home = home("key-lock-dead-nag");
@@ -1338,16 +1449,16 @@ async fn a_dead_key_lock_still_says_how_to_mend_it() {
         )
         .dead();
         assert_eq!(
-            out.lines().nth(1),
-            Some(format!("key lock: {value}").as_str()),
+            out.lines().nth(2),
+            Some(head_row("lock", value).as_str()),
             "{out}"
         );
-        assert!(out.contains(&format!("\n{dead}\n")), "{dead}\n{out}");
+        assert!(out.contains(&format!("\n\n{dead}\n")), "{dead}\n{out}");
     }
 }
 
-/// A root whose header this read did not see is never claimed: `status` prints no `root:<pin> on this
-/// machine` line from it, and the nag that says the root is here stays silent where whether it is cannot be
+/// A root whose header this read did not see is never claimed: `status` prints no `your root` block from
+/// it, and the nag that says the root is here stays silent where whether it is cannot be
 /// told. Red when either claims it.
 #[tokio::test]
 async fn an_unreadable_root_is_never_claimed() {
@@ -1358,14 +1469,17 @@ async fn an_unreadable_root_is_never_claimed() {
     let mut report = super::Report::gather_with(&home, key.as_ref(), unix_now(), &prompt)
         .await
         .unwrap();
-    assert!(report.top.iter().any(|line| line.starts_with("root:")));
+    assert!(report.your_root.is_some());
     // The header read failed, as a root changed between its two reads leaves it.
     report.root = None;
-    report.top.clear();
+    report.your_root = None;
     let standing = Standing::read(&home).await.unwrap();
     report.standing(&home, standing, unix_now()).await.unwrap();
-    let out = report.render();
-    assert!(!out.contains("on this machine, locked with"), "{out}");
+    let out = held(&report.render()).to_owned();
+    assert!(
+        !out.lines().any(|line| line.starts_with("your root")),
+        "{out}"
+    );
 
     overwrite(
         &home.key(),
@@ -1378,7 +1492,7 @@ async fn an_unreadable_root_is_never_claimed() {
     assert!(!swoosh::identity::touch_id_alone_beside_root(&home));
 }
 
-/// The root's line reads OR as OR, Touch ID with how it reads, and a dead one says how to set it again,
+/// The root's `lock` row reads OR as OR, Touch ID with how it reads, and a dead one says how to set it again,
 /// after the check on a fingerprint nobody added. Red when an unchecked lock gets the dead line.
 #[tokio::test]
 async fn the_root_line_names_touch_id_with_how_it_reads() {
@@ -1404,8 +1518,12 @@ async fn the_root_line_names_touch_id_with_how_it_reads() {
         ),
     ] {
         let out = status_reading(&home, health).await;
-        let line = format!("root:{root} on this machine, locked with {locks}.");
-        assert!(out.lines().any(|seen| seen == line), "{line}\n{out}");
+        let block = format!(
+            "\n\nyour root        on this machine\n{}\n{}\n\n",
+            head_row("key", &format!("root:{root}")),
+            head_row("lock", locks)
+        );
+        assert!(out.contains(&block), "{block}\n{out}");
         assert_eq!(
             out.contains(dead_line),
             health == keystore::Health::Dead,
@@ -1438,18 +1556,18 @@ async fn touch_id_unasked_says_it_opens_only_on_a_mac() {
     .await
     .unwrap()
     .render();
-    assert!(
-        out.lines()
-            .any(|line| line
-                == "key lock: Touch ID (opens only on the Mac that set it) or a passphrase"),
-        "{out}"
+    let out = held(&out);
+    let lock = head_row(
+        "lock",
+        "Touch ID (opens only on the Mac that set it) or a passphrase",
     );
+    assert_eq!(out.lines().nth(2), Some(lock.as_str()), "{out}");
     let root = TestRoot::seeded(ROOT).node_id();
-    let line = format!(
-        "root:{root} on this machine, locked with Touch ID (opens only on the Mac that set it) or a \
-         passphrase."
+    let block = format!(
+        "\n\nyour root        on this machine\n{}\n{lock}\n",
+        head_row("key", &format!("root:{root}"))
     );
-    assert!(out.lines().any(|seen| seen == line), "{line}\n{out}");
+    assert!(out.contains(&block), "{block}\n{out}");
 }
 
 /// A key under `touch-id` alone beside a root kept here is nagged about, as a root made or restored beside
@@ -1479,7 +1597,8 @@ async fn a_touch_id_only_key_beside_a_root_is_nagged() {
 }
 
 /// A learned root's row in `contacts` names the machine it was learned from; a typed root's says nothing more.
-/// No row carries a kind word: the key's shape says it.
+/// A machine saved by hand says `one machine`, so its row and a person's differ by words as well as by the
+/// key's shape. Red when the machine's row loses the word, or a root's row gains it.
 #[test]
 fn status_marks_a_learned_root() {
     let mut contacts = swoosh::contacts::Contacts::default();
@@ -1513,10 +1632,10 @@ fn status_marks_a_learned_root() {
         &[
             "alice/laptop".to_owned(),
             swoosh::credential::short(&TestNode::seeded(LAPTOP).node_id()),
-            String::new(),
+            "one machine".to_owned(),
             String::new(),
         ],
-        "a machine's row is its name and key"
+        "a machine's row is its name, key and kind"
     );
     let bob = rows
         .iter()
@@ -1613,10 +1732,20 @@ async fn turn(home: &Home, name: &str, way: crate::commands::service::toggle::Wa
     .unwrap();
 }
 
-fn serving_row(out: &str) -> &str {
-    out.lines()
-        .find(|line| line.starts_with("serving:"))
-        .unwrap()
+/// The `serving` row's value: beside its label, or wrapped on the lines below it where the row stacks.
+fn serving_row(out: &str) -> String {
+    let mut lines = out
+        .lines()
+        .skip_while(|line| !line.starts_with("  serving"));
+    let row = lines.next().unwrap();
+    match row.strip_prefix("  serving        ") {
+        Some(value) => value.to_owned(),
+        None => lines
+            .take_while(|line| line.starts_with("    "))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
 #[tokio::test]
@@ -1625,10 +1754,10 @@ async fn status_marks_a_listed_service_turned_off() {
     service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &[]).await;
     // Saved order leads, and internal entries never print.
     let _resident = LocalResident::start(&home, &["control.stop", "web", "ssh"], None);
-    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
+    assert_eq!(serving_row(&status(&home).await), "ssh, web");
     turn(&home, "web", crate::commands::service::toggle::Way::Off).await;
     let before = tree(home.dir());
-    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web (off)");
+    assert_eq!(serving_row(&status(&home).await), "ssh, web (off)");
     assert_eq!(tree(home.dir()), before, "the report must not write");
 }
 
@@ -1653,7 +1782,7 @@ async fn status_distinguishes_saved_only_from_bound_only() {
     .run(&home)
     .await
     .unwrap();
-    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
+    assert_eq!(serving_row(&status(&home).await), "ssh, web");
 
     // Reusing the removed name with a new target still has the old bound route until restart.
     ServiceAddCmd {
@@ -1662,9 +1791,9 @@ async fn status_distinguishes_saved_only_from_bound_only() {
     .run(&home)
     .await
     .unwrap();
-    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
+    assert_eq!(serving_row(&status(&home).await), "ssh, web");
     service_list(&home, &[], &["web"]).await;
-    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web (off)");
+    assert_eq!(serving_row(&status(&home).await), "ssh, web (off)");
 }
 
 /// The live row prints plain bound names, never a target or `name=`, never an internal route, and never
@@ -1679,7 +1808,7 @@ async fn status_names_do_not_imply_toggle_eligibility() {
         None,
     );
     let out = status(&home).await;
-    assert_eq!(serving_row(&out), "serving: api");
+    assert_eq!(serving_row(&out), "api");
     assert!(!out.contains('\u{1b}'), "{out:?}");
 }
 
@@ -1707,19 +1836,19 @@ fn status_tells_a_refusal_from_off() {
     let known = DisabledList::Known(vec!["old".to_owned(), "ssh".to_owned(), "web".to_owned()]);
     assert_eq!(
         super::serving(&observed(known)),
-        "serving: ssh (off), web (refusing new connections), old (refusing new connections)"
+        "ssh (off), web (refusing new connections), old (refusing new connections)"
     );
     assert_eq!(
         super::serving(&observed(DisabledList::Known(vec!["web".to_owned()]))),
-        "serving: ssh (off), web (refusing new connections), old"
+        "ssh (off), web (refusing new connections), old"
     );
     assert_eq!(
         super::serving(&observed(DisabledList::Known(vec![]))),
-        "serving: ssh (off), web, old"
+        "ssh (off), web, old"
     );
     assert_eq!(
         super::serving(&observed(DisabledList::Unknown("unreadable".to_owned()))),
-        "serving: ssh (off), web (refusing new connections), old (refusing new connections)"
+        "ssh (off), web (refusing new connections), old (refusing new connections)"
     );
 }
 
@@ -1734,7 +1863,7 @@ async fn status_shows_what_a_bare_serve_starts_when_none_runs() {
     let before = tree(home.dir());
     assert_eq!(
         serving_row(&status(&home).await),
-        "serving: ssh, web (off), when swoosh serve runs"
+        "ssh, web (off), when swoosh serve runs"
     );
     assert_eq!(tree(home.dir()), before);
 }
@@ -1745,18 +1874,18 @@ async fn status_tells_the_default_from_an_emptied_list() {
     assert!(!home.serve_toml().exists());
     assert_eq!(
         serving_row(&status(&home).await),
-        "serving: ping, speed, when swoosh serve runs"
+        "ping, speed, when swoosh serve runs"
     );
     // A present file that has only off marks is still a never-named list.
     turn(&home, "ping", crate::commands::service::toggle::Way::Off).await;
     assert_eq!(
         serving_row(&status(&home).await),
-        "serving: ping (off), speed, when swoosh serve runs"
+        "ping (off), speed, when swoosh serve runs"
     );
     service_list(&home, &[], &[]).await;
     assert_eq!(
         serving_row(&status(&home).await),
-        "serving: nothing, even when swoosh serve runs"
+        "nothing, even when swoosh serve runs"
     );
 }
 
@@ -1776,8 +1905,8 @@ async fn status_reports_a_damaged_serve_toml_as_unknown() {
             .await
             .unwrap();
         assert_eq!(
-            serving_row(&String::from_utf8(out).unwrap()),
-            "serving: unknown"
+            serving_row(held(&String::from_utf8(out).unwrap())),
+            "unknown"
         );
         let err = String::from_utf8(err).unwrap();
         assert!(
@@ -1804,7 +1933,7 @@ async fn status_reports_a_damaged_serve_toml_as_unknown() {
         &home.serve_toml(),
         b"services = ['ssh=sshd:', 'ssh=sshd:']\n",
     );
-    assert_eq!(serving_row(&status(&home).await), "serving: unknown");
+    assert_eq!(serving_row(&status(&home).await), "unknown");
     drop(_resident);
 
     // A trusted-file opener refusal is not an absent file, nor a daemon-read failure.
@@ -1819,8 +1948,8 @@ async fn status_reports_a_damaged_serve_toml_as_unknown() {
         .await
         .unwrap();
     assert_eq!(
-        serving_row(&String::from_utf8(out).unwrap()),
-        "serving: unknown"
+        serving_row(held(&String::from_utf8(out).unwrap())),
+        "unknown"
     );
     let err = String::from_utf8(err).unwrap();
     assert!(err.contains("serve.toml"), "{err}");
@@ -1841,8 +1970,8 @@ async fn status_reports_a_damaged_serve_toml_as_unknown() {
         .await
         .unwrap();
     assert_eq!(
-        serving_row(&String::from_utf8(out).unwrap()),
-        "serving: unknown"
+        serving_row(held(&String::from_utf8(out).unwrap())),
+        "unknown"
     );
     let err = String::from_utf8(err).unwrap();
     assert!(
@@ -1871,12 +2000,8 @@ async fn the_name_status_prints_is_the_name_service_on_takes() {
         turn(&home, name, Way::Off).await;
     }
     let out = status(&home).await;
-    assert_eq!(serving_row(&out), "serving: web (off), proxy (off)");
-    for marked in serving_row(&out)
-        .strip_prefix("serving: ")
-        .unwrap()
-        .split(", ")
-    {
+    assert_eq!(serving_row(&out), "web (off), proxy (off)");
+    for marked in serving_row(&out).split(", ") {
         let name = marked.strip_suffix(" (off)").unwrap();
         crate::Cli::try_parse_from(["swoosh", "service", "on", name]).unwrap();
         turn(&home, name, Way::On).await;
@@ -1884,7 +2009,7 @@ async fn the_name_status_prints_is_the_name_service_on_takes() {
     // `(off)` reads the file, but whether the serve still refuses a name is its own view of the file,
     // re-statted at most once per `STAT_DEBOUNCE`: having seen both off, it can refuse both for up to one
     // debounce after they are turned on, so the plain row shows within a few of them.
-    let serving = "serving: web, proxy";
+    let serving = "web, proxy";
     let mut row = String::new();
     for _ in 0..20 {
         row = serving_row(&status(&home).await).to_owned();
@@ -1904,12 +2029,12 @@ async fn status_keeps_the_marks_when_admitting() {
     let _resident = LocalResident::bare(&home, &["ssh", "web"], Some(root));
     assert_eq!(
         serving_row(&status(&home).await),
-        format!("serving: ssh, web (off), admitting root:{root}")
+        format!("ssh, web (off), admitting root:{root}")
     );
     // Emptying the file unbinds nothing, but a bare serve now refuses both: neither reads as plainly serving.
     service_list(&home, &[], &[]).await;
     let refused = format!(
-        "serving: ssh (refusing new connections), web (refusing new connections), admitting root:{root}"
+        "ssh (refusing new connections), web (refusing new connections), admitting root:{root}"
     );
     // The serve re-stats the file at most once per `STAT_DEBOUNCE`, so the edit shows within a few of them.
     let mut row = String::new();
@@ -1927,7 +2052,7 @@ async fn status_keeps_the_marks_when_admitting() {
     );
     assert_eq!(
         serving_row(&status(&home).await),
-        format!("serving: unknown, admitting root:{root}")
+        format!("unknown, admitting root:{root}")
     );
 }
 
@@ -1994,8 +2119,8 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
             .await
             .unwrap();
         assert_eq!(
-            serving_row(&String::from_utf8(out).unwrap()),
-            "serving: unknown"
+            serving_row(held(&String::from_utf8(out).unwrap())),
+            "unknown"
         );
         let err = String::from_utf8(err).unwrap();
         assert_eq!(err.matches("serve.toml").count(), 1, "{err}");
@@ -2018,18 +2143,18 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
         // serve whose list is unknown lists no internal route.
         service_list(&home, &["ssh=sshd:", &entry], &[]).await;
         let out = status(&home).await;
-        assert_eq!(serving_row(&out), "serving: unknown");
+        assert_eq!(serving_row(&out), "unknown");
         assert!(!out.contains("internal routes"), "{out}");
         drop(resident);
     }
 }
 
 /// While a `serve` answers here, bare `status` lists every internal route in its own block: a blank line
-/// after `serving:`, the title, one row per route in the table's order with who reaches it and what it
+/// after `reach`, the title, one row per route in the table's order with who reaches it and what it
 /// does, then the lines that say what to do. With no `serve` running, the block is not there.
 #[tokio::test]
 async fn status_lists_internal_routes_while_serving() {
-    const BLOCK: &str = "internal routes:\n\
+    const BLOCK: &str = "internal routes\n\
                          \x20 control.serve    your devices                  stops it, lists its services\n\
                          \x20 control.sync     your devices                  syncs your device list\n\
                          \x20 control.renewal  your devices                  renews your devices\n\
@@ -2050,15 +2175,16 @@ async fn status_lists_internal_routes_while_serving() {
 
     let resident = LocalResident::start(&home, &["ssh", "control.stop"], None);
     let out = status(&home).await;
-    // The resident binds a dotted name, and it never joins `serving:`: the block is where routes print.
-    assert!(!serving_row(&out).contains('.'), "{out}");
+    // The resident binds a dotted name, and it never joins the `serving` row: the block is where routes
+    // print.
+    assert_eq!(serving_row(&out), "ssh", "{out}");
     assert!(
         out.contains(&format!(
-            "\nserving: ssh\n\nreach:\n  internet       on\n  this computer  127.0.0.1:51006\n\n{BLOCK}\ntwo copies"
+            "\n\nreach\n  internet       on\n  this computer  127.0.0.1:51006\n\n{BLOCK}\nTwo copies"
         )),
         "{out}"
     );
-    assert_eq!(out.matches("internal routes:").count(), 1, "{out}");
+    assert_eq!(out.matches("internal routes").count(), 1, "{out}");
     assert!(
         BLOCK.lines().all(|line| line.chars().count() < 80),
         "every row fits 80 columns"
@@ -2137,8 +2263,8 @@ fn reach_rows<'s>(screen: &'s str, title: &str) -> Vec<&'s str> {
         .collect()
 }
 
-/// While a `serve` answers, `status` says how it is reached in a `reach:` block after `serving:` and
-/// before `internal routes:`: every class, one row each, in class order, the loopback address beside a
+/// While a `serve` answers, `status` says how it is reached in a `reach` block after the head blocks and
+/// before `internal routes`: every class, one row each, in class order, the loopback address beside a
 /// network address too, with or without `--local`.
 #[tokio::test]
 async fn status_prints_reach_while_serving() {
@@ -2151,15 +2277,16 @@ async fn status_prints_reach_while_serving() {
         Some((&["ssh"], reachable(Internet::Off, Lan::Announced, every()))),
     )
     .await;
+    assert_eq!(serving_row(&out), "ssh", "{out}");
     assert!(
         out.contains(
-            "\nserving: ssh\n\nreach:\n\
+            "\n\nreach\n\
              \x20 internet       off (--local)\n\
              \x20 public         [2001:db8:85a3::8a2e:370:7334]:51006\n\
              \x20 this network   192.168.1.20:51006\n\
              \x20 tunnel         100.101.102.103:51006\n\
              \x20 this computer  127.0.0.1:51006\n\
-             \ninternal routes:\n"
+             \ninternal routes\n"
         ),
         "{out}"
     );
@@ -2172,30 +2299,31 @@ async fn status_prints_reach_while_serving() {
         )),
     )
     .await;
+    assert_eq!(serving_row(&out), "ssh", "{out}");
     assert!(
         out.contains(
-            "\nserving: ssh\n\nreach:\n\
+            "\n\nreach\n\
              \x20 internet       on\n\
              \x20 public         [2001:db8:85a3::8a2e:370:7334]:51006\n\
              \x20 this network   192.168.1.20:51006, by address only\n\
              \x20 tunnel         100.101.102.103:51006\n\
              \x20 this computer  127.0.0.1:51006\n\
-             \ninternal routes:\n"
+             \ninternal routes\n"
         ),
         "{out}"
     );
 }
 
-/// A home that does not serve prints no `reach:` block: none when no `serve` runs, and none when one is
-/// there and could not be read, which `serving: unknown` says instead.
+/// A home that does not serve prints no `reach` block: none when no `serve` runs, and none when one is
+/// there and could not be read, which the `serving` row's `unknown` says instead.
 #[tokio::test]
 async fn no_resident_no_reach() {
     let home = home("no-reach");
     let idle = status(&home).await;
-    assert!(!idle.contains("reach:"), "{idle}");
+    assert!(!idle.lines().any(|line| line == "reach"), "{idle}");
     let out = status_answered(&home, None).await;
-    assert_eq!(serving_row(&out), "serving: unknown");
-    assert!(!out.contains("reach:"), "{out}");
+    assert_eq!(serving_row(&out), "unknown");
+    assert!(!out.lines().any(|line| line == "reach"), "{out}");
 }
 
 /// `status` and the banner print the same rows for the same reach, each through its own path: the banner
@@ -2210,7 +2338,7 @@ async fn status_and_the_banner_print_the_same_rows() {
         let at = home("reach-same");
         let banner = banner_for(&reach);
         let out = status_answered(&at, Some((&["ping"], reach.clone()))).await;
-        let (shown, listed) = (reach_rows(&banner, "reach"), reach_rows(&out, "reach:"));
+        let (shown, listed) = (reach_rows(&banner, "reach"), reach_rows(&out, "reach"));
         assert!(!shown.is_empty(), "{name}: {banner}");
         if reach.internet == Internet::Off {
             // Every class, less the loopback row the banner keeps from beside `unknown`.
@@ -2291,4 +2419,220 @@ async fn own_name_reads_a_list_never_an_invite() {
     assert_eq!(name(&hinted).await, None);
 
     assert_eq!(name(&home("own-name-fresh")).await, None);
+}
+
+/// The old record labels, each with its colon: no line of the report starts with one.
+const RECORDS: [&str; 11] = [
+    "key:",
+    "key lock:",
+    "lock:",
+    "home:",
+    "this machine:",
+    "serving:",
+    "devices:",
+    "contacts:",
+    "links you shared:",
+    "reach:",
+    "internal routes:",
+];
+
+/// A home with every block: its root kept here, a `serve` answering, a machine saved by hand, a link it
+/// shared, and two copies of its root that disagree.
+async fn every_block(tag: &str) -> Home {
+    let home = home(tag);
+    holds(&home).await;
+    let mut store = swoosh::contacts::ContactsStore::open(&home).await.unwrap();
+    store.contacts_mut().add(
+        "bob".parse().unwrap(),
+        None,
+        TestNode::seeded(0x51).node_id(),
+    );
+    store
+        .save(&swoosh::home::HomeWrite::take(&home).await.unwrap())
+        .unwrap();
+    swoosh::grants::Grants::at(home.links())
+        .append(
+            &swoosh::testkit::lock(),
+            &GrantRecord {
+                target: "ping".parse().expect("a service"),
+                serves: None,
+                kind: GrantKind::Bearer,
+                delegation: Delegation::Sealed,
+                holder: ANYONE.to_owned(),
+                root_id: RevocationId::from_bytes(vec![7; 64]),
+                expiry: SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL),
+            },
+        )
+        .unwrap();
+    std::fs::write(
+        home.devices_conflict(),
+        TestRoot::seeded(ROOT).sign_update(&RosterDoc::new(Epoch(3), Vec::new()).expect("a fork")),
+    )
+    .expect("the fork");
+    home
+}
+
+/// The report reads as blocks in the ruled order, one blank line apart: `this machine`, `your root`,
+/// `reach`, `internal routes`, `devices`, `contacts`, `links you shared`, then what to do; a block with
+/// nothing in it drops out, and no line is a `label:` record. Red when a colon comes back, two blocks swap,
+/// or an empty block prints its title.
+#[tokio::test]
+async fn status_reads_as_blocks_in_order() {
+    let home = every_block("blocks-in-order").await;
+    let _resident = LocalResident::start(&home, &["ping"], None);
+    let out = status(&home).await;
+    let titles: Vec<&str> = out
+        .split("\n\n")
+        .map(|block| block.lines().next().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "this machine     me/desk",
+            "your root        on this machine",
+            "reach",
+            "internal routes",
+            "devices",
+            "contacts",
+            "links you shared",
+            "Two copies of your root have been used: your devices hold two different lists.",
+        ],
+        "{out}"
+    );
+    assert!(!out.contains("\n\n\n"), "one blank line apart: {out}");
+    assert!(
+        out.contains(&format!(
+            "\ncontacts\n  bob  {}  one machine\n",
+            short_key(0x51)
+        )),
+        "{out}"
+    );
+
+    for (state, home) in every_state().await {
+        let out = status(&home).await;
+        for line in out.lines() {
+            let body = line.trim_start();
+            assert!(
+                !RECORDS.iter().any(|label| body.starts_with(label)),
+                "the {state} home prints a record line {line:?}: {out}"
+            );
+            assert!(
+                !(body.starts_with("devices") && body.ends_with(':')),
+                "{out}"
+            );
+        }
+        for title in ["contacts", "links you shared", "reach", "internal routes"] {
+            assert!(
+                !out.lines().any(|line| line == title),
+                "the {state} home prints an empty {title} block: {out}"
+            );
+        }
+    }
+}
+
+/// `this machine` and `your root` start their values at column 17, the title row's and each row's alike,
+/// where the labels fit. Red when a head block drifts.
+#[tokio::test]
+async fn head_blocks_share_column_17() {
+    let home = every_block("column-17").await;
+    let out = status(&home).await;
+    let heads: Vec<&str> = out.split("\n\n").take(2).collect();
+    let stacked = home_line(&home);
+    // Two titles, `key`, `lock` and `serving`, the root's `key` and `lock`, and `home` where it fits.
+    let rows = 7 + usize::from(!stacked.contains('\n'));
+    let mut seen = 0;
+    for line in heads.iter().flat_map(|block| block.lines()) {
+        if stacked.contains('\n') && stacked.lines().any(|part| part == line) {
+            continue;
+        }
+        assert_eq!(
+            line.char_indices().nth(16).map(|(_, c)| c),
+            Some(' '),
+            "{out}"
+        );
+        assert!(
+            line.chars().nth(17).is_some_and(|c| c != ' '),
+            "{line:?} starts its value at 17: {out}"
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, rows, "{out}");
+}
+
+/// Every screen `status` prints in every state, and on a home with every block, holds the screen law on
+/// stdout and stderr, but for the lines [`UNHELD`] names. Red when a line breaks it.
+#[tokio::test]
+async fn every_status_screen_holds_the_law() {
+    let home = every_block("law").await;
+    let resident = LocalResident::start(&home, &["ping"], Some(TestRoot::seeded(ROOT).node_id()));
+    let mut screens = vec![status(&home).await];
+    drop(resident);
+    for (_, home) in every_state().await {
+        screens.push(status(&home).await);
+    }
+    for screen in &screens {
+        // `status` holds each run already; this says so where a reader looks for it.
+        held(screen);
+    }
+    assert!(
+        screens
+            .iter()
+            .any(|screen| screen.contains("Two copies of your root")),
+        "a nag is among the screens held"
+    );
+}
+
+/// The ways forward a machine that is no device prints stay as they were, word for word, last on the
+/// screen: they are another change's words. Red when this one rewrites them.
+#[tokio::test]
+async fn no_device_footer_untouched() {
+    let footer = "\n\nto join yours, paste its invite into: swoosh join\n\
+                  to make your root on this machine: swoosh invite <name> <key>\n";
+    for home in [home("footer-unpinned"), keyless("footer-keyless")] {
+        let out = status(&home).await;
+        assert!(out.ends_with(footer), "{out}");
+    }
+}
+
+/// The home's directory is escaped once on its `home` row: a quote and a backslash in it print as one
+/// escape each, never an escape of an escape. Red when the row escapes the escaped path again.
+#[tokio::test]
+async fn the_home_row_escapes_its_path_once() {
+    let home = keyless("quote\"back\\slash");
+    let out = status(&home).await;
+    let row = home_line(&home);
+    assert!(row.contains("quote\\\"back\\\\slash"), "{row}");
+    assert!(out.contains(&format!("{row}\n")), "{row}\n{out}");
+}
+
+/// Every line [`UNHELD`] names is still printed somewhere `status` runs, and breaks its rule there (held
+/// checks the rule): the states with records that disagree, a dead Touch ID root, and a `serve.toml` that
+/// cannot be read. Red when an entry is left behind by a line that is gone.
+#[tokio::test]
+async fn every_unheld_line_still_breaks() {
+    let mut printed: Vec<String> = Vec::new();
+    for (_, home) in every_state().await {
+        printed.push(status(&home).await);
+    }
+    let root = home("unheld-touch");
+    holds(&root).await;
+    overwrite(
+        &root.root_key(),
+        &swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+    );
+    printed.push(status_reading(&root, keystore::Health::Dead).await);
+    let toml = home("unheld-toml");
+    overwrite(&toml.serve_toml(), b"this is not TOML\n");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    run_to(&toml, Print::Report, &mut out, &mut err)
+        .await
+        .unwrap();
+    printed.push(held(&String::from_utf8(err).unwrap()).to_owned());
+    for (owner, start, _) in &UNHELD {
+        let met = printed
+            .iter()
+            .flat_map(|screen| screen.lines())
+            .any(|line| unheld(line).is_some_and(|(_, at, _)| at == start));
+        assert!(met, "{owner}'s `{start}` is no longer printed: fix UNHELD");
+    }
 }

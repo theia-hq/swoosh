@@ -936,7 +936,7 @@ fn the_warning_prints_before_the_first_open() {
     use crate::commands::invite::invite_tests::{OWN, ROOT};
 
     on_a_big_stack(async || {
-        let warning = "swoosh: this device's membership badge expires in";
+        let warning = "warning: this device's standing expires in";
         let file = a_file("warn-order");
         for argv in the_four("me/nas", &file, &[]) {
             for (key, warns) in [(node(OWN), true), (node(NAS), false)] {
@@ -1316,8 +1316,8 @@ fn one_open_table_for_stop_through_serve() {
             // Its remedy names the key `serve` runs as, which follows.
             (
                 || Reply::Refuse(OpenRefusal::StandingEnded),
-                "this device's membership badge has ended, so a family-gated peer will refuse this \
-                 dial; renew it where your root is kept: swoosh invite <name> ",
+                "this device's standing has ended, so a machine that admits only your devices will \
+                 refuse this dial\n  Renew it where your root is kept:\n    swoosh invite <name> ",
             ),
             (
                 || Reply::Version,

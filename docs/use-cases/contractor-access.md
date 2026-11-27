@@ -10,7 +10,7 @@ away on its own.
 
 ## Grant one service, timed
 
-Record the contractor's signet (they read it from the `root:` line of `swoosh status` on their machine and send it), then
+Record the contractor's signet (they read it from the `key` row under `your root` in `swoosh status` on their machine and send it), then
 grant their fleet the one service, with an expiry:
 
 <!-- capture: swoosh grant issue ssh --for fleet:contractor --expires 14d -->
@@ -50,17 +50,20 @@ name.
 <!-- live-run: this machine's key and the link's id and end differ per run -->
 ```console
 $ swoosh status
-key: ed01slc6uxmtglqlm77rtvyq6mkcwkd5nhumkipcpkgoemdmxchhoa6a
-lock: none
-root: none yet.
-  to join yours: swoosh join
-  to make one here: swoosh invite <name> <key>
+this machine     not one of your devices yet
+  key            ed01slc6uxmtglqlm77rtvyq6mkcwkd5nhumkipcpkgoemdmxchhoa6a
+  lock           none
+  serving        ping, speed, when swoosh serve runs
+  home           /home/ada/.local/state/swoosh
 
-contacts:
-  contractor  root:ed01o6vqymgz  root
-links you shared:
-  a4a0e014  ssh  root:ed01o6vqymgz  until 2026-10-08
-serving: nothing (swoosh serve is not running)
+contacts
+  contractor  root:ed01o6vqymgz…
+
+links you shared
+  a4a0e014  ssh  root:ed01o6vqymgz…  until 2026-10-08
+
+to join yours, paste its invite into: swoosh join
+to make your root on this machine: swoosh invite <name> <key>
 ```
 
 ## Cut them off

@@ -1117,8 +1117,8 @@ async fn a_refusal_every_later_request_would_meet_ends_the_proxy_after_its_answe
             "proxy-standing",
             OpenRefusal::StandingEnded,
             "HTTP/1.1 502 Bad Gateway",
-            "proxy failed: this device's membership badge has ended, so a family-gated peer will \
-             refuse this dial"
+            "proxy failed: this device's standing has ended, so a machine that admits only your \
+             devices will refuse this dial"
                 .to_owned(),
             &why[..1],
             None,
@@ -1188,8 +1188,9 @@ async fn a_request_through_serve_gets_the_machines_200() {
     );
 }
 
-/// An ended standing refused while `serve` still answers its status: the `502` body is the terminal
-/// line's first line, which carries the remedy keyed to the key `serve` runs as, and the run ends.
+/// An ended standing refused while `serve` still answers its status: the `502` body is one line, the
+/// terminal line's head, then its remedy keyed to the key `serve` runs as, with the command to type; the
+/// run ends. Red when the body loses the remedy or takes a second line.
 #[tokio::test]
 async fn an_ended_standing_with_serve_up_ends_the_proxy_after_a_502_with_its_remedy() {
     let (ended, responses, heard) = proxied(
@@ -1199,11 +1200,15 @@ async fn an_ended_standing_with_serve_up_ends_the_proxy_after_a_502_with_its_rem
     )
     .await;
     assert!(ended.is::<StandingEnded>(), "{ended:#}");
+    assert!(
+        format!("{ended:#}").ends_with(&swoosh::badge::remedy(resident_key())),
+        "{ended:#}"
+    );
     assert_eq!(heard.len(), 1);
     let body = format!(
-        "proxy failed: this device's membership badge has ended, so a family-gated peer will refuse \
-         this dial; {}",
-        swoosh::badge::remedy(resident_key())
+        "proxy failed: this device's standing has ended, so a machine that admits only your devices will \
+         refuse this dial; renew it where your root is kept: swoosh invite <name> {}",
+        resident_key()
     );
     assert_eq!(
         responses
@@ -1584,13 +1589,11 @@ fn a_run_ending_request_answers_the_waiting_clients() {
                 "",
                 "{path}: a client with no token reads nothing of the run"
             );
-            let first = format!("{ended:#}");
-            let first = first.lines().next().unwrap();
             assert_eq!(
                 status_and_body(&waiting),
                 (
                     "HTTP/1.1 502 Bad Gateway",
-                    format!("proxy failed: {first}").as_str()
+                    body_of(&format!("{ended:#}")).as_str()
                 ),
                 "{path}"
             );
@@ -1855,7 +1858,7 @@ fn one_ending_table_on_both_paths() {
                         let expected = if path == "own" { own } else { serve };
                         assert!(line.starts_with(expected), "row {at} {path}: {line}");
                         assert_eq!(err, "", "row {at} {path}: no warning first");
-                        let first = format!("proxy failed: {}", line.lines().next().unwrap());
+                        let first = body_of(&line);
                         let not_admitted =
                             format!("proxy service refused: {}", bifrost::Refusal::NotAdmitted);
                         let answer = match meets() {
@@ -1946,4 +1949,18 @@ fn a_confirmed_stall_ends_the_proxy() {
         );
         assert_eq!(err, "", "no warning first");
     });
+}
+
+/// The `502` body the terminal line `terminal` gives: `proxy failed: ` and its head, then, for an ended
+/// standing whose remedy is under it, that remedy as one clause with its command.
+fn body_of(terminal: &str) -> String {
+    let mut lines = terminal.lines();
+    let head = lines.next().unwrap_or_default();
+    match (lines.next(), lines.next()) {
+        (Some("  Renew it where your root is kept:"), Some(command)) => format!(
+            "proxy failed: {head}; renew it where your root is kept: {}",
+            command.trim()
+        ),
+        _ => format!("proxy failed: {head}"),
+    }
 }

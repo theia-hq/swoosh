@@ -27,6 +27,11 @@ All notable changes to swoosh, newest first.
 ### Changed
 - **`swoosh --help` lists the commands under headings, and `swoosh tree` is gone.** Help rows are one capitalized
   phrase that fits 80 columns, `revoke` takes `<what>`, and `share` takes `<service> [who]`.
+- **`swoosh status` prints blocks, with no colons.** `this machine` (key, lock, serving, `home`) and `your root` (key, and
+  lock where it is kept here) lead; `reach`, `internal routes`, `devices`, `contacts` and `links you shared` follow, and what to do
+  comes last, each command on its own line. A contact saved as one machine reads `one machine`.
+- **A dial refused for an ended standing puts the remedy under the refusal.** The refusal says `standing` and
+  `a machine that admits only your devices`; the expiry warning starts with `warning:`.
 - **A `--local` dial that finds nothing says what to do.** The refusal names `swoosh status` on the other machine and
   the `--peer` form with its key.
 - **`stop me/<name>` runs through `swoosh serve` too.** It warns when this machine's standing is about to

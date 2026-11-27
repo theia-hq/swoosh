@@ -2084,7 +2084,7 @@ fn status_serving(scratch: &ProcessScratch) -> Option<String> {
     );
     stdout
         .lines()
-        .find(|line| line.starts_with("serving:"))
+        .find(|line| line.starts_with("  serving "))
         .map(str::to_owned)
 }
 
@@ -2107,7 +2107,7 @@ fn a_refused_serve_leaves_status_showing_the_next_start() {
         assert!(!socket.exists(), "serve {args:?} leaves no socket");
         assert_eq!(
             status_serving(&scratch),
-            Some("serving: ping, speed, when swoosh serve runs".to_owned()),
+            Some("  serving        ping, speed, when swoosh serve runs".to_owned()),
             "after serve {args:?}, the never-named list still starts the default"
         );
     }
@@ -2143,7 +2143,7 @@ fn a_terminated_serve_removes_its_socket() {
     );
     assert_eq!(
         status_serving(&scratch),
-        Some("serving: ping, speed, when swoosh serve runs".to_owned()),
+        Some("  serving        ping, speed, when swoosh serve runs".to_owned()),
         "an explicit start leaves the next bare start at defaults"
     );
 }
@@ -2162,7 +2162,7 @@ fn a_killed_serve_leaves_status_showing_the_next_start() {
     );
     assert_eq!(
         status_serving(&scratch),
-        Some("serving: ping, speed, when swoosh serve runs".to_owned()),
+        Some("  serving        ping, speed, when swoosh serve runs".to_owned()),
         "an explicit start leaves the next bare start at defaults"
     );
 }

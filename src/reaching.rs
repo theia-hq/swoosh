@@ -192,7 +192,8 @@ pub async fn warn_expiring(
 pub enum ResolveError {
     /// The stored badge is past its date, so every gate refuses it.
     #[error(
-        "this device's membership badge {expiry}, so a family-gated peer will refuse this dial; {}",
+        "this device's standing {expiry}, so a machine that admits only your devices will refuse this \
+         dial\n{}",
         badge::remedy(*node)
     )]
     Ended {
@@ -348,7 +349,7 @@ fn into_slot_at<W: std::io::Write>(
             // must not fail the dial this line only annotates.
             let _ = writeln!(
                 warn,
-                "swoosh: this device's membership badge {expiry}; {}",
+                "warning: this device's standing {expiry}\n{}",
                 badge::remedy(node)
             );
             Ok(badge)
@@ -1052,7 +1053,16 @@ mod tests {
             "the dial goes ahead carrying the stored badge"
         );
         let warned = String::from_utf8(warned).expect("the warning is utf-8");
-        assert_eq!(warned.lines().count(), 1, "one line, not a paragraph");
+        assert_eq!(
+            warned,
+            format!(
+                "{}\n{}\n",
+                warned.lines().next().unwrap_or_default(),
+                badge::remedy(device.node_id())
+            ),
+            "one head, then the remedy under it, once"
+        );
+        assert_eq!(warned.matches("warning: ").count(), 1, "{warned}");
         assert!(
             warned.contains("expires in") && warned.contains("swoosh invite <name>"),
             "the warning names the remaining life and the remedy, got: {warned}"

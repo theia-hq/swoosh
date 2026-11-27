@@ -484,15 +484,15 @@ async fn an_ended_standing_names_the_own_binds_remedy_when_serve_says_who_it_is(
         contacts: &contacts,
     };
     let this = NodeId::from_ed25519_secret(&[0x62; 32]);
-    let head = "error: this device's membership badge has ended, so a family-gated peer will refuse \
-                this dial";
+    let head = "error: this device's standing has ended, so a machine that admits only your devices \
+                will refuse this dial";
     let named = pipe
         .refused(OpenRefusal::StandingEnded, &Serve(Some(this)))
         .await;
     assert!(named.is::<StandingEnded>());
     assert_eq!(
         printed(&named),
-        format!("{head}; {}\n", swoosh::badge::remedy(this))
+        format!("{head}\n{}\n", swoosh::badge::remedy(this))
     );
     // `serve`'s status cannot be read: the head alone, never a remedy keyed to a guess.
     let alone = pipe.refused(OpenRefusal::StandingEnded, &Serve(None)).await;

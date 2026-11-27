@@ -693,10 +693,11 @@ pub struct StandingEnded(pub(crate) Option<NodeId>);
 impl core::fmt::Display for StandingEnded {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(
-            "this device's membership badge has ended, so a family-gated peer will refuse this dial",
+            "this device's standing has ended, so a machine that admits only your devices will refuse this \
+             dial",
         )?;
         match self.0 {
-            Some(this) => write!(f, "; {}", swoosh::badge::remedy(this)),
+            Some(this) => write!(f, "\n{}", swoosh::badge::remedy(this)),
             None => Ok(()),
         }
     }

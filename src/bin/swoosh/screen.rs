@@ -123,6 +123,12 @@ pub(crate) enum Cell<'a> {
     Risk(&'static str),
     /// A name, key or target: escaped completely, never split, never styled.
     Token(&'a str),
+    /// A value its caller already escaped, such as a path or a list of names: printed as it is, never split,
+    /// never styled, so it is never escaped twice.
+    Escaped(&'a str),
+    /// Names and words its caller already escaped, a space apart, such as a list of services: printed as
+    /// they are, and where the row stacks, wrapped between them and never inside one.
+    Names(&'a str),
 }
 
 impl Cell<'_> {
@@ -131,15 +137,16 @@ impl Cell<'_> {
         match self {
             Self::Word(text) | Self::Risk(text) => Cow::Borrowed(text),
             Self::Token(token) => Cow::Owned(EscapedComplete(token).to_string()),
+            Self::Escaped(text) | Self::Names(text) => Cow::Borrowed(text),
         }
     }
 
-    /// Whether the cell is ASCII as given, the only cells a one-line row holds: a wide glyph counts one
+    /// Whether the cell is narrow as given, the only cells a one-line row holds: a wide glyph counts one
     /// scalar but fills two columns, so it could never line up, and a token is judged before its escaping.
     fn is_ascii(&self) -> bool {
         match self {
-            Self::Word(text) | Self::Risk(text) => text.is_ascii(),
-            Self::Token(text) => text.is_ascii(),
+            Self::Word(text) | Self::Risk(text) => narrow(text),
+            Self::Token(text) | Self::Escaped(text) | Self::Names(text) => narrow(text),
         }
     }
 }
@@ -163,6 +170,11 @@ enum Line<'a> {
 #[derive(Default)]
 pub(crate) struct Block<'a> {
     title: Option<&'static str>,
+    /// What the title row says beside its title.
+    value: Option<Cell<'a>>,
+    /// Where the title row's value starts, at the least: the value column a head block sets; with none, one
+    /// space after the title.
+    value_at: Option<usize>,
     /// Where each column after the first starts, at the least, left to right.
     columns: Vec<usize>,
     lines: Vec<Line<'a>>,
@@ -177,9 +189,21 @@ impl<'a> Block<'a> {
         }
     }
 
+    /// Put `value` on the title row: at the value column a head block sets with [`column`](Self::column),
+    /// the one its rows' values start at, or one space after the title in any other block.
+    pub(crate) fn value(self, value: Cell<'a>) -> Self {
+        Self {
+            value: Some(value),
+            ..self
+        }
+    }
+
     /// Start the value column at `at` or later, so head blocks line up across screens.
     pub(crate) fn column(self, at: usize) -> Self {
-        self.columns([at])
+        Self {
+            value_at: Some(at),
+            ..self.columns([at])
+        }
     }
 
     /// Start each column after the first at its place in `at` or later, left to right: a table whose
@@ -229,7 +253,7 @@ impl<'a> Block<'a> {
         };
         let mut printed = Vec::new();
         if let Some(title) = self.title {
-            printed.push((Shape::Fact, paint(Style::TITLE, title).to_string()));
+            self.print_title(title, &paint, &mut printed)?;
         }
         let rows: Vec<_> = self
             .lines
@@ -257,6 +281,32 @@ impl<'a> Block<'a> {
             }
         }
         Ok(printed)
+    }
+
+    /// The title row: the title, then its value where it fits on the line; else the value below it, as a
+    /// stacked row's later cell.
+    fn print_title(
+        &self,
+        title: &'static str,
+        paint: &impl Fn(Style, &'static str) -> Painted,
+        printed: &mut Vec<(Shape, String)>,
+    ) -> io::Result<()> {
+        let painted = paint(Style::TITLE, title).to_string();
+        let Some(value) = &self.value else {
+            printed.push((Shape::Fact, painted));
+            return Ok(());
+        };
+        let text = value.text();
+        let at = self
+            .value_at
+            .map_or(title.len() + 1, |at| at.max(title.len() + 2));
+        if value.is_ascii() && at + width(&text) <= WIDTH {
+            let gap = " ".repeat(at - title.len());
+            printed.push((Shape::Fact, format!("{painted}{gap}{text}")));
+            return Ok(());
+        }
+        printed.push((Shape::Fact, painted));
+        stacked(value, paint, printed)
     }
 
     /// Each padded column's width, from the rows that fit 80 on their own. A row that cannot fit alone
@@ -318,7 +368,7 @@ impl<'c> Measured<'c> {
     ) -> io::Result<()> {
         let shown = |cell: &Cell<'_>, text: &str| match cell {
             Cell::Risk(word) => paint(Style::RISK, word).to_string(),
-            Cell::Word(_) | Cell::Token(_) => text.to_owned(),
+            Cell::Word(_) | Cell::Token(_) | Cell::Escaped(_) | Cell::Names(_) => text.to_owned(),
         };
         let Some(((last, last_size), padded)) = self.0.split_last() else {
             return Ok(());
@@ -345,31 +395,52 @@ impl<'c> Measured<'c> {
                 printed.push((Shape::Fact, format!("  {}", shown(cell, text))));
                 continue;
             }
-            let mut out = Vec::new();
-            let mut line = StateLine {
-                out: &mut out,
-                column: 0,
-            };
-            let shape = match cell {
-                Cell::Word(words) => {
-                    line.words(words)?;
-                    Shape::Fact
-                }
-                Cell::Token(token) => {
-                    line.span(Span::Target(token))?;
-                    Shape::Token
-                }
-                Cell::Risk(_) => {
-                    printed.push((Shape::Fact, format!("    {}", shown(cell, text))));
-                    continue;
-                }
-            };
-            line.finish()?;
-            let wrapped = String::from_utf8(out).map_err(io::Error::other)?;
-            printed.extend(wrapped.lines().map(|text| (shape, text.to_owned())));
+            stacked(cell, &paint, printed)?;
         }
         Ok(())
     }
+}
+
+/// A cell after a stacked row's first, or a title's value that does not fit beside it: on its own lines at
+/// indent four, fixed words wrapped at word breaks and anything else whole.
+fn stacked(
+    cell: &Cell<'_>,
+    paint: &impl Fn(Style, &'static str) -> Painted,
+    printed: &mut Vec<(Shape, String)>,
+) -> io::Result<()> {
+    let mut out = Vec::new();
+    let mut line = StateLine {
+        out: &mut out,
+        column: 0,
+    };
+    let shape = match cell {
+        Cell::Word(words) => {
+            line.words(words)?;
+            Shape::Fact
+        }
+        Cell::Token(token) => {
+            line.span(Span::Target(token))?;
+            Shape::Token
+        }
+        Cell::Names(names) => {
+            for name in names.split_ascii_whitespace() {
+                line.span(Span::Escaped(name))?;
+            }
+            Shape::Fact
+        }
+        Cell::Escaped(text) => {
+            printed.push((Shape::Token, format!("    {text}")));
+            return Ok(());
+        }
+        Cell::Risk(word) => {
+            printed.push((Shape::Fact, format!("    {}", paint(Style::RISK, word))));
+            return Ok(());
+        }
+    };
+    line.finish()?;
+    let wrapped = String::from_utf8(out).map_err(io::Error::other)?;
+    printed.extend(wrapped.lines().map(|text| (shape, text.to_owned())));
+    Ok(())
 }
 
 /// Blocks, a blank line apart.
@@ -426,6 +497,13 @@ enum Shape {
     Token,
 }
 
+/// Whether every scalar of `text` fills one column: ASCII, and the `…` that cuts a short key, so a table of
+/// short keys lines up on one line.
+fn narrow(text: &str) -> bool {
+    text.chars()
+        .all(|scalar| scalar.is_ascii() || scalar == '…')
+}
+
 /// Measures escaped scalars, not terminal columns; only ASCII rows use the one-line layout.
 pub(crate) fn width(value: impl fmt::Display) -> usize {
     struct Count(usize);
@@ -447,6 +525,8 @@ pub(crate) enum Span<'a> {
     Word(&'static str),
     /// A complete target that never splits.
     Target(&'a str),
+    /// A name its caller already escaped, printed as it is, never split.
+    Escaped(&'a str),
 }
 
 impl fmt::Display for Span<'_> {
@@ -454,6 +534,7 @@ impl fmt::Display for Span<'_> {
         match self {
             Self::Word(word) => f.write_str(word),
             Self::Target(target) => write!(f, "{}", EscapedComplete(target)),
+            Self::Escaped(name) => f.write_str(name),
         }
     }
 }
@@ -479,7 +560,7 @@ impl<W: io::Write> StateLine<'_, W> {
     pub(crate) fn span(&mut self, span: Span<'_>) -> io::Result<()> {
         let ascii = match &span {
             Span::Word(_) => true,
-            Span::Target(target) => target.is_ascii(),
+            Span::Target(text) | Span::Escaped(text) => text.is_ascii(),
         };
         let size = width(&span);
         if self.column != 0 && (!ascii || self.column + 1 + size > WIDTH) {

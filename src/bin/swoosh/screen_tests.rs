@@ -307,3 +307,35 @@ fn error_lines_is_what_print_error_writes() {
         "error: send ended: could not reach me/laptop\n  On me/laptop, run swoosh serve.\n"
     );
 }
+
+/// A title's value sits at the head block's value column, or one space after the title in any other block;
+/// one that does not fit beside the title goes below it at indent four, whole. Red when the value moves or
+/// runs past 80.
+#[test]
+fn a_title_carries_its_value_or_stacks_it() {
+    let long = "x".repeat(70);
+    assert_eq!(
+        written(
+            &Screen::default().block(
+                Block::titled("this machine")
+                    .column(17)
+                    .value(Cell::Word("a value"))
+            )
+        ),
+        "this machine     a value\n"
+    );
+    assert_eq!(
+        written(&Screen::default().block(Block::titled("devices").value(Cell::Token("(a note)")))),
+        "devices (a note)\n"
+    );
+    assert_eq!(
+        written(
+            &Screen::default().block(
+                Block::titled("this machine")
+                    .column(17)
+                    .value(Cell::Token(&long))
+            )
+        ),
+        format!("this machine\n    {long}\n")
+    );
+}
