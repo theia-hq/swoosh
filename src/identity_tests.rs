@@ -528,7 +528,10 @@ async fn lock_touch_id_on_a_passphrase_key_goes_beside_it() {
         panic!("one touch: {:?}", prompt.touches());
     };
     assert!(matches!(touch.act, TouchAct::BesidePassphrase { .. }));
-    assert_eq!(touch.reason, crate::touch::CHECK_MACHINE_KEY);
+    assert_eq!(
+        touch.reason,
+        crate::touch::Reason::Change(crate::touch::CHECK_MACHINE_KEY)
+    );
     assert_eq!(prompt.said()[0], crate::touch::TOUCH_ID_BESIDE);
     assert_eq!(
         prompt.warned(),
@@ -723,7 +726,7 @@ async fn lock_passphrase_on_a_touch_id_only_key_beside_a_root_goes_beside_it() {
     assert_eq!(added_as(locked), Some((Methods::Passphrase, Root::Kept)));
     assert_eq!(
         prompt.touches()[0].reason,
-        crate::touch::ADD_PASSPHRASE_TO_MACHINE_KEY
+        crate::touch::Reason::Change(crate::touch::ADD_PASSPHRASE_TO_MACHINE_KEY)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -751,7 +754,7 @@ async fn lock_touch_id_remove_on_a_touch_id_only_key_names_the_removal() {
     assert!(matches!(prompt.touches()[0].act, TouchAct::RemoveTouchId));
     assert_eq!(
         prompt.touches()[0].reason,
-        crate::touch::REMOVE_TOUCH_ID_FROM_MACHINE_KEY
+        crate::touch::Reason::Change(crate::touch::REMOVE_TOUCH_ID_FROM_MACHINE_KEY)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -811,7 +814,7 @@ async fn adding_a_lock_never_drops_one() {
     ));
     assert_eq!(
         prompt.touches()[0].reason,
-        crate::touch::ADD_PASSPHRASE_TO_MACHINE_KEY
+        crate::touch::Reason::Change(crate::touch::ADD_PASSPHRASE_TO_MACHINE_KEY)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -888,7 +891,14 @@ async fn a_touch_id_only_key_resolves_by_the_touch() {
         secret.node_id(),
         crate::testkit::TestNode::seeded(0x11).node_id()
     );
-    assert_eq!(prompt.touches()[0].reason, crate::touch::USE_MACHINE_KEY);
+    // The act, not the command: the command is a process's, set or not by whatever ran first.
+    assert!(matches!(
+        prompt.touches()[0].reason,
+        crate::touch::Reason::Use {
+            act: crate::touch::USE_MACHINE_KEY,
+            ..
+        }
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -976,7 +986,14 @@ async fn rewriting_a_touch_id_only_key_proves_it_by_the_touch_and_writes_nothing
         panic!("one touch: {:?}", prompt.touches());
     };
     assert!(matches!(touch.act, TouchAct::Open));
-    assert_eq!(touch.reason, crate::touch::USE_MACHINE_KEY);
+    // The act, not the command: the command is a process's, set or not by whatever ran first.
+    assert!(matches!(
+        touch.reason,
+        crate::touch::Reason::Use {
+            act: crate::touch::USE_MACHINE_KEY,
+            ..
+        }
+    ));
     assert_eq!(prompt.events(), 0);
     assert_eq!(std::fs::read(home.key()).unwrap(), before);
 
@@ -1172,7 +1189,7 @@ async fn every_change_says_now_and_after_first() {
         );
         assert_eq!(
             prompt.inner.touches().first().map(|touch| touch.reason),
-            reason,
+            reason.map(t::Reason::Change),
             "{tag}"
         );
         let _ = std::fs::remove_dir_all(&dir);

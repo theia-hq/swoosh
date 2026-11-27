@@ -755,7 +755,7 @@ impl Root {
             &file,
             &found.locked,
             act.asked(),
-            crate::touch::USE_ROOT,
+            crate::touch::Reason::to_use(crate::touch::USE_ROOT),
         )
         .map_err(prompt_error)?;
         let mut root = Self { secret, act };
@@ -1736,7 +1736,7 @@ async fn finish(
         &KeyFile::strict(home.root_key()),
         &locked,
         Asked::Root,
-        crate::touch::USE_ROOT,
+        crate::touch::Reason::to_use(crate::touch::USE_ROOT),
     )
     .map_err(prompt_error)?;
     let mut root = Root { secret, act };

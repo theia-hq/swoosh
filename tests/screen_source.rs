@@ -7,7 +7,8 @@
 //!
 //! A third, of the same kind: a lock comes off a key file only where a person asked for that by name, so
 //! every call that takes one off is counted, by file. And a fourth: the lock lines name the lock a removal
-//! takes off, and say Touch ID the way a person does.
+//! takes off, and say Touch ID the way a person does. And a fifth: the Touch ID dialog takes only words fixed
+//! at build time.
 //!
 //! Test files, inline `mod tests` blocks and comments are skipped: only what ships is read.
 
@@ -223,6 +224,49 @@ fn a_lock_line_names_its_method_and_spells_touch_id() {
             }
         }
     }
+}
+
+/// The Touch ID dialog names the command that asked, and only words fixed at build time reach it: the one
+/// call that names the command takes `&'static str`, the static holds one, and no shipped file makes one of a
+/// `String` (`leak`), so a peer's text or a typed word cannot become `'static`. And one call in all of `src/`
+/// names the command: the binary's, with its command's path, before any verb runs.
+#[test]
+fn the_dialog_takes_only_static_words() {
+    let shipped: Vec<(String, String)> = shipped()
+        .into_iter()
+        .map(|(file, text)| (file, scan(&text).code))
+        .collect();
+    let code = |name: &str| {
+        shipped
+            .iter()
+            .find_map(|(file, code)| (file == name).then_some(code.as_str()))
+            .unwrap()
+    };
+    let lines = |name, needle| -> Vec<&str> {
+        code(name)
+            .lines()
+            .filter(|line| line.contains(needle))
+            .collect()
+    };
+    assert_eq!(
+        lines("touch.rs", "fn for_command("),
+        ["pub fn for_command(path: &'static str) {"]
+    );
+    assert_eq!(
+        lines("touch.rs", "static COMMAND:"),
+        ["static COMMAND: OnceLock<&'static str> = OnceLock::new();"]
+    );
+    let mut calls = Vec::new();
+    for (file, code) in &shipped {
+        assert!(
+            !code.contains(".leak(") && !code.contains("::leak"),
+            "{file} leaks"
+        );
+        let named = code.matches("for_command(").count() - code.matches("fn for_command(").count();
+        calls.extend(core::iter::repeat_n(file.as_str(), named));
+    }
+    assert_eq!(calls, ["bin/swoosh/main.rs"], "one call names the command");
+    assert!(code("bin/swoosh/main.rs").contains("swoosh::touch::for_command(command.path());"));
 }
 
 /// Every shipped source file, by its path under `src/`, cut before an inline `mod tests` block.
