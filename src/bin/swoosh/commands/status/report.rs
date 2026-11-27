@@ -39,7 +39,7 @@ use crate::commands::service_state::{ReadError, ReadMode, ServiceState};
 use crate::screen::{Block, Cell, Paint, Screen};
 
 /// Where the head blocks' values start, the column the `reach` block and serve's banner use.
-const COLUMN: usize = 17;
+pub(crate) const COLUMN: usize = 17;
 
 /// What bare `status` prints on stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

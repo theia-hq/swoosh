@@ -14,7 +14,9 @@
 //! so that block is the whole revoke. A device is admitted by all your devices: with your root (kept here,
 //! or `--root <dir>`) the revoke then presents it, cuts, and offers the cut; without it, it stays on this
 //! machine and says so. Only the root's passphrase is ever asked for, and only after the block is written;
-//! a root step that cannot run says the device is blocked here only, in one line, and exits 1.
+//! a root step that cannot run says the device is blocked here only, in the success screen's two rows with
+//! the reason in the second, and exits 1. Every screen that says this machine blocks something reads
+//! `revoked` back first ([`Blocked`]).
 //!
 //! `root:<key>` is the one form that ends something everywhere, so it is the one form that asks first: only
 //! from argv (a link read from stdin or a file is never a root), never a key one of your devices or a
@@ -35,7 +37,7 @@ use swoosh::contacts::{ContactRef, ContactsStore, DeviceLabel, ME, Petname, Reso
 use swoosh::grants::{GrantKind, GrantRecord, Grants};
 use swoosh::home::{Home, HomeWrite};
 use swoosh::passphrase::Prompt;
-use swoosh::reach_report::{Reach, What};
+use swoosh::reach_report::Reach;
 use swoosh::root::{Root, RootError, RootPlace, RootVerb};
 use swoosh::root_key::{RootKey, RootKeyError};
 use swoosh::roster::Epoch;
@@ -44,6 +46,7 @@ use swoosh::sync::{Answer, Dial, ExchangeError};
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::AsVerifyKey as _;
 
+use crate::commands::reached::{Blocked, Revoked};
 use crate::commands::token;
 
 /// The most bytes of stdin read for one link: far above any link, far below anything that costs a read.
@@ -184,6 +187,10 @@ pub struct Publish {
     listed: Vec<VerifyKey>,
     /// Whether this machine had given the device's key any link.
     links: bool,
+    /// The device as its screens name it.
+    target: Revoked,
+    /// What this machine's block wrote, read back before any screen says it blocks the device.
+    entries: Vec<Revocation>,
 }
 
 /// `revoke me/<name>` with your root: the device part, run as a reaching verb since it syncs with your
@@ -312,13 +319,19 @@ impl RevokeCmd {
                     _ => Vec::new(),
                 };
                 let latch = Revocation::Key(key.verify_key()?);
-                swoosh::revoked::add(
-                    &home_lock,
-                    home,
-                    links.into_iter().map(Revocation::Id).chain([latch]),
-                )?;
+                let written: Vec<_> = links
+                    .into_iter()
+                    .map(Revocation::Id)
+                    .chain([latch])
+                    .collect();
+                swoosh::revoked::add(&home_lock, home, written.iter().cloned())?;
                 if matches!(kind, Kind::Device { .. }) {
                     swoosh::joining::leave(&home_lock, home)?;
+                    // Said only once `revoked`, which leaving keeps, reads back the latch.
+                    Blocked::read(home, Revoked::Named(root.clone()), &written)?.left(err)?;
+                } else {
+                    // Said only once `revoked` reads back the latch and the links it ends.
+                    Blocked::read(home, Revoked::Named(root.clone()), &written)?.for_good(err)?;
                 }
             }
         }
@@ -357,12 +370,8 @@ impl RevokeCmd {
         if own_key(home)?.is_some_and(|own| own == issuer) {
             self.no_root()?;
             let home_lock = HomeWrite::take(home).await?;
-            revoke_link(&home_lock, home, link)?;
-            writeln!(
-                err,
-                "{}",
-                Reach::Complete.line(&What::Revoked("the link".to_owned()))
-            )?;
+            let written = revoke_link(&home_lock, home, link)?;
+            Blocked::read(home, Revoked::Link, &written)?.landed(&Reach::Complete, err)?;
             return Ok(None);
         }
         let pin = pin(home).await;
@@ -389,17 +398,18 @@ impl RevokeCmd {
             Some(row) => source.revoked_keys.contains(&row.key),
             None => id.as_ref().is_some_and(|id| source.revoked.contains(id)),
         };
-        let what = What::Revoked("the link".to_owned());
         if revoked {
             // Your root has revoked the device already: its name may be a new device's now, so this stops
             // at the link and the key it was signed for.
             self.no_root()?;
             let home_lock = HomeWrite::take(home).await?;
-            revoke_link(&home_lock, home, link)?;
+            let mut written = revoke_link(&home_lock, home, link)?;
             if let Some(row) = &row {
+                written.push(Revocation::Key(row.key));
                 swoosh::revoked::add(&home_lock, home, [Revocation::Key(row.key)])?;
             }
-            writeln!(err, "{what}: {ALREADY}")?;
+            // Said only once `revoked` reads back what was written.
+            Blocked::read(home, Revoked::Link, &written)?.already(err)?;
             return Ok(None);
         }
         if let Some(row) = row {
@@ -418,8 +428,8 @@ impl RevokeCmd {
             Reach::LocalOnly { until: ends }
         };
         let home_lock = HomeWrite::take(home).await?;
-        revoke_link(&home_lock, home, link)?;
-        writeln!(err, "{}", reach.line(&what))?;
+        let written = revoke_link(&home_lock, home, link)?;
+        Blocked::read(home, Revoked::Link, &written)?.landed(&reach, err)?;
         Ok(None)
     }
 
@@ -453,15 +463,17 @@ impl RevokeCmd {
         let home_lock = HomeWrite::take(home).await?;
         let given = given_to(home, &[row.key.to_string()]).await?;
         let links = !given.is_empty();
-        let ids = row
+        let entries: Vec<_> = row
             .ids
             .iter()
             .filter(|id| id.expires > now)
             .map(|id| RevocationId::clone(&id.id))
             .chain(given)
-            .map(Revocation::Id);
-        swoosh::revoked::add(&home_lock, home, ids.chain([Revocation::Key(row.key)]))?;
-        let device = format!("me/{name}");
+            .map(Revocation::Id)
+            .chain([Revocation::Key(row.key)])
+            .collect();
+        swoosh::revoked::add(&home_lock, home, entries.iter().cloned())?;
+        let target = Revoked::Named(format!("me/{name}"));
 
         match source.place {
             // Said only once the root step commits ([`Publish::run`]): until then the device is blocked on
@@ -479,11 +491,13 @@ impl RevokeCmd {
                     key: row.key,
                     listed,
                     links,
+                    target,
+                    entries,
                 }))
             }
             None => {
                 let reach = Reach::LocalOnly { until: row.until };
-                writeln!(err, "{}", reach.line(&What::Revoked(device)))?;
+                Blocked::read(home, target, &entries)?.landed(&reach, err)?;
                 if links {
                     writeln!(err, "{LINKS_LINE}")?;
                 }
@@ -679,7 +693,7 @@ impl Kind {
         }
     }
 
-    /// The lines once the act has committed.
+    /// The lines once the act has committed, where nothing reads them back.
     fn after(&self, root: &str) -> Vec<String> {
         match self {
             Self::Holder(_) => vec![
@@ -688,11 +702,10 @@ impl Kind {
                 "tell your contacts; each of them runs: swoosh contact add <you> <new root key>"
                     .to_owned(),
             ],
-            Self::Device { .. } => vec![
-                format!("left {root} for good."),
-                "to join a new root: swoosh join".to_owned(),
-            ],
-            Self::Contact(_) | Self::Unknown => vec![format!("revoked {root} here for good.")],
+            // `left <root> for good.` is said from the latch read back ([`Blocked::left`]), before this.
+            Self::Device { .. } => vec!["to join a new root: swoosh join".to_owned()],
+            // Said from the latch read back ([`Blocked::for_good`]), never from here.
+            Self::Contact(_) | Self::Unknown => Vec::new(),
         }
     }
 }
@@ -783,23 +796,23 @@ struct Source {
     revoked_keys: Vec<VerifyKey>,
 }
 
-/// What a link whose device your root revoked already says after "revoked the link: ".
-const ALREADY: &str = "blocked here. Your root revoked the device it stands for already.";
-
 fn ids(held: &[swoosh::roster::Id]) -> Vec<RevocationId> {
     held.iter().map(|id| RevocationId::clone(&id.id)).collect()
 }
 
 impl Publish {
-    /// What a run stopped after the block and before the root step says landed, on two lines: the block
-    /// alone, then the rerun that finishes the cut. A `serve` this run cannot reach stops it there.
-    pub(crate) fn landed(&self) -> String {
-        format!("{}\n{}", blocked(&self.name), rerun(&self.name))
+    /// The refusal when a `swoosh serve` here stopped the run after the block and before the root step:
+    /// the partial landing, from `revoked` read back now, with `report` on its own lines.
+    pub(crate) fn unreached(&self, home: &Home, report: &eyre::Report) -> eyre::Report {
+        match Blocked::read(home, self.target.clone(), &self.entries) {
+            Ok(here) => here.unreached(report),
+            Err(refusal) => refusal,
+        }
     }
 
     /// Present the root, revoke the device, cut, and offer the cut; then say which of your devices took it,
     /// and that the device can never come back under its key. A root step that cannot finish says the
-    /// device is blocked on this machine only ([`partway`]). Returns where the cut reached, so a line
+    /// device is blocked on this machine only ([`Blocked::partway`]). Returns where the cut reached, so a line
     /// after it can tell a published cut from one a newer list kept back.
     pub(crate) async fn run(
         self,
@@ -816,14 +829,20 @@ impl Publish {
             let _ = root.renew_due()?;
             root.commit_to(err).await
         }
-        .await
-        .map_err(|error| partway(name, error))?;
+        .await;
+        // Read back when the screen is built, not when the block was written: a file that lost the entry
+        // since says nothing it no longer holds. A committed cut is offered first, whatever then prints.
+        let committed = match committed {
+            Ok(committed) => committed,
+            Err(error) => {
+                return Err(match Blocked::read(home, self.target, &self.entries) {
+                    Ok(here) => here.partway(error),
+                    Err(refusal) => refusal,
+                });
+            }
+        };
         let reach = committed.offer(dial).await;
-        writeln!(
-            err,
-            "{}",
-            reach.line(&What::Revoked(format!("me/{}", self.name)))
-        )?;
+        Blocked::read(home, self.target, &self.entries)?.landed(&reach, err)?;
         if self.links {
             writeln!(err, "{LINKS_LINE}")?;
         }
@@ -837,36 +856,6 @@ impl Publish {
         )?;
         Ok(reach)
     }
-}
-
-/// The refusal when the root step of `revoke me/<name>` stops, its block on this machine already written:
-/// what landed and what did not. A cause this names the fix for is one line; any other is the partway
-/// sentence, then the cause's own line, which names its own fix. A Ctrl-C at the prompt ends by its signal,
-/// and says nothing.
-fn partway(name: &DeviceLabel, error: RootError) -> eyre::Report {
-    let blocked = blocked(name);
-    match error {
-        RootError::NoTerminalToUnlock => eyre::eyre!(
-            "{blocked}; your root's passphrase needs a terminal: over swoosh ssh, add -t after --"
-        ),
-        // A third wrong passphrase, or a prompt that ended without one; or the home changed under the act,
-        // which a rerun reads afresh.
-        RootError::Prompt(_) | RootError::NotOnThisMachine | RootError::NoRootHere => {
-            eyre::eyre!("{blocked}; {}", rerun(name))
-        }
-        // One message, two lines: a cause chained after a colon would run its sentences into this one.
-        other => eyre::eyre!("{blocked}.\n{other}"),
-    }
-}
-
-/// What landed when `revoke me/<name>` stops after its block and before its root step: the block alone.
-fn blocked(name: &DeviceLabel) -> String {
-    format!("me/{name} is blocked on this machine, not yet on your other devices")
-}
-
-/// The rerun that finishes `revoke me/<name>` once only its block landed.
-fn rerun(name: &DeviceLabel) -> String {
-    format!("to finish, run it again: swoosh revoke me/{name}")
 }
 
 /// `<person>`: every link given to any device of that contact, and every link bound to their root.
@@ -890,12 +879,10 @@ async fn person_links(home: &Home, person: &Petname, err: &mut impl Write) -> ey
     if given.is_empty() {
         eyre::bail!("no link from this machine was given to {person}; nothing revoked.");
     }
-    swoosh::revoked::add(&home_lock, home, given.into_iter().map(Revocation::Id))?;
-    writeln!(
-        err,
-        "{}",
-        Reach::Complete.line(&What::Revoked(person.to_string()))
-    )?;
+    let entries: Vec<_> = given.into_iter().map(Revocation::Id).collect();
+    swoosh::revoked::add(&home_lock, home, entries.iter().cloned())?;
+    Blocked::read(home, Revoked::Named(person.to_string()), &entries)?
+        .landed(&Reach::Complete, err)?;
     Ok(())
 }
 
@@ -923,13 +910,11 @@ async fn key_links(
     let given = given(home, &holders).await?;
     let revoked = given.len();
     let rooted = given.iter().any(|record| record.kind == GrantKind::Fleet);
-    swoosh::revoked::add(
-        &home_lock,
-        home,
-        given
-            .into_iter()
-            .map(|record| Revocation::Id(record.root_id)),
-    )?;
+    let entries: Vec<_> = given
+        .into_iter()
+        .map(|record| Revocation::Id(record.root_id))
+        .collect();
+    swoosh::revoked::add(&home_lock, home, entries.iter().cloned())?;
     let mut trailing = Vec::new();
     for key in keys {
         trailing.extend(also(home, *key).await?);
@@ -948,7 +933,7 @@ async fn key_links(
         ),
         _ => what.to_owned(),
     };
-    writeln!(err, "{}", Reach::Complete.line(&What::Revoked(what)))?;
+    Blocked::read(home, Revoked::Named(what), &entries)?.landed(&Reach::Complete, err)?;
     for line in trailing {
         writeln!(err, "{line}")?;
     }
@@ -1016,10 +1001,16 @@ async fn given(home: &Home, holders: &[String]) -> eyre::Result<Vec<GrantRecord>
 
 /// Block `link` in this machine's `revoked` at its narrowest id, so it and everything narrowed from it are
 /// refused and the wider link it was narrowed from is not. Under `home.lock`, which the caller holds.
-fn revoke_link(home_lock: &HomeWrite, home: &Home, link: &Link) -> eyre::Result<()> {
-    let narrowest = link.cap().revocation_ids().pop();
-    swoosh::revoked::add(home_lock, home, narrowest.map(Revocation::Id))?;
-    Ok(())
+fn revoke_link(home_lock: &HomeWrite, home: &Home, link: &Link) -> eyre::Result<Vec<Revocation>> {
+    let narrowest: Vec<_> = link
+        .cap()
+        .revocation_ids()
+        .pop()
+        .map(Revocation::Id)
+        .into_iter()
+        .collect();
+    swoosh::revoked::add(home_lock, home, narrowest.iter().cloned())?;
+    Ok(narrowest)
 }
 
 /// One link from stdin, and nothing else.

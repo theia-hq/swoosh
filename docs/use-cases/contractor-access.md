@@ -73,7 +73,9 @@ The link expires on its own at the end of the engagement. To cut access early, r
 <!-- capture: swoosh revoke contractor -->
 ```console
 $ swoosh revoke contractor
-revoked contractor: blocked. Only this machine admitted it.
+Revoked contractor.
+  this machine   blocks it now
+  your devices   none ever admitted it
 ```
 
 ## The limit

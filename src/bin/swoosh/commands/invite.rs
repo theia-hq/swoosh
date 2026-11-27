@@ -25,6 +25,7 @@ use swoosh::home::Home;
 use swoosh::invite::Invite;
 use swoosh::passphrase::Prompt;
 use swoosh::peer::KeyTextError;
+use swoosh::reach_report::Reach;
 use swoosh::root::{self, Date, Minted, Records, Root, RootError, RootPlace, RootVerb};
 use swoosh::roster::Member;
 use swoosh::standing::{Standing, StandingError};
@@ -309,14 +310,15 @@ impl InviteCmd {
         }
 
         let reach = committed.offer(dial).await;
-        if let Some(line) = reach.invite_line(&device) {
-            writeln!(err, "{line}")?;
+        // Only a newer list on your devices has more to say: the invite itself says the rest.
+        if reach == Reach::Behind {
+            crate::commands::reached::invite_behind(&device, err)?;
         }
         let renewed_another = plan == Plan::Renew
             && issued.unchanged.is_none()
             && row.as_ref().is_some_and(|row| Some(row.node) != own);
-        if renewed_another && let Some(line) = reach.renewed_line(&device, until) {
-            writeln!(err, "{line}")?;
+        if renewed_another {
+            crate::commands::reached::renewed(&device, until, &reach, err)?;
         }
         Ok(())
     }
@@ -561,7 +563,7 @@ fn needs_no_renewal(name: &DeviceLabel, until: u64, own: bool) -> String {
     if own {
         head
     } else {
-        format!("{head} If it left, or its date passed, on it: swoosh join and paste this line.")
+        format!("{head}\nIf it left or its date passed, paste the invite into swoosh join on it.")
     }
 }
 

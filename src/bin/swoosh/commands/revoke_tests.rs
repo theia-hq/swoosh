@@ -175,6 +175,27 @@ impl Ran {
     }
 }
 
+/// The partial landing of `revoke me/laptop`: its head, the two rows with `told` in the second, then
+/// `action` after a blank line. The refusal's own text, before `main` puts `error: ` before it.
+fn partial(told: &str, action: &str) -> String {
+    let action = if action.ends_with(':') {
+        format!("{action}\n  swoosh revoke me/laptop")
+    } else {
+        action.to_owned()
+    };
+    format!(
+        "me/laptop is blocked on this machine only\n  this machine   blocks it now\n  your devices   {told}\n\n\
+         {action}"
+    )
+}
+
+/// `captured` holds the screen law.
+pub(crate) fn hold(captured: &str) {
+    if let Err(breach) = crate::screen::law::holds(captured) {
+        panic!("{breach}\n{captured}");
+    }
+}
+
 /// Run `swoosh revoke <args>` on `home`, at a terminal with the passphrase, every device answering.
 async fn revoke(home: &Home, args: &[&str]) -> Ran {
     let tape = Tape::default();
@@ -218,9 +239,11 @@ async fn run_typing(
         Ok(None) => Ok(()),
         Err(error) => Err(error),
     };
+    let err = String::from_utf8(err.bytes).unwrap();
+    crate::screen::owed::hold_but_owed(&err);
     Ran {
         result,
-        err: String::from_utf8(err.bytes).unwrap(),
+        err,
         tape,
         prompts: prompt.asked.inner.events(),
         confirms: prompt.confirms,
@@ -348,9 +371,11 @@ async fn a_cancelled_revoke_prompt_still_blocks_here() {
     let ran = run(&home, &["me/laptop"], b"", Counting::refusing(), dial, tape).await;
     assert_eq!(
         ran.refusal(),
-        "me/laptop is blocked on this machine, not yet on your other devices; to finish, run it again: \
-         swoosh revoke me/laptop",
-        "one partway line"
+        partial(
+            "not told; your root was not unlocked",
+            "To finish, run this again:"
+        ),
+        "one partial landing"
     );
     assert_eq!(
         ran.prompts, 1,
@@ -387,13 +412,16 @@ async fn revoke_prints_local_only_without_the_root() {
     let home = device("revoke-local-only", &[live(OWN, "desk"), laptop.clone()]).await;
     let ran = revoke(&home, &["me/laptop"]).await;
     assert_eq!(
-        ran.ok().trim_end(),
+        ran.ok(),
         format!(
-            "revoked me/laptop on this machine only. Your other devices admit it until {}. To block it \
-             everywhere, run this again where your root is kept, or here with --root <dir>.",
+            "Revoked me/laptop.\n  this machine   blocks it now\n  your devices   not told; your root is not \
+             here\n\nYour other devices admit it until {}.\n\
+             To block it everywhere, run this where your root is kept:\n  swoosh revoke me/laptop\n\
+             Or, with a copy of your root:\n  swoosh revoke me/laptop --root <dir>\n",
             Date(laptop.until)
         )
     );
+    hold(ran.ok());
     assert!(!ran.tape.text().contains("<offer>"), "nothing is offered");
 }
 
@@ -500,8 +528,8 @@ async fn revoke_dash_reads_a_link_from_stdin() {
     )
     .await;
     assert_eq!(
-        ran.ok().trim_end(),
-        "revoked the link: blocked. Only this machine admitted it."
+        ran.ok(),
+        "Revoked the link.\n  this machine   blocks it now\n  your devices   none ever admitted it\n"
     );
     assert!(
         blocks(&home, &link).await,
@@ -575,9 +603,10 @@ async fn revoke_reports_which_devices_took_it() {
     .await;
     let err = ran.ok();
     assert!(
-        err.contains(&format!(
-            "revoked me/laptop: me/phone has it; me/nas did not answer (it gets it on its next sync). A \
-             device that never syncs admits it until {}.",
+        err.starts_with(&format!(
+            "Revoked me/laptop.\n  this machine    blocks it now\n  has it          me/phone\n  did not \
+             answer  me/nas\n\nA device that did not answer gets it on its next sync.\n\
+             A device that never syncs admits it until {}.\n",
             Date(laptop.until)
         )),
         "{err}"
@@ -631,7 +660,7 @@ async fn a_full_row_never_blocks_a_revoke() {
     .await;
     let ran = revoke(&home, &["me/nas"]).await;
     let err = ran.ok();
-    assert!(err.contains("revoked me/nas: "), "{err}");
+    assert!(err.contains("Revoked me/nas.\n"), "{err}");
     let state = kept(&home).await;
     assert!(
         state.iter().all(|row| row.key != key(NAS)),
@@ -645,7 +674,12 @@ async fn a_full_row_never_blocks_a_revoke() {
 
     let ran = revoke(&home, &["me/phone"]).await;
     let err = ran.ok();
-    assert!(err.contains("revoked me/phone: me/laptop has it."), "{err}");
+    assert!(
+        err.contains(
+            "Revoked me/phone.\n  this machine   blocks it now\n  has it         me/laptop\n"
+        ),
+        "{err}"
+    );
     let list = kept_list(&home);
     assert!(list.is_revoked_key(&key(PHONE)));
     for id in &phone.ids {
@@ -679,7 +713,7 @@ async fn a_local_only_revoke_carried_by_a_later_root_act_is_published() {
     let copy_dir = dir("carried-copy");
     copy(&copy_dir, &records(1, &[own, laptop], Vec::new()));
     let ran = revoke(&home, &["me/laptop"]).await;
-    assert!(ran.ok().contains("on this machine only"));
+    assert!(ran.ok().contains("not told; your root is not here"));
 
     let root = copy_dir.to_str().unwrap();
     let tv = node(0x44).to_string();
@@ -743,7 +777,7 @@ async fn revoke_a_bare_key_that_is_a_root_takes_back_only_links() {
     // The link was given to the key as a root, so the result names that half too.
     assert!(
         err.contains(&format!(
-            "revoked the links given to {} and to root:{}: blocked.",
+            "Revoked the links given to {} and to root:{}.\n  this machine   blocks it now\n",
             short(ALICE_ROOT),
             short(ALICE_ROOT)
         )),
@@ -903,7 +937,7 @@ async fn revoking_again_with_the_root_publishes_a_local_block() {
     let err = ran.ok();
     assert!(
         err.contains(&format!(
-            "revoked me/laptop: me/phone has it. A device that never syncs admits it until {}.",
+            "  has it         me/phone\n\nA device that never syncs admits it until {}.\n",
             Date(laptop.until)
         )),
         "{err}"
@@ -960,7 +994,11 @@ async fn a_link_revoked_alone_still_revokes_its_live_device() {
     let home = scratch("revoke-id-alone");
     device_of(&home, &own).await;
     let ran = revoke(&home, &[&typed(&laptop.standing)]).await;
-    assert!(ran.ok().contains("on this machine only"), "{}", ran.err);
+    assert!(
+        ran.ok().contains("not told; your root is not here"),
+        "{}",
+        ran.err
+    );
 
     // The next root act carries the link's id, and only its id: laptop's row stays live.
     let copy_dir = dir("id-alone-copy");
@@ -999,8 +1037,10 @@ async fn a_root_signed_link_is_never_complete_without_the_update() {
     assert_eq!(
         ran.ok().trim_end(),
         format!(
-            "revoked the link on this machine only. Your other devices admit it until {}. To block it \
-             everywhere, run this again where your root is kept, or here with --root <dir>.",
+            "Revoked the link.\n  this machine   blocks it now\n  your devices   not told; your root is not \
+             here\n\nYour other devices admit it until {}.\n\
+             To block it everywhere, run this where your root is kept:\n  swoosh revoke <link>\n\
+             Or, with a copy of your root:\n  swoosh revoke <link> --root <dir>",
             Date(laptop.until)
         )
     );
@@ -1098,13 +1138,15 @@ async fn a_revoke_never_leaves_live_a_device_its_own_sync_rekeyed() {
     .await;
     assert_eq!(
         ran.refusal(),
-        "me/laptop is blocked on this machine, not yet on your other devices.\n\
-         me/laptop is now listed under a key this revoke did not see, so your root did not revoke it",
-        "the partway line, then the cause, which names no command: running the revoke again would take the name's new key"
+        partial(
+            "not told",
+            "  me/laptop is now listed under a key this revoke did not see, so your root did not revoke it"
+        ),
+        "the rows, then the cause, which names no command: running the revoke again would take the name's new key"
     );
     assert!(!ran.tape.text().contains("<offer>"), "nothing is offered");
     assert!(
-        !ran.err.contains("revoked me/laptop: me/"),
+        !ran.err.contains("Revoked me/laptop"),
         "no line says the device was revoked everywhere: {}",
         ran.err
     );
@@ -1960,8 +2002,11 @@ async fn revoke_a_device_without_a_terminal_prints_one_partway_line() {
     .await;
     assert_eq!(
         ran.refusal(),
-        "me/laptop is blocked on this machine, not yet on your other devices; your root's passphrase \
-         needs a terminal: over swoosh ssh, add -t after --"
+        partial(
+            "not told; no terminal to ask for your root's passphrase",
+            "To finish, run this again at a terminal:\n  swoosh revoke me/laptop\n\n\
+             Over swoosh ssh, add -t after --."
+        )
     );
     assert!(ran.err.is_empty(), "no line before the error: {}", ran.err);
     assert!(blocks_key(&home, LAPTOP).await, "the block is written");
@@ -1980,14 +2025,13 @@ async fn revoke_a_device_prints_revoked_after_the_root_commits() {
     let err = ran.ok().to_owned();
     let mut lines = err.lines();
     let reach = lines.next().unwrap();
-    assert!(reach.starts_with("revoked me/laptop: "), "{err}");
-    assert_eq!(
-        lines.collect::<Vec<_>>(),
-        [
+    assert_eq!(reach, "Revoked me/laptop.", "{err}");
+    assert!(
+        lines.collect::<Vec<_>>().ends_with(&[
             "me/laptop can never rejoin your devices with its current key.",
             "to add laptop again, first run this at its console: swoosh leave --new-key",
-        ],
-        "the reach line leads, and the two lines follow it"
+        ]),
+        "the reach screen leads, and the two lines follow it: {err}"
     );
     assert!(
         ran.tape.at("<prompt>") < ran.tape.at(reach),
@@ -2299,6 +2343,161 @@ async fn revoke_a_root_whose_kind_moved_during_the_prompt_writes_nothing() {
     assert!(!latched(&home, ROOT), "nothing latched");
 }
 
+/// The refusal when the read-back does not hold the block.
+const UNCONFIRMED: &str = "this command could not confirm that me/laptop is blocked here\n  To see what is revoked:\n    swoosh status";
+
+/// [`Devices`], but every offer first removes this machine's `revoked`: the root's cut committed, then the
+/// block was lost before the screen read it.
+struct Losing {
+    devices: Devices,
+    revoked: std::path::PathBuf,
+}
+
+impl Dial for Losing {
+    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+        self.devices.exchange(peer).await
+    }
+
+    async fn offer(
+        &self,
+        peer: NodeId,
+        number: Epoch,
+        bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        let _ = std::fs::remove_file(&self.revoked);
+        self.devices.offer(peer, number, bytes).await
+    }
+}
+
+/// `revoke me/laptop` on a home that holds the root, its block written, then `lose` run before the root
+/// step, and the root step asking `prompt` and dialing `dial`: the refusal, what it printed, and the tape.
+async fn revoke_losing(
+    tag: &str,
+    prompt: Counting,
+    dial: impl FnOnce(&Home, &Tape) -> Losing,
+    lose: impl FnOnce(&Home),
+) -> (String, String, String) {
+    let home = scratch(tag);
+    holds(
+        &home,
+        &[
+            live(OWN, "desk"),
+            live(LAPTOP, "laptop"),
+            live(PHONE, "phone"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    let tape = Tape::default();
+    let dial = dial(&home, &tape);
+    let mut prompt = Typing::new(prompt, true, None, &tape);
+    let mut err = Stream {
+        bytes: Vec::new(),
+        tape: tape.clone(),
+    };
+    let publish = parse(&["me/laptop"])
+        .unwrap()
+        .block(&home, &b""[..], &mut prompt, &dial, &mut err)
+        .await
+        .unwrap()
+        .expect("a root step follows");
+    assert!(blocks_key(&home, LAPTOP).await, "the block is written");
+    lose(&home);
+    let refused = publish
+        .run(&home, &mut prompt, &dial, &mut err)
+        .await
+        .unwrap_err();
+    (
+        format!("{refused:#}"),
+        String::from_utf8(err.bytes).unwrap(),
+        tape.text(),
+    )
+}
+
+/// The partial landing prints what landed from `revoked` read back when it is built, never from what the
+/// revoke asked: a block lost after its write prints no partial landing, only the refusal that it could not
+/// be confirmed. Red when the partial landing is built from the entries asked for.
+#[tokio::test]
+async fn a_block_lost_before_the_partial_landing_prints_none() {
+    let (refused, err, _) = revoke_losing(
+        "lost-partial",
+        Counting::refusing(),
+        |home, tape| Losing {
+            devices: Devices::all(tape),
+            revoked: home.revoked(),
+        },
+        // Lost after the write: its witness still counts the entries, so the file reads as damaged.
+        |home| std::fs::remove_file(home.revoked()).unwrap(),
+    )
+    .await;
+    assert_eq!(refused, UNCONFIRMED);
+    assert!(!err.contains("blocks it now"), "{err}");
+}
+
+/// The success screen too: the root's cut commits, the block is lost as it is offered, the cut is still
+/// offered to your devices, and no screen says this machine blocks it. A block lost before `run` cannot
+/// commit a cut, since the root step reads `revoked` too, so the loss comes at the offer. Red when the
+/// success screen is built from the entries asked for, or the read-back holds back the offer.
+#[tokio::test]
+async fn a_block_lost_after_the_cut_commits_still_offers_it_and_prints_none() {
+    let (refused, err, tape) = revoke_losing(
+        "lost-landed",
+        Counting::new([PASS]),
+        |home, tape| Losing {
+            devices: Devices::all(tape),
+            revoked: home.revoked(),
+        },
+        |_| {},
+    )
+    .await;
+    assert_eq!(refused, UNCONFIRMED);
+    assert!(!err.contains("Revoked me/laptop"), "{err}");
+    assert!(
+        tape.contains("<offer>"),
+        "the committed cut is offered: {tape}"
+    );
+}
+
+/// A `swoosh serve` here that stopped the run after the block prints the partial landing, its rows from
+/// `revoked` read back then, and the error on its own lines; a block that no longer reads back prints none.
+/// Red when the partial landing is built from the write alone.
+#[tokio::test]
+async fn a_serve_gone_after_the_block_reads_it_back() {
+    let home = scratch("unreached");
+    holds(
+        &home,
+        &[live(OWN, "desk"), live(LAPTOP, "laptop")],
+        Vec::new(),
+    )
+    .await;
+    let tape = Tape::default();
+    let mut prompt = Typing::new(Counting::refusing(), true, None, &tape);
+    let publish = parse(&["me/laptop"])
+        .unwrap()
+        .block(
+            &home,
+            &b""[..],
+            &mut prompt,
+            &Devices::all(&tape),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap()
+        .expect("a root step follows");
+    let gone = eyre::eyre!("swoosh serve did not answer here");
+    assert_eq!(
+        format!("{:#}", publish.unreached(&home, &gone)),
+        "me/laptop is blocked on this machine only\n  this machine   blocks it now\n  your devices   not \
+         told; the swoosh serve here could not be reached\n\n  swoosh serve did not answer here\n\n\
+         To finish, run this again:\n  swoosh revoke me/laptop"
+    );
+    std::fs::remove_file(home.revoked()).unwrap();
+    assert_eq!(
+        format!("{:#}", publish.unreached(&home, &gone)),
+        UNCONFIRMED
+    );
+}
+
 /// Three wrong passphrases at the root step of `revoke me/<name>` leave the block written, and say so in
 /// one line that names the rerun. Red when the third wrong passphrase prints its own refusal.
 #[tokio::test]
@@ -2319,8 +2518,10 @@ async fn revoke_a_device_after_three_wrong_passphrases_prints_one_partway_line()
     let ran = run(&home, &["me/laptop"], b"", wrong, Devices::all(&tape), tape).await;
     assert_eq!(
         ran.refusal(),
-        "me/laptop is blocked on this machine, not yet on your other devices; to finish, run it again: \
-         swoosh revoke me/laptop"
+        partial(
+            "not told; your root was not unlocked",
+            "To finish, run this again:"
+        )
     );
     assert_eq!(ran.prompts, 3, "three tries");
     assert!(!ran.err.contains("revoked"), "{}", ran.err);
@@ -2342,13 +2543,15 @@ async fn revoke_a_device_whose_root_step_stops_prints_the_partway_line_then_its_
     let ran = revoke(&home, &["me/laptop", "--root", copy_dir.to_str().unwrap()]).await;
     std::fs::set_permissions(&copy_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let refusal = ran.refusal();
-    let (first, cause) = refusal.split_once('\n').expect("two lines");
+    let (rows, cause) = refusal
+        .split_once("\n\n")
+        .expect("the rows, then the cause");
     assert_eq!(
-        first,
-        "me/laptop is blocked on this machine, not yet on your other devices."
+        rows,
+        "me/laptop is blocked on this machine only\n  this machine   blocks it now\n  your devices   not told"
     );
     assert!(
-        cause.starts_with("this copy of your root cannot be written ("),
+        cause.starts_with("  this copy of your root cannot be written ("),
         "{refusal}"
     );
     assert!(!ran.err.contains("revoked"), "{}", ran.err);
@@ -2462,7 +2665,7 @@ async fn the_recipe_link_is_bound_to_a_rescue_key() {
     )
     .await;
     assert!(
-        ran.ok().starts_with("revoked the link"),
+        ran.ok().starts_with("Revoked the link.\n"),
         "line 10 runs and says what it did: {}",
         ran.err
     );

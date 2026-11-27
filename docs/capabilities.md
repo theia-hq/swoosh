@@ -50,7 +50,9 @@ revoke it on the node that issued it:
 <!-- manual: needs the link you issued -->
 ```console
 $ swoosh revoke swoosh:ed01hcq6…
-revoked the link: blocked. Only this machine admitted it.
+Revoked the link.
+  this machine   blocks it now
+  your devices   none ever admitted it
 ```
 
 Either way the next dial is refused, with no restart:

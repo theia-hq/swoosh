@@ -77,7 +77,9 @@ Take mum's household off in one step:
 <!-- capture: swoosh revoke mum -->
 ```console
 $ swoosh revoke mum
-revoked mum: blocked. Only this machine admitted it.
+Revoked mum.
+  this machine   blocks it now
+  your devices   none ever admitted it
 ```
 
 ## The limits

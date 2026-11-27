@@ -2,13 +2,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Two guards no running test can hold, read from `src/`. A string that names another line (`printed`,
-//! `above`, `below`, `this line`) points at a line proven to print, or is a known defect owed to a later
-//! change. And style takes only text fixed at build time, so a peer's text can never carry it.
+//! `above`, `below`, `this line`) points at a line proven to print. And style takes only text fixed at build time, so a peer's text can never carry it.
 //!
 //! A third, of the same kind: a lock comes off a key file only where a person asked for that by name, so
 //! every call that takes one off is counted, by file. And a fourth: the lock lines name the lock a removal
 //! takes off, and say Touch ID the way a person does. And a fifth: the Touch ID dialog takes only words fixed
-//! at build time. And a sixth: every command a shipped line or a help page names is one the binary has.
+//! at build time. And a sixth: every command a shipped line or a help page names is one the binary has. And a
+//! seventh: a revoke's lines that say it landed here are written only where a read-back proof prints them.
 //!
 //! Test files, inline `mod tests` blocks and comments are skipped: only what ships is read.
 
@@ -19,8 +19,6 @@ use std::process::Command;
 enum Kind {
     /// The test `(file, fn)` asserts that the line the text names prints by default, on the same stream.
     Proven(&'static str, &'static str),
-    /// A known defect, owed to this unit, and kept only while its phrase is still in its file.
-    Owed(&'static str),
 }
 
 /// Every string that names another line: its file under `src/`, the phrase, and what stands behind it.
@@ -42,19 +40,13 @@ const NAMED: &[(&str, &str, Kind)] = &[
             "a_landed_join_beside_an_unreachable_serve_prints_its_error_once",
         ),
     ),
-    (
-        "bin/swoosh/commands/invite.rs",
-        "paste this line",
-        Kind::Owed("SW4"),
-    ),
-    ("reach_report.rs", "the line above", Kind::Owed("SW4")),
 ];
 
 /// The words that name another line.
 const NAMING: [&str; 4] = ["printed", "above", "below", "this line"];
 
 #[test]
-fn every_named_line_is_proven_or_owed() {
+fn every_named_line_is_proven() {
     let mut matched = vec![0; NAMED.len()];
     for (file, text) in shipped() {
         for (line, literal) in scan(&text).literals {
@@ -78,10 +70,6 @@ fn every_named_line_is_proven_or_owed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for ((file, phrase, kind), hits) in NAMED.iter().zip(matched) {
         match kind {
-            Kind::Owed(unit) => assert!(
-                hits > 0,
-                "{file}: `{phrase}` is gone; drop its row ({unit})"
-            ),
             Kind::Proven(test_file, test) => {
                 assert!(hits > 0, "{file}: `{phrase}` is gone; drop its row");
                 let source = std::fs::read_to_string(root.join(test_file)).unwrap();
@@ -224,6 +212,46 @@ fn a_lock_line_names_its_method_and_spells_touch_id() {
                 );
             }
         }
+    }
+}
+
+/// The words of a revoke's lines that say it landed here, each printed only from `Blocked`, the proof that
+/// `revoked` read back what the revoke wrote. The proof is made nowhere else, so a line written outside its
+/// file would print with no read-back.
+const READ_BACK: [&str; 4] = [
+    "revoked the link: ",
+    "Your root revoked the device it stands for already.",
+    " here for good.",
+    "} for good.",
+];
+
+/// The one file that prints [`READ_BACK`]'s lines.
+const READ_BACK_FILE: &str = "bin/swoosh/commands/reached.rs";
+
+/// Each of [`READ_BACK`]'s words is in a literal of [`READ_BACK_FILE`] and of no other shipped file. Red when
+/// a line that says a revoke landed is printed bare, before or without its read-back.
+#[test]
+fn a_landed_line_prints_only_from_its_read_back() {
+    let mut seen = [false; READ_BACK.len()];
+    for (file, text) in shipped() {
+        for (line, literal) in scan(&text).literals {
+            for (at, words) in READ_BACK.iter().enumerate() {
+                if !literal.contains(words) {
+                    continue;
+                }
+                assert_eq!(
+                    file, READ_BACK_FILE,
+                    "{file}:{line}: {literal:?} prints with no read-back"
+                );
+                seen[at] = true;
+            }
+        }
+    }
+    for (words, seen) in READ_BACK.iter().zip(seen) {
+        assert!(
+            seen,
+            "{words:?} is no longer printed from its read-back: drop its row"
+        );
     }
 }
 

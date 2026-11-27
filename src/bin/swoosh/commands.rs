@@ -12,6 +12,7 @@ pub mod lock;
 pub mod machine;
 pub mod ping;
 pub mod proxy;
+mod reached;
 pub mod revoke;
 pub mod root;
 pub mod route;

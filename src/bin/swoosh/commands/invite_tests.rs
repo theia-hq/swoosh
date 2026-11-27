@@ -533,10 +533,12 @@ async fn invite_answering(
     } else {
         cmd.due(home, &mut out).await
     };
+    let err = String::from_utf8(err.bytes).unwrap();
+    crate::screen::owed::hold_but_owed(&err);
     Ran {
         result,
         out: String::from_utf8(out.bytes).unwrap(),
-        err: String::from_utf8(err.bytes).unwrap(),
+        err,
         tape,
         prompts: prompt.inner.events(),
     }
@@ -1221,8 +1223,8 @@ async fn a_named_renewal_at_four_prints_the_stored_standing() {
     assert_eq!(
         ran.err,
         format!(
-            "me/laptop needs no renewal (until {}). If it left, or its date passed, on it: swoosh join and \
-             paste this line.\n",
+            "me/laptop needs no renewal (until {}).\nIf it left or its date passed, paste the invite into \
+             swoosh join on it.\n",
             Date(laptop.until)
         )
     );
@@ -1851,7 +1853,7 @@ async fn a_machine_that_left_just_after_joining_rejoins_by_renew() {
     assert_eq!(ran.prompts, 0);
     assert!(
         ran.err
-            .contains("If it left, or its date passed, on it: swoosh join"),
+            .contains("If it left or its date passed, paste the invite into swoosh join on it."),
         "{}",
         ran.err
     );
