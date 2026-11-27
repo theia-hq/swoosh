@@ -455,7 +455,7 @@ pub enum Locks {
 
 impl Locks {
     /// The locks of `stored`, Touch ID's health read by `prompt` with no dialog.
-    fn of(stored: &Stored, prompt: &impl Prompt) -> Self {
+    pub fn of(stored: &Stored, prompt: &impl Prompt) -> Self {
         let Stored::Locked(locked) = stored else {
             return Self::None;
         };

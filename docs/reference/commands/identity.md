@@ -14,8 +14,9 @@ Commands:
   protect  Set how this identity is protected
 ```
 
-**Things to know.** `swoosh status` says how the key is locked on its `key lock:` line: `none`, or each lock
-it has. `swoosh lock` adds a lock or, with `--remove`, takes one off.
+**Things to know.** `swoosh status` says how the key is locked on its `key lock:` line, such as `passphrase`
+or `Touch ID or a passphrase`, or `none`. `swoosh lock` shows the locks; `swoosh lock <method>` adds one, and
+`--remove` takes one off.
 
 - `swoosh identity protect <plain|passphrase>` rewrites the key file under that method; the key does not
   change. On a home with no key it creates one already sealed.
