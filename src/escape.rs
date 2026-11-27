@@ -126,15 +126,25 @@ pub fn peer_cell(text: &str, budget: usize) -> String {
 
 /// [`peer_cell`]'s cell, and whether it was cut.
 fn cut(text: &str, budget: usize) -> (String, bool) {
+    cut_pieces(
+        text.chars().map(|ch| {
+            let mut piece = String::new();
+            // Writing to a `String` cannot fail.
+            let _ = escape(ch, &mut piece);
+            piece
+        }),
+        budget,
+    )
+}
+
+/// `pieces` joined and cut to `budget` columns as [`peer_cell`] cuts, and whether they were cut. A piece
+/// is kept whole or cut whole, never split, so an escape never ends half written.
+fn cut_pieces(pieces: impl Iterator<Item = String>, budget: usize) -> (String, bool) {
     let mut cell = String::new();
     let mut used = 0;
     // Where the cell could end with the cut mark still inside the budget, and its length then.
     let mut fits_cut = 0;
-    let mut piece = String::new();
-    for ch in text.chars() {
-        piece.clear();
-        // Writing to a `String` cannot fail.
-        let _ = escape(ch, &mut piece);
+    for piece in pieces {
         let next = used + columns(&piece);
         if next > budget {
             cell.truncate(fits_cut);
@@ -148,6 +158,32 @@ fn cut(text: &str, budget: usize) -> (String, bool) {
         }
     }
     (cell, false)
+}
+
+/// Text [`escape`] already wrote, split back into its pieces: a scalar, or a whole escape. A backslash
+/// there always opens an escape (one the text held is written `\\`), which runs one scalar on, or to its
+/// `}` for a `\u{..}`.
+fn escaped_pieces(escaped: &str) -> impl Iterator<Item = String> + '_ {
+    let mut chars = escaped.chars();
+    core::iter::from_fn(move || {
+        let ch = chars.next()?;
+        let mut piece = String::from(ch);
+        if ch == '\\' {
+            let Some(next) = chars.next() else {
+                return Some(piece);
+            };
+            piece.push(next);
+            if next == 'u' {
+                for ch in chars.by_ref() {
+                    piece.push(ch);
+                    if ch == '}' {
+                        break;
+                    }
+                }
+            }
+        }
+        Some(piece)
+    })
 }
 
 /// The widest line swoosh prints, in columns.
@@ -172,17 +208,44 @@ pub fn head_room(words: &str) -> usize {
     room("error: ".len() + columns(words))
 }
 
+/// The label a peer's text takes on a detail line of its own, value after it. Alone on a line, peer text
+/// would read as swoosh's own sentence; under a label it reads as a row whose value someone else wrote.
+const REASON: &str = "  reason   ";
+
+/// The room a value has on a [`reason_row`]: [`DETAIL_ROOM`], which already holds the label's indent,
+/// less the rest of the label.
+pub const REASON_ROOM: usize = DETAIL_ROOM + 2 - REASON.len();
+
+/// Peer `text` on a detail line of its own, labelled as a row, `  reason   <text>`, and cut as a
+/// [`peer_cell`] to [`REASON_ROOM`].
+pub fn reason_row(text: &str) -> String {
+    format!("{REASON}{}", peer_cell(text, REASON_ROOM))
+}
+
+/// [`reason_row`] for text already escaped where it entered, whose first line it labels and cuts to
+/// [`REASON_ROOM`] by the same column count, an escape kept whole, without escaping it again (which
+/// would double every backslash an escape wrote). Any further lines are swoosh's own and keep their place under it.
+pub fn escaped_reason_row(escaped: &str) -> String {
+    let (first, rest) = escaped
+        .split_once('\n')
+        .map_or((escaped, None), |(first, rest)| (first, Some(rest)));
+    let (value, _) = cut_pieces(escaped_pieces(first), REASON_ROOM);
+    match rest {
+        Some(rest) => format!("{REASON}{value}\n{rest}"),
+        None => format!("{REASON}{value}"),
+    }
+}
+
 /// Peer `text` placed after swoosh's `words` on a line whose start takes `taken` columns, closed by
 /// `close` (a `)`, or nothing): on the line, cut to its room, while that room is at least [`PEER_FLOOR`];
-/// else on a detail line of its own under `words`, indented two and cut to [`DETAIL_ROOM`], with `words`
-/// losing a trailing space or opening parenthesis.
+/// else as a [`reason_row`] under `words`, with `words` losing a trailing space or opening parenthesis.
 pub fn beside(taken: usize, words: &str, text: &str, close: &str) -> String {
     let room = room(taken + columns(words) + columns(close));
     if room >= PEER_FLOOR {
         return format!("{words}{}{close}", peer_cell(text, room));
     }
     let words = words.trim_end_matches([' ', '(']);
-    format!("{words}\n  {}", peer_cell(text, DETAIL_ROOM))
+    format!("{words}\n{}", reason_row(text))
 }
 
 /// A path as it may appear on a line: [`Escaped`] over its lossy text. A home's directory names, and the

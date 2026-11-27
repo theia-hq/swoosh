@@ -763,9 +763,10 @@ fn beside_opens_print_nothing_of_their_own() {
         rig.stop.cancel();
         let events = resident.await.unwrap();
         assert!(
-            printed.out.ends_with("sent note.txt (5 bytes)\n"),
+            printed.err.ends_with("Sent note.txt (5 B) to me/nas.\n"),
             "{printed:?}"
         );
+        assert!(printed.out.is_empty(), "{printed:?}");
         assert!(!printed.ok, "{printed:?}");
         assert_skew_once(printed.error);
         let mut heard: Vec<_> = opens(&events)
@@ -883,9 +884,10 @@ fn a_serve_gone_beside_a_whole_send_ends_without_resending() {
         rig.stop.cancel();
         resident.await.unwrap();
         assert!(
-            printed.out.ends_with("sent note.txt (5 bytes)\n"),
+            printed.err.ends_with("Sent note.txt (5 B) to bob/nas.\n"),
             "{printed:?}"
         );
+        assert!(printed.out.is_empty(), "{printed:?}");
         assert!(!printed.ok, "{printed:?}");
         assert_eq!(
             printed.error.as_deref(),
@@ -1014,13 +1016,15 @@ fn a_stalled_serve_ends_a_send_of_many_files_once() {
                 &rig,
             );
             let started = tokio::time::Instant::now();
-            let printed = dialed_to(
+            let mut err = Vec::new();
+            let mut printed = dialed_to(
                 &served.home,
                 &["send", dir.to_str().unwrap(), "bob/nas"],
                 Duration::from_secs(600),
-                &mut Vec::new(),
+                &mut err,
             )
             .await;
+            printed.err = String::from_utf8(err).unwrap();
             let took = started.elapsed();
             rig.stop.cancel();
             let events = resident.await.unwrap();
@@ -1033,13 +1037,13 @@ fn a_stalled_serve_ends_a_send_of_many_files_once() {
             assert_eq!(error.matches("did not answer").count(), 1, "{error}");
             assert_eq!(
                 printed
-                    .out
+                    .err
                     .lines()
-                    .filter(|line| line.starts_with("sent "))
+                    .filter(|line| line.starts_with("Sent "))
                     .count(),
                 usize::from(sends_first),
                 "{}",
-                printed.out
+                printed.err
             );
             let recv = opens(&events)
                 .iter()

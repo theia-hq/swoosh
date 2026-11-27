@@ -25,6 +25,11 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`send` and the receive line lead with who and how much.** `send` prints `Sent app.tar (200.0 KiB) to
+  me/deploybox.` on stderr and nothing on stdout, and a missing path refuses before it dials. A receive service
+  prints `00:47  me/laptop sent 1.5 KiB: notes.txt`. `status <machine>` reads `me/nas   reachable, direct, 12.0 ms`.
+  `send` and the receive row show sizes as `28.6 MiB`. A peer's text is cut to fit 80 columns, and a reason a
+  machine gives reads `  reason   <text>` on its own row.
 - **`swoosh --help` lists the commands under headings, and `swoosh tree` is gone.** Help rows are one capitalized
   phrase that fits 80 columns, `revoke` takes `<what>`, and `share` takes `<service> [who]`.
 - **`swoosh status` prints blocks, with no colons.** `this machine` (key, lock, serving, `home`) and `your root` (key, and

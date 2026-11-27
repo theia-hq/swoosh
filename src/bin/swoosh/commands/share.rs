@@ -39,6 +39,7 @@ use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::{Home, HomeWrite};
 use swoosh::names::NameError;
 use swoosh::node_signer::{Bind, NodeSigner};
+use swoosh::root::local_time;
 use swoosh::root_key::RootKey;
 use swoosh::serve::{Scheme, ServedTarget};
 use tightbeam::identity::AsVerifyKey as _;
@@ -924,18 +925,6 @@ impl fmt::Display for End<'_> {
             i64::from(local.tm_year) + 1900
         )
     }
-}
-
-/// `secs` since the epoch in this machine's local time zone, or `None` when the system cannot say.
-pub(crate) fn local_time(secs: u64) -> Option<libc::tm> {
-    let time = libc::time_t::try_from(secs).ok()?;
-    // SAFETY: `tm` is plain C data (integers and, on some platforms, a pointer the call sets), so all-zero is
-    // a valid value for `localtime_r` to overwrite.
-    let mut local: libc::tm = unsafe { core::mem::zeroed() };
-    // SAFETY: both pointers name live, initialized values owned by this frame; `localtime_r` writes only
-    // `local` and is the thread-safe form.
-    let done = unsafe { libc::localtime_r(&time, &mut local) };
-    (!done.is_null()).then_some(local)
 }
 
 #[cfg(test)]

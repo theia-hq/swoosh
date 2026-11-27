@@ -3993,9 +3993,10 @@ fn serve_duration_is_expires_not_for() {
 
 /// `--quiet` withholds the whole activity class at its one gate: a quiet serve builds no renderer, so no
 /// engine is handed a sink and nothing can render, whatever `RUST_LOG` says. A plain serve builds one,
-/// and a fact through it reaches the writer.
-#[test]
-fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
+/// and a fact through it reaches the writer as one row, the sender named from the home's book as it reads
+/// when the row renders, and the row held to the screen law.
+#[tokio::test(flavor = "multi_thread")]
+async fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
     use std::sync::{Arc, Mutex};
 
     use clap::Parser as _;
@@ -4025,11 +4026,15 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
         }
     }
 
+    let dir = std::env::temp_dir().join(format!("swoosh-serve-activity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    swoosh::config::create_store_dir(&dir).expect("a scratch home");
+    let home = swoosh::home::Home::resolve(Some(dir.clone())).expect("the home resolves");
     let quiet = Wrap::try_parse_from(["x", "--quiet"]).expect("--quiet parses");
     assert!(
         quiet
             .serve
-            .activity(Shared::default())
+            .activity(Shared::default(), &home)
             .expect("a quiet serve starts")
             .is_none(),
         "a quiet serve builds no renderer, so no engine gets a sink"
@@ -4039,14 +4044,25 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
     let out = Shared::default();
     let activity = plain
         .serve
-        .activity(out.clone())
+        .activity(out.clone(), &home)
         .expect("a plain serve starts")
         .expect("a plain serve renders activity");
-    let sender = swoosh::testkit::TestNode::seeded(7).verify_key();
-    activity.recv(svc("recv")).received(Received {
+    // Saved after the renderer started: the row reads the book when it renders.
+    let sender = swoosh::testkit::TestNode::seeded(7);
+    let mut store = swoosh::contacts::ContactsStore::open(&home)
+        .await
+        .expect("the book opens");
+    store
+        .contacts_mut()
+        .save(&"alice/laptop".parse().expect("a name"), sender.node_id())
+        .expect("the name is free");
+    store
+        .save(&swoosh::testkit::lock())
+        .expect("the book saves");
+    activity.recv().received(Received {
         path: "notes.txt".into(),
         bytes: 5,
-        from: sender,
+        from: sender.verify_key(),
     });
     drop(activity);
     // `writeln!` writes the line and its newline in separate writes, so wait for the newline, not for the
@@ -4061,11 +4077,15 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
         }
         std::thread::sleep(Duration::from_millis(5));
     };
+    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(
-        written,
-        format!("recv: received notes.txt (5 bytes) from {sender}\n"),
-        "a plain serve's renderer carries the line"
+        written.get(5..),
+        Some("  alice/laptop sent 5 B: notes.txt\n"),
+        "a plain serve's renderer carries the row, the sender named"
     );
+    if let Err(breach) = crate::screen::law::holds(&written) {
+        panic!("{breach}\n{written}");
+    }
 }
 
 /// A capital folds on both sides of `serve`: `Web=…` binds `web` and `--public Web` opens `web`, so the
@@ -4857,4 +4877,58 @@ async fn a_run_stopped_before_its_deadline_leaves_no_timer_behind() {
         !cancel.is_cancelled(),
         "a dropped run's timer fired after the run had stopped"
     );
+}
+
+/// A row for a sender this home has no name for carries the whole key and breaks after the size, the
+/// file on a line of its own; both lines hold the screen law.
+#[test]
+fn a_nameless_receive_row_holds_the_law() {
+    use std::sync::{Arc, Mutex};
+
+    use transfer::{Received, ReceivedSink as _};
+
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let activity = swoosh::serve::Activity::spawn(
+        Shared(Arc::clone(&written)),
+        Box::new(swoosh::contacts::Contacts::default),
+    )
+    .expect("the renderer starts");
+    let sender = swoosh::testkit::TestNode::seeded(7).verify_key();
+    activity.recv().received(Received {
+        path: "notes.txt".into(),
+        bytes: 3174,
+        from: sender,
+    });
+    drop(activity);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let rows = loop {
+        let rows = String::from_utf8_lossy(&written.lock().expect("the capture lock")).into_owned();
+        if rows.matches('\n').count() == 2 || Instant::now() >= deadline {
+            break rows;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        rows.get(5..),
+        Some(format!("  {sender} sent 3.1 KiB:\n       notes.txt\n").as_str())
+    );
+    if let Err(breach) = crate::screen::law::holds(&rows) {
+        panic!("{breach}\n{rows}");
+    }
 }

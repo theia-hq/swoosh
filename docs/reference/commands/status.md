@@ -42,14 +42,18 @@ With `swoosh serve` running here, bare `status` also lists how it is reached und
 this computer addresses the banner can leave out, and the routes it answers under `internal routes`, and who reaches each.
 Both are left out when the serving row says `unknown`.
 
-With a machine, `status` dials it and prints one line. A healthy line has the path and a round-trip time, and
-for one of your own devices ends with what it serves (`; serving: ssh, web`). Otherwise `status` exits non-zero
-and the line reads `unreachable`, a refusal (`reached, but …`), or `reached, but the probe failed / went
-unanswered`. The path is read after the probe, so one machine can show `relayed` on one run and `direct` on the
+With a machine, `status` dials it. A healthy machine prints one line: `me/nas   reachable, direct, 12.0 ms`. That is
+the name, the path and the round-trip time, and for one of your own devices the line ends with what it serves
+(`; serving ssh, web`, or `; serving nothing`). Otherwise `status` exits non-zero. An unreachable machine prints
+`me/nas: unreachable`, and one that answered the dial but did not answer the probe prints `reached, but the probe
+went unanswered`, with the count. A refusal prints `me/nas: reached, but refused (<its reason>)`. Two refusals have their own words: `me/nas: reached, but nas does not count this machine as one of your devices`, and `bob/nas: reached, but it does not answer ping for you`. For the first kind, when the name
+leaves too little room, the line ends at `refused` and the reason follows on its own row, `  reason   <text>`.
+A failed probe prints `me/nas: reached, but the probe failed`, then either a sentence of swoosh's own or the
+machine's words on a `  reason   <text>` row. The path
+is read after the probe, so one machine can show `relayed through <host>` on one run and `direct` on the
 next. [Why a path changes](../../transports.md#iroh). It works the same through `swoosh serve`. If the path
-cannot be read, the line has no `path:` field, stderr says `warning: could not read the path of this run`,
-and the exit code is unchanged. One of your devices that answers its list with anything but the list fails
-with `it sent an unknown reply to the list request`, or `it ended the list request without an answer` when it
-sent nothing.
+cannot be read, the line has no path, stderr says `warning: could not read the path of this run`, and the
+exit code is unchanged. One of your devices that answers its list with anything but the list fails, and the
+line says what it sent, or that it ended the request without an answer.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

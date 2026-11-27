@@ -14,6 +14,7 @@
 //! names that key.
 
 use core::cell::Cell;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
@@ -22,11 +23,14 @@ use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::Service;
-use swoosh::escape::{DETAIL_ROOM, EscapedPath, LINE_WIDTH, PEER_FLOOR, columns, peer_cell, room};
+use swoosh::escape::{
+    DETAIL_ROOM, EscapedPath, LINE_WIDTH, PEER_FLOOR, columns, escaped_reason_row, peer_cell, room,
+};
 use swoosh::learn::Admitted;
 use swoosh::peer::{Machine, Peer};
 use swoosh::peers::Hints;
 use swoosh::serve::control_codec::OpenLane;
+use swoosh::size::Size;
 use swoosh::streams::{Ask, StreamSource, Unopened};
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
@@ -101,6 +105,34 @@ impl SendCmd {
         swoosh::credential::Credential::dialing(&self.peer, self.service.as_str())
     }
 
+    /// Refuse the first named path that cannot be read, before anything is dialed or bound, so a run that
+    /// would send nothing of it never reaches the machine. A regular file must open; anything else must
+    /// list as a directory, as the walk reads it, so a FIFO is refused rather than waited on. What went
+    /// wrong beyond `not there` goes to the log, not the line.
+    ///
+    /// # Errors
+    ///
+    /// The first path that is not there, or that is there and cannot be read.
+    pub async fn check_paths(&self) -> eyre::Result<()> {
+        for path in &self.paths {
+            let read = match tokio::fs::metadata(path).await {
+                Ok(meta) if meta.is_file() => tokio::fs::File::open(path).await.map(drop),
+                Ok(_) => tokio::fs::read_dir(path).await.map(drop),
+                Err(error) => Err(error),
+            };
+            let Err(error) = read else {
+                continue;
+            };
+            tracing::debug!(%error, path = %EscapedPath(path), "a path to send could not be read");
+            return Err(if error.kind() == io::ErrorKind::NotFound {
+                eyre::eyre!("no such path: {}", EscapedPath(path))
+            } else {
+                eyre::eyre!("could not read {}", EscapedPath(path))
+            });
+        }
+        Ok(())
+    }
+
     /// Each file's Open to `machine`, on both paths. It carries no addresses: by own bind the typed ones
     /// reach the run's dials through its discovery, and through `serve` the source fills them in.
     fn ask(&self, machine: &Machine) -> Ask {
@@ -113,17 +145,14 @@ impl SendCmd {
         }
     }
 
-    /// Send on either path as `route` words it, each file one stream from `source`, printing on `out` and
-    /// `err`. The first admitted file gives `admitted` its question, asked through `source`. `sent` is set
-    /// once a file prints `sent`, so a line for `serve` stopping after the run can say what is left.
+    /// Send on either path as `route` words it, each file one stream from `source`, printing on `err`.
+    /// It is handed no stdout: a result is a line for the person, and nothing of a run lands in a pipe.
+    /// The first admitted file gives `admitted` its question, asked through `source`. `sent` is set once
+    /// a file prints `Sent`, so a line for `serve` stopping after the run can say what is left.
     ///
     /// # Errors
     ///
     /// The run's line, or how many files could not be sent.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the run's two writers and what it sent ride beside its source"
-    )]
     pub async fn send<'s, S: StreamSource + Copy + 's>(
         &self,
         source: S,
@@ -131,7 +160,6 @@ impl SendCmd {
         machine: &Machine,
         admitted: Admitted<'s>,
         sent: &Cell<bool>,
-        out: &mut impl std::io::Write,
         err: &mut impl std::io::Write,
     ) -> eyre::Result<()> {
         self.run_send(
@@ -141,24 +169,23 @@ impl SendCmd {
             self.ask(machine),
             admitted,
             sent,
-            out,
             err,
         )
         .await
     }
 
     /// Push every named file to `machine`, each over its own stream from `source` as `ask` asks for it,
-    /// expanding directories first, and printing on `out` and `err`. Up to [`MAX_INFLIGHT`] files go at
+    /// expanding directories first, and printing on `err`. Up to [`MAX_INFLIGHT`] files go at
     /// once. A file that cannot be read, or whose stream alone fails, is skipped and reported; the run
     /// ends non-zero if any was. An outcome every later stream would repeat ends the run with its one
     /// line, never a `skip` per file: for `NotAdmitted`, after asking the machine why, and for a `serve`
     /// confirmed stalled, whose stall every file would meet. A transfer cut after its stream attached
     /// ends the run on `serve`'s line when `serve` went under it, and is that file's skip otherwise.
     /// The first admitted stream gives `admitted` its question, asked through `source`. `sent` is set at each
-    /// `sent` line; a run that ends on `serve` stopping after one says not to send those files again.
+    /// `Sent` line; a run that ends on `serve` stopping after one says not to send those files again.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the run's two writers and what it sent ride beside its source"
+        reason = "the run's writer and what it sent ride beside its source and ask"
     )]
     async fn run_send<'s, S: StreamSource + Copy + 's>(
         &self,
@@ -168,11 +195,8 @@ impl SendCmd {
         ask: Ask,
         admitted: Admitted<'s>,
         sent: &Cell<bool>,
-        out: &mut impl std::io::Write,
         err: &mut impl std::io::Write,
     ) -> eyre::Result<()> {
-        writeln!(out, "sending to {}...", machine.key())?;
-
         // Expand directories, then pipeline up to MAX_INFLIGHT files over concurrent streams.
         let mut files = Vec::new();
         let mut failures = 0usize;
@@ -185,6 +209,11 @@ impl SendCmd {
                 }
             }
         }
+
+        // The machine as the `Sent` line names it: this home's name for it, else its whole key.
+        let to = machine
+            .name()
+            .map_or_else(|| machine.key().to_string(), ToString::to_string);
 
         // A `Cell`: the file streams open through a shared borrow on one task, and whichever is admitted
         // first takes the signal.
@@ -206,7 +235,7 @@ impl SendCmd {
         while let Some(result) = sending.next().await {
             match result {
                 Ok((name, len)) => {
-                    writeln!(out, "{}", sent_line(&name, len))?;
+                    writeln!(err, "{}", sent_line(&name, Size(len), &to))?;
                     sent.set(true);
                 }
                 // No later file would be admitted: the run ends here with one line, and the files still
@@ -247,32 +276,35 @@ impl SendCmd {
             }
         }
 
-        if failures > 0 {
-            eyre::bail!("{failures} item(s) could not be sent");
+        match failures {
+            0 => Ok(()),
+            // The count holds unreadable paths and failed files alike, so it names no total.
+            1 => Err(Unsent::line("1 item could not be sent", sent)),
+            n => Err(Unsent::line(&format!("{n} items could not be sent"), sent)),
         }
-        Ok(())
     }
 }
 
-/// The line for a file that was sent: `sent photo.bin (30000000 bytes)`. The name is the file's as found,
-/// which whoever made the directory chose, so it is a cell cut to the room the rest of the line leaves,
-/// and never under [`PEER_FLOOR`]: past the edge only swoosh's own words can wrap.
-fn sent_line(name: &str, len: u64) -> String {
-    let rest = format!(" ({len} bytes)");
-    let room = room("sent ".len() + columns(&rest)).max(PEER_FLOOR);
-    format!("sent {}{rest}", peer_cell(name, room))
+/// The line for a file that was sent: `Sent photo.bin (28.6 MiB) to me/nas.` The name is the file's as
+/// found, which whoever made the directory chose, so it is a cell cut to the room the rest of the line
+/// leaves, and never under [`PEER_FLOOR`]: past the edge only swoosh's own words can wrap.
+fn sent_line(name: &str, size: Size, to: &str) -> String {
+    let rest = format!(" ({size}) to {to}.");
+    let room = room("Sent ".len() + columns(&rest)).max(PEER_FLOOR);
+    format!("Sent {}{rest}", peer_cell(name, room))
 }
 
 /// The line for a file that was not sent: `skip <name>: <reason>`. The name is cut as a cell, and the
 /// reason, already escaped and cut where it entered, stays beside it when its first line fits, else takes
-/// a detail line of its own, so neither can wrap onto a line that reads as a row.
+/// a detail line of its own labelled `reason`, so neither can wrap onto a line that reads as a row, and
+/// a peer's words never stand alone where swoosh's own sentence would.
 fn skip_line(name: &str, reason: &str) -> String {
     let head = format!("skip {}:", peer_cell(name, DETAIL_ROOM - "skip :".len()));
     let first = reason.lines().next().unwrap_or_default();
     if columns(&head) + " ".len() + columns(first) < LINE_WIDTH {
         format!("{head} {reason}")
     } else {
-        format!("{head}\n  {reason}")
+        format!("{head}\n{}", escaped_reason_row(reason))
     }
 }
 
@@ -333,6 +365,18 @@ enum Unsent {
     /// The transfer broke after the open: the run asks whether `serve` went before it skips the file.
     Cut(eyre::Report),
     Failed(eyre::Report),
+}
+
+impl Unsent {
+    /// The run's last line when some items were not sent, `head` its count. Under it, once a `Sent` line
+    /// printed, that the rest went, so the `skip` lines above read as the whole of what did not.
+    fn line(head: &str, sent: &Cell<bool>) -> eyre::Report {
+        if sent.get() {
+            eyre::eyre!("{head}\n  The others were sent.")
+        } else {
+            eyre::eyre!("{head}")
+        }
+    }
 }
 
 /// Push one file over its own admitted stream, opened through `first`'s source as `ask` asks: hash it,

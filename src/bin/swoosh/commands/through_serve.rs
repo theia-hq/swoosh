@@ -32,7 +32,7 @@ use swoosh::transport::ReachArgs;
 use crate::commands::connect::{ConnectionLost, Machine};
 use crate::commands::machine;
 use crate::commands::route::peer_error;
-use crate::screen::{Paint, Style};
+use crate::screen::{Block, Paint, Screen, Style};
 
 /// A verb's dial, as the resident needs it.
 pub struct Dial<'a> {
@@ -452,9 +452,11 @@ pub fn final_path(observed: Observed, err: &mut impl Paint) -> std::io::Result<O
         Ok(info) => Ok(Some(info)),
         Err(error) => {
             tracing::debug!(%error, "the run's final path could not be read");
-            // One write, so a line logged beside it cannot land inside it.
-            let warning = Style::WARNING.paint("warning:", &*err);
-            err.write_all(format!("{warning} could not read the path of this run\n").as_bytes())?;
+            // A screen is written in one write, so a line logged beside it cannot land inside it.
+            let warning = "could not read the path of this run".to_owned();
+            Screen::default()
+                .block(Block::default().head(Style::WARNING, "warning:", warning))
+                .write(err)?;
             Ok(None)
         }
     }

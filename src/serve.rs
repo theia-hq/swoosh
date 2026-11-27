@@ -407,7 +407,7 @@ impl Dir {
 }
 
 /// Bind one receive route: a [`Recv`] that lands files in `out`, under `name`. With a renderer the engine
-/// is handed that route's sink, so every landed file becomes one activity line naming the route; with
+/// is handed a sink, so every landed file becomes one activity row naming who sent it; with
 /// none (a `--quiet` node) it gets no sink and stays silent. This is the only place a receive engine is
 /// built for a serving node, so the product and the integration proofs bind it the same way.
 pub fn bind_recv(
@@ -418,7 +418,7 @@ pub fn bind_recv(
 ) -> eyre::Result<Router> {
     let engine = Recv::new(out);
     let engine = match activity {
-        Some(activity) => engine.with_sink(activity.recv(name.clone())),
+        Some(activity) => engine.with_sink(activity.recv()),
         None => engine,
     };
     router.service(name, engine)

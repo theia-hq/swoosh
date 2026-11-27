@@ -58,22 +58,39 @@ pub(crate) fn holds(captured: &str) -> Result<(), Breach> {
 }
 
 /// Hold a screen given as plain text. A line is a command when it is indented and its first word is
-/// `swoosh` or a flag; any other line is prose, which the predicates read by its text.
+/// `swoosh` or a flag; a line at [`ROW_INDENT`] under a row that starts with its clock is that row's
+/// file, on a line of its own, and reads as a row; any other line is prose, which the predicates read by
+/// its text.
 pub(crate) fn read(screen: &str) -> Result<(), Breach> {
+    let mut under_row = false;
     hold(screen.lines().map(|line| {
         let body = line.trim_start();
-        let indented = body.len() < line.len();
+        let indent = line.len() - body.len();
         let first = body.split_whitespace().next().unwrap_or_default();
-        let command = indented && (first == "swoosh" || first.starts_with("--"));
-        (
-            if command {
-                Shape::Command
-            } else {
-                Shape::Prose
-            },
-            line,
-        )
+        let shape = if indent > 0 && (first == "swoosh" || first.starts_with("--")) {
+            Shape::Command
+        } else if under_row && indent == ROW_INDENT {
+            Shape::Fact
+        } else {
+            Shape::Prose
+        };
+        under_row = clocked(line);
+        (shape, line)
     }))
+}
+
+/// Where a row that starts with its clock (`00:47  `) puts what continues it on the next line.
+const ROW_INDENT: usize = "00:47  ".len();
+
+/// Whether `line` is a row that starts with its clock: `HH:MM` and two spaces.
+fn clocked(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() > ROW_INDENT
+        && bytes[..5].iter().enumerate().all(|(at, byte)| match at {
+            2 => *byte == b':',
+            _ => byte.is_ascii_digit(),
+        })
+        && &bytes[5..ROW_INDENT] == b"  "
 }
 
 fn case_and_period(lines: &[(Shape, &str)]) -> Result<(), Breach> {

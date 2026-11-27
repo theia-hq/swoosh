@@ -339,3 +339,19 @@ error: could not reach me/laptop
         assert_eq!(caught, Some(rule), "{captured}");
     }
 }
+
+/// A receive row's file, on a line of its own under a row that starts with its clock, reads as a row: a
+/// capitalised name with no end holds there, and the same line anywhere else is a sentence with no end.
+#[test]
+fn a_rows_file_line_reads_as_a_row() {
+    let key = "ed01am6ipklnjspwxbowqbkejllo5b6wnfhednyejiwxkikya4no5ndq";
+    let rows = format!("00:52  {key} sent 3.1 KiB:\n       Notes.txt\n");
+    assert!(holds(&rows).is_ok(), "{rows}");
+    for loose in [
+        "       Notes.txt\n".to_owned(),
+        "Sent a.txt to me/laptop.\n       Notes.txt\n".to_owned(),
+    ] {
+        let caught = holds(&loose).err().map(|breach| breach.rule);
+        assert_eq!(caught, Some(Rule::SentenceEnd), "{loose}");
+    }
+}

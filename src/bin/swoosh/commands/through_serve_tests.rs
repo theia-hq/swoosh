@@ -2337,6 +2337,34 @@ async fn the_probe_escapes_what_serve_says() {
     }
 }
 
+/// A run whose final path could not be read warns through the screen: one `warning:` head, held to the
+/// screen law, styled only at a terminal, and the run's own result untouched.
+#[test]
+fn an_unread_final_path_warns_through_the_screen() {
+    use swoosh::observation::{ObservationError, Observed};
+
+    let failed = || Observed {
+        last: Err(ObservationError::Unavailable),
+        earlier: None,
+    };
+    let mut plain = Vec::new();
+    assert!(super::final_path(failed(), &mut plain).unwrap().is_none());
+    let plain = String::from_utf8(plain).unwrap();
+    assert_eq!(plain, "warning: could not read the path of this run\n");
+    if let Err(breach) = crate::screen::law::holds(&plain) {
+        panic!("{breach}\n{plain}");
+    }
+    let warning = clap::builder::styling::Style::new()
+        .bold()
+        .fg_color(Some(clap::builder::styling::AnsiColor::Yellow.into()));
+    let mut styled = anstream::AutoStream::always(Vec::new());
+    assert!(super::final_path(failed(), &mut styled).unwrap().is_none());
+    assert_eq!(
+        String::from_utf8(styled.into_inner()).unwrap(),
+        format!("{warning}warning:{warning:#} could not read the path of this run\n")
+    );
+}
+
 /// The most columns any line of `text` can fill in any terminal, counted here apart from the code under
 /// test: one per ASCII scalar, two per any other.
 pub(crate) fn columns_at_most(text: &str) -> usize {

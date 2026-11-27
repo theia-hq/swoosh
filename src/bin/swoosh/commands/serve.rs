@@ -669,7 +669,7 @@ impl ServeCmd {
         }
         // The node's activity renderer, or none at all under `--quiet`: with no renderer no engine gets a
         // sink, so quiet silences every activity line by construction.
-        let activity = self.activity(std::io::stderr())?;
+        let activity = self.activity(std::io::stderr(), &home)?;
         for service in &recv {
             // One `Recv` instance per receive service, holding ONLY its own output dir: de-merged the SAME way
             // as proxy, at the claim, where each dir was checked and the inbox made.
@@ -844,14 +844,28 @@ impl ServeCmd {
 
     /// The activity renderer this serve writes onto `out`, or `None` under `--quiet`. The one gate for the
     /// whole activity class: a line exists only if an engine was handed a sink from this renderer.
+    ///
+    /// A row names its sender from `home`'s book as it reads when its batch renders, so a device that
+    /// joined or a contact saved while this runs is named; a book that does not read leaves the whole key.
+    /// The read runs on the renderer's own thread, which waits on it through this runtime.
     fn activity(
         &self,
         out: impl std::io::Write + Send + 'static,
+        home: &Home,
     ) -> eyre::Result<Option<Activity>> {
         if self.quiet {
             return Ok(None);
         }
-        let activity = Activity::spawn(out).wrap_err("could not start the activity renderer")?;
+        let (home, runtime) = (home.clone(), tokio::runtime::Handle::current());
+        let book = move || match runtime.block_on(ContactsStore::open(&home)) {
+            Ok(store) => store.contacts().clone(),
+            Err(error) => {
+                tracing::debug!(%error, "could not read the book to name who sent a file");
+                swoosh::contacts::Contacts::default()
+            }
+        };
+        let activity = Activity::spawn(out, Box::new(book))
+            .wrap_err("could not start the activity renderer")?;
         Ok(Some(activity))
     }
 }
@@ -1177,7 +1191,7 @@ impl Until {
 
 impl core::fmt::Display for Until {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&self.line(share::local_time(self.at).as_ref()))
+        f.write_str(&self.line(swoosh::root::local_time(self.at).as_ref()))
     }
 }
 

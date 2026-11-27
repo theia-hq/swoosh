@@ -81,8 +81,7 @@ runner's membership admits it:
 <!-- capture: swoosh send app.tar me/deploybox -->
 ```console
 $ swoosh send app.tar me/deploybox
-sending to ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
-sent app.tar (204800 bytes)
+Sent app.tar (200.0 KiB) to me/deploybox.
 ```
 
 To ssh into the deploy box instead, serve `ssh` there and run `swoosh ssh me/deploybox -- <command>`
