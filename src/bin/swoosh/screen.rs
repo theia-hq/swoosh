@@ -108,6 +108,13 @@ impl<S: anstream::stream::RawStream + anstream::stream::AsLockedWrite> Paint for
 
 impl Paint for Vec<u8> {}
 
+/// A borrowed writer shows style as the writer it borrows does.
+impl<W: Paint + ?Sized> Paint for &mut W {
+    fn styled(&self) -> bool {
+        (**self).styled()
+    }
+}
+
 /// One cell of a row.
 pub(crate) enum Cell<'a> {
     /// Swoosh's fixed words: they wrap at word breaks when the row stacks.
@@ -156,8 +163,8 @@ enum Line<'a> {
 #[derive(Default)]
 pub(crate) struct Block<'a> {
     title: Option<&'static str>,
-    /// Where the value column starts, at the least.
-    column: usize,
+    /// Where each column after the first starts, at the least, left to right.
+    columns: Vec<usize>,
     lines: Vec<Line<'a>>,
 }
 
@@ -172,7 +179,16 @@ impl<'a> Block<'a> {
 
     /// Start the value column at `at` or later, so head blocks line up across screens.
     pub(crate) fn column(self, at: usize) -> Self {
-        Self { column: at, ..self }
+        self.columns([at])
+    }
+
+    /// Start each column after the first at its place in `at` or later, left to right: a table whose
+    /// short values (`on`, `off`) keep one place whatever the rows hold.
+    pub(crate) fn columns(self, at: impl IntoIterator<Item = usize>) -> Self {
+        Self {
+            columns: at.into_iter().collect(),
+            ..self
+        }
     }
 
     /// Add a row of cells, aligned with the block's other rows.
@@ -246,7 +262,16 @@ impl<'a> Block<'a> {
     /// Each padded column's width, from the rows that fit 80 on their own. A row that cannot fit alone
     /// stacks, so it never widens the rows around it; the last cell is never padded, so it sets nothing.
     fn widths(&self, rows: &[Option<Measured<'_>>]) -> Vec<usize> {
-        let mut widths = vec![self.column.saturating_sub(4)];
+        // A column starting at `at` pads the one before it to `at`, less the two spaces between them.
+        let mut widths: Vec<usize> = self
+            .columns
+            .iter()
+            .scan(2, |start, at| {
+                let width = at.saturating_sub(*start + 2);
+                *start = (*start).max(*at);
+                Some(width)
+            })
+            .collect();
         for row in rows.iter().flatten() {
             let Some((_, padded)) = row.0.split_last() else {
                 continue;

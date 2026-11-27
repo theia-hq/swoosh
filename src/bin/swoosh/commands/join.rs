@@ -10,7 +10,7 @@
 //! this machine holds your root's list of devices from the start.
 
 use core::time::Duration;
-use std::io::{self, BufRead, IsTerminal as _, Read as _, Write};
+use std::io::{self, BufRead, IsTerminal as _, Read as _};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
@@ -26,6 +26,9 @@ use swoosh::sync::Dial;
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
+
+use crate::commands::lock::Enclave;
+use crate::screen::{Block, Paint, Screen};
 
 /// The most bytes of stdin read as an invite: far above any invite, far below anything that costs a read
 /// to hold.
@@ -45,7 +48,7 @@ pub struct JoinCmd {
 }
 
 /// Where `join` reads from and writes to, so a test can stand in for the terminal and the clock.
-pub(crate) struct Io<'a, I: BufRead, P: Prompt, E: Write> {
+pub(crate) struct Io<'a, I: BufRead, P: Prompt, E: Paint> {
     /// stdin.
     pub input: I,
     /// Whether stdin is a terminal with nothing piped.
@@ -63,7 +66,7 @@ pub(crate) struct Io<'a, I: BufRead, P: Prompt, E: Write> {
 impl JoinCmd {
     /// Read the invite, check it and this machine's standing, write, and say what changed: everything but
     /// the first exchange. The machine to exchange with first, unless it is this one.
-    pub(crate) async fn admit<I: BufRead, P: Prompt, E: Write>(
+    pub(crate) async fn admit<I: BufRead, P: Prompt, E: Paint>(
         &self,
         home: &Home,
         mut io: Io<'_, I, P, E>,
@@ -235,10 +238,9 @@ impl JoinCmd {
              does not prove who sent it."
         )?;
         if was.is_none() && !locked {
-            writeln!(
-                io.err,
-                "this machine's key is not locked; swoosh lock locks it."
-            )?;
+            Screen::default()
+                .block(unlocked(Enclave::BUILT))
+                .write(&mut io.err)?;
         }
         Ok((invite.from != own).then_some(invite.from))
     }
@@ -246,7 +248,7 @@ impl JoinCmd {
     /// The invite's text: the argument, or a line of stdin. An argument that carries a key is refused at its
     /// field count, before anything in it is decoded, and its text is never echoed. Beside it, the key this
     /// run made to print, when the home had none.
-    fn read_invite<I: BufRead, P: Prompt, E: Write>(
+    fn read_invite<I: BufRead, P: Prompt, E: Paint>(
         &self,
         home: &Home,
         io: &mut Io<'_, I, P, E>,
@@ -337,6 +339,21 @@ async fn still(
         eyre::bail!("{}", swoosh::standing::CHANGED);
     }
     Ok(())
+}
+
+/// What a first `join` says where this machine's key has no lock: a command per lock this build can put on
+/// it, each alone on its line, so neither is a guess at which the person wants.
+pub(crate) fn unlocked(enclave: Enclave) -> Block<'static> {
+    let block = Block::default().text("This machine's key has no lock.".to_owned());
+    let block = match enclave {
+        Enclave::Here => block
+            .text("To lock it with Touch ID:".to_owned())
+            .command("swoosh lock touch-id".to_owned()),
+        Enclave::Absent => block,
+    };
+    block
+        .text("To lock it with a passphrase:".to_owned())
+        .command("swoosh lock passphrase".to_owned())
 }
 
 /// The line a change of root prints while `serve` runs: what it cut, and what it did not.

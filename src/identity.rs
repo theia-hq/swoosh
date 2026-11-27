@@ -176,6 +176,20 @@ pub fn peek(home: &Home) -> eyre::Result<Option<NodeId>> {
     }
 }
 
+/// What this machine's key is locked with, read from its key file's header: `None` only where the home has no
+/// key file. Touch ID's health is asked of `prompt`, which is borrowed shared, so the read can ask for no
+/// passphrase and no touch; it shows no dialog, takes no `home.lock`, and writes nothing, so a person can
+/// look before they change anything.
+///
+/// # Errors
+///
+/// The key file could not be read.
+pub fn locks(home: &Home, prompt: &impl Prompt) -> Result<Option<Locks>, keystore::Error> {
+    Ok(key_file(home)
+        .load()?
+        .map(|stored| Locks::of(&stored, prompt)))
+}
+
 /// The home's key as [`inspect`] read it: already there, or made by this read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Inspected {
