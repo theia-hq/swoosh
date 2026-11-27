@@ -51,8 +51,14 @@ const WORDS: usize = 5;
 const WORD_LIST: &str = include_str!("passphrase/eff_large_wordlist.txt");
 
 /// The line before the first prompt of a passphrase to choose.
-const CHOOSE_HINT: &str =
-    "Choose a passphrase of at least 15 characters, or press Enter and swoosh makes one.";
+pub const CHOOSE_HINT: &str =
+    "Choose a passphrase of at least 15 characters, or press Enter for one.";
+
+/// The prompt for the first entry of a passphrase to choose, for the root and this machine's key.
+pub const CHOOSE_FIRST: &str = "Passphrase: ";
+
+/// The prompt for the second entry of a passphrase to choose, which must match the first.
+pub const CHOOSE_AGAIN: &str = "Type it again: ";
 
 /// Said between tries when a chosen passphrase is under [`MINIMUM`].
 pub const TOO_SHORT: &str = "that passphrase has fewer than 15 characters.";
@@ -62,9 +68,8 @@ pub const TOO_SHORT_LAST: &str =
     "that passphrase has fewer than 15 characters; nothing was changed.";
 
 /// The refusal when this machine's key, which has a passphrase, is to be used and nobody is at a terminal to
-/// type it: the two ways out, the command last, which runs only at a terminal.
-pub const NO_TERMINAL_FOR_KEY: &str = "this machine's key has a passphrase and there is no terminal to type it at. \
-     Start this from a terminal, or remove the passphrase there: swoosh lock --remove";
+/// type it. It names no removal: one beside a root, or beside a Touch ID lock that does not open here, refuses.
+pub const NO_TERMINAL_FOR_KEY: &str = "this machine's key has a passphrase and there is no terminal to type it at; start this from a terminal";
 
 /// The refusal when the passphrase on this machine's key is to be changed or removed and nobody is at a
 /// terminal: never `lock --remove`, the command just run.
@@ -89,6 +94,15 @@ pub enum Asked<'a> {
 }
 
 impl Asked<'_> {
+    /// The prompt for the passphrase that opens this key.
+    pub fn prompt(self) -> String {
+        match self {
+            Self::Root => "Root passphrase: ".to_owned(),
+            Self::Copy(dir) => format!("Passphrase for the copy in {}: ", EscapedPath(dir)),
+            Self::MachineKey => "Passphrase for this machine's key: ".to_owned(),
+        }
+    }
+
     /// The line after a passphrase that does not open the key, and the refusal after the last try.
     fn wrong(self) -> String {
         match self {
@@ -262,12 +276,7 @@ impl Prompt for Terminal {
     }
 
     fn unlock(&mut self, asked: Asked<'_>) -> eyre::Result<Passphrase> {
-        let question = match asked {
-            Asked::Root => "root passphrase: ".to_owned(),
-            Asked::Copy(dir) => format!("passphrase for the copy in {}: ", EscapedPath(dir)),
-            Asked::MachineKey => "passphrase for this machine's key: ".to_owned(),
-        };
-        passphrase(Tty::open(asked)?.read(&question)?)
+        passphrase(Tty::open(asked)?.read(&asked.prompt())?)
     }
 
     fn choose(&mut self, asked: Asked<'_>) -> eyre::Result<Choice> {
@@ -335,14 +344,15 @@ pub(crate) trait Lines {
     fn ask(&mut self, prompt: &str) -> eyre::Result<Zeroizing<String>>;
 }
 
-/// One round of choosing a new passphrase for `asked`, on `lines`: the hint, then the first entry. An empty
-/// entry makes a passphrase, shown where the person types and nowhere else; a short one ends the round before
-/// `again:` is asked, changing nothing. Then `again:`, which must match.
+/// One round of choosing a new passphrase for `asked`, on `lines`: the hint, then the first entry. A copy's
+/// names the copy, since its root's passphrase was just asked; the others say `Passphrase: `, as nothing else
+/// was asked beside them. An empty entry makes a passphrase, shown
+/// where the person types and nowhere else; a short one ends the round before the second entry is asked,
+/// changing nothing. Then the second, which must match.
 pub(crate) fn round(lines: &mut impl Lines, asked: Asked<'_>) -> eyre::Result<Choice> {
     let question = match asked {
-        Asked::Root => "new root passphrase: ".to_owned(),
-        Asked::Copy(dir) => format!("new passphrase for the copy in {}: ", EscapedPath(dir)),
-        Asked::MachineKey => "new passphrase for this machine's key: ".to_owned(),
+        Asked::Copy(_) => asked.prompt(),
+        Asked::Root | Asked::MachineKey => CHOOSE_FIRST.to_owned(),
     };
     lines.say(CHOOSE_HINT)?;
     let mut first = lines.ask(&question)?;
@@ -352,15 +362,15 @@ pub(crate) fn round(lines: &mut impl Lines, asked: Asked<'_>) -> eyre::Result<Ch
         // it, and built in a buffer that wipes itself. Typed back once, because a root sealed under a phrase
         // nobody wrote down is lost.
         let mut shown = Zeroizing::new(String::with_capacity(first.len() + 20));
-        shown.push_str("your passphrase: ");
+        shown.push_str("Your passphrase: ");
         shown.push_str(&first);
         lines.say(&shown)?;
         lines.say("Keep it where you keep your passwords, then type it once more.")?;
     } else if let Choice::Short = chosen(Zeroizing::new(first.as_str().to_owned()))? {
-        // The one gate, `chosen`, before `again:` is asked.
+        // The one gate, `chosen`, before the second entry is asked.
         return Ok(Choice::Short);
     }
-    let second = lines.ask("again: ")?;
+    let second = lines.ask(CHOOSE_AGAIN)?;
     if first != second {
         return Ok(Choice::Mismatch);
     }

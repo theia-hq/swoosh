@@ -1273,8 +1273,8 @@ async fn a_dead_touch_id_key_says_how_to_mend_it() {
     let out = status_reading(&home, keystore::Health::Dead).await;
     assert!(
         out.trim_end().ends_with(
-            "touch-id does not open this machine's key on this Mac now.\n\
-             if you added a fingerprint, removing it lets touch-id open the key again.\n\
+            "Touch ID does not open this machine's key on this Mac now.\n\
+             if you added a fingerprint, removing it lets Touch ID open the key again.\n\
              otherwise, give this machine a new key and join again: swoosh leave --new-key"
         ),
         "{out}"
@@ -1292,8 +1292,8 @@ async fn the_root_line_names_touch_id_with_how_it_reads() {
         &swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
     );
     let root = TestRoot::seeded(ROOT).node_id();
-    let dead_line = "touch-id does not open your root on this Mac now.\n\
-                     check Touch ID & Password for a fingerprint you did not add, then set touch-id again: \
+    let dead_line = "Touch ID does not open your root on this Mac now.\n\
+                     check Touch ID & Password for a fingerprint you did not add, then set Touch ID again: \
                      swoosh root lock touch-id";
     for (health, locks) in [
         (keystore::Health::Live, "a passphrase and touch-id"),
@@ -1367,8 +1367,7 @@ async fn a_touch_id_only_key_beside_a_root_is_nagged() {
     );
     let out = status_reading(&home, keystore::Health::Live).await;
     assert!(
-        out.lines()
-            .any(|line| line == swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        out.contains(swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
         "{out}"
     );
     overwrite(

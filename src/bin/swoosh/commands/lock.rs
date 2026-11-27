@@ -9,7 +9,9 @@
 use clap::{Args, ValueEnum};
 use keystore::{Health, Method};
 use swoosh::home::Home;
-use swoosh::identity::{Gone, Locked, Locks, Methods, Now, Root, Unconfirmed, Why};
+use swoosh::identity::{
+    Gone, Locked, Locks, Methods, Now, Root, TouchIdNotAdded, Unconfirmed, Why,
+};
 use swoosh::passphrase::{Prompt, Terminal};
 
 use crate::commands::through_serve::Reported;
@@ -101,6 +103,18 @@ fn refused(report: eyre::Report, err: &mut impl Paint) -> eyre::Report {
             read.as_deref(),
         );
         Screen::default().block(block).write(err)
+    } else if let Some(short) = report.downcast_ref::<TouchIdNotAdded>() {
+        // The key is made, so it is shown, with the failure; the run fails, since Touch ID was not added.
+        let key = short.key.to_string();
+        let step = Block::default()
+            .text("Touch ID was not added.".to_owned())
+            .text("To add it:".to_owned())
+            .command("swoosh lock touch-id".to_owned());
+        Screen::default()
+            .block(made(Methods::Passphrase, &key))
+            .block(failure(Some(&short.failed)))
+            .block(step)
+            .write(err)
     } else if report.downcast_ref::<Gone>().is_some() {
         let block = Block::default()
             .head(
@@ -146,41 +160,30 @@ const FAILURE_COLUMN: usize = 12;
 /// from the file after the write, never from what was asked; `key` is the made key's text.
 fn result<'a>(locked: &'a Locked, key: &'a str) -> Screen<'a> {
     match locked {
-        Locked::Made { now, failed, .. } => {
-            let made = Block::default()
-                .text(
-                    match now {
-                        Methods::Passphrase => "Made this machine's key, locked with a passphrase:",
-                        Methods::TouchId => "Made this machine's key, locked with Touch ID:",
-                        Methods::Both => {
-                            "Made this machine's key, locked with Touch ID or a passphrase:"
-                        }
-                    }
-                    .to_owned(),
-                )
-                .row([Cell::Token(key)]);
-            // The key is in place, so it is made; a failure the key store answered after it is said under it.
-            let failed = failed.as_deref().map_or_else(Block::default, |failed| {
-                Block::default()
-                    .head(
-                        Style::WARNING,
-                        "warning:",
-                        "the key file was written, but a step after it failed".to_owned(),
-                    )
-                    .column(FAILURE_COLUMN)
-                    .row([Cell::Word("failure"), Cell::Token(failed)])
-            });
-            Screen::default().block(made).block(failed)
-        }
-        Locked::Added { method, now, root } => added(*method, now, *root),
+        // The key is in place, so it is made; a failure the key store answered after it is said under it.
+        Locked::Made { now, failed, .. } => Screen::default()
+            .block(made(*now, key))
+            .block(failure(failed.as_deref())),
+        Locked::Added {
+            method,
+            now,
+            root,
+            failed,
+        } => added(*method, now, *root, failed.as_deref()),
         Locked::Changed {
             method: Method::Passphrase,
             now: Now::Read(_),
+            failed,
         } => one(&[
             "Changed the passphrase on this machine's key.",
             "A copy made earlier still opens with the old passphrase.",
-        ]),
-        Locked::Changed { method, now } => {
+        ])
+        .block(failure(failed.as_deref())),
+        Locked::Changed {
+            method,
+            now,
+            failed,
+        } => {
             let done = Block::default().text(
                 match method {
                     Method::Passphrase => "Changed the passphrase on this machine's key.",
@@ -188,9 +191,15 @@ fn result<'a>(locked: &'a Locked, key: &'a str) -> Screen<'a> {
                 }
                 .to_owned(),
             );
-            Screen::default().block(unread(done, now))
+            Screen::default()
+                .block(unread(done, now))
+                .block(failure(failed.as_deref()))
         }
-        Locked::Removed { method, now } => removed(*method, now),
+        Locked::Removed {
+            method,
+            now,
+            failed,
+        } => removed(*method, now, failed.as_deref()),
         Locked::Unchanged(Why::NeedsPassphrase) => needs_passphrase(),
         Locked::Unchanged(why) => one(&[match why {
             Why::NoKey => "This machine has no key yet, so nothing was changed.",
@@ -206,6 +215,35 @@ fn result<'a>(locked: &'a Locked, key: &'a str) -> Screen<'a> {
             }
         }]),
     }
+}
+
+/// The made key: what it is locked with, then the key alone.
+fn made(now: Methods, key: &str) -> Block<'_> {
+    Block::default()
+        .text(
+            match now {
+                Methods::Passphrase => "Made this machine's key, locked with a passphrase:",
+                Methods::TouchId => "Made this machine's key, locked with Touch ID:",
+                Methods::Both => "Made this machine's key, locked with Touch ID or a passphrase:",
+            }
+            .to_owned(),
+        )
+        .row([Cell::Token(key)])
+}
+
+/// The warning after a result whose write is in place though the key store answered `failed` after it, so
+/// the person knows the write may not survive a power cut; no block where nothing failed.
+fn failure(failed: Option<&str>) -> Block<'_> {
+    failed.map_or_else(Block::default, |failed| {
+        Block::default()
+            .head(
+                Style::WARNING,
+                "warning:",
+                "the key file was written, but a step after it failed".to_owned(),
+            )
+            .column(FAILURE_COLUMN)
+            .row([Cell::Word("failure"), Cell::Token(failed)])
+    })
 }
 
 /// A screen of one block of fixed lines.
@@ -253,8 +291,8 @@ fn opens(done: Block<'_>, now: Locks) -> Block<'_> {
 /// The screen for locks put on the key: what was added, what it opens with now, then, where the key now has
 /// both locks from one added beside the other, the step that takes the passphrase off. Where a root is kept
 /// here the passphrase never comes off beside Touch ID, so no step prints; where the file could not be read
-/// back, neither line can be said.
-fn added(method: Methods, now: &Now, root: Root) -> Screen<'_> {
+/// back, neither line can be said. A failure after the write is said after what was done, before the step.
+fn added<'a>(method: Methods, now: &'a Now, root: Root, failed: Option<&'a str>) -> Screen<'a> {
     let done = Block::default().text(format!(
         "Added {} to this machine's key.",
         match method {
@@ -264,7 +302,9 @@ fn added(method: Methods, now: &Now, root: Root) -> Screen<'_> {
         }
     ));
     let Now::Read(locks) = now else {
-        return Screen::default().block(unread(done, now));
+        return Screen::default()
+            .block(unread(done, now))
+            .block(failure(failed));
     };
     // A Touch ID lock that reads dead here cannot be left alone, so the key store refuses the step that takes
     // the passphrase off: none is offered.
@@ -283,12 +323,16 @@ fn added(method: Methods, now: &Now, root: Root) -> Screen<'_> {
             .text(back.to_owned())
             .command("swoosh lock passphrase --remove".to_owned())
     });
-    Screen::default().block(opens(done, *locks)).block(step)
+    Screen::default()
+        .block(opens(done, *locks))
+        .block(failure(failed))
+        .block(step)
 }
 
 /// The screen for a lock taken off: which, what the key opens with now, and, where a lock is left, that a
-/// copy of the file made before still opens with the one taken off, since removing a lock reaches no copy.
-fn removed(method: Method, now: &Now) -> Screen<'_> {
+/// copy of the file made before still opens with the one taken off, since removing a lock reaches no copy;
+/// then a failure after the write.
+fn removed<'a>(method: Method, now: &'a Now, failed: Option<&'a str>) -> Screen<'a> {
     let done = Block::default().text(format!(
         "Removed {} from this machine's key.",
         match method {
@@ -297,7 +341,9 @@ fn removed(method: Method, now: &Now) -> Screen<'_> {
         }
     ));
     let Now::Read(locks) = now else {
-        return Screen::default().block(unread(done, now));
+        return Screen::default()
+            .block(unread(done, now))
+            .block(failure(failed));
     };
     let done = opens(done, *locks);
     let done = match (locks, method) {
@@ -309,7 +355,7 @@ fn removed(method: Method, now: &Now) -> Screen<'_> {
             done.text("A copy made earlier still opens with Touch ID on this Mac.".to_owned())
         }
     };
-    Screen::default().block(done)
+    Screen::default().block(done).block(failure(failed))
 }
 
 /// The screen for `lock touch-id` on a key under `touch-id` alone beside a kept root: nothing changed, which

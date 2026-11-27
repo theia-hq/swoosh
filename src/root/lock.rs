@@ -131,7 +131,7 @@ pub async fn lock_touch_id(
             .map_err(RootError::from)?;
         return Ok((target.relocked(), TouchIdChange::Removed));
     }
-    prompt.say(&lines.checking());
+    prompt.say(&lines.waiting(touch::Act::Add));
     let touch = Touch {
         file,
         reason: touch::CHECK_ROOT,

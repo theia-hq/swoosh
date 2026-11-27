@@ -299,6 +299,8 @@ pub enum Locked {
         now: Now,
         /// Whether a root is kept on this machine, read under `home.lock`.
         root: Root,
+        /// As [`Locked::Made`]'s: a failure after the write was in place, said beside the result.
+        failed: Option<String>,
     },
     /// The key's lock of `method` was replaced by a new one: a new passphrase, or Touch ID set again.
     Changed {
@@ -306,6 +308,8 @@ pub enum Locked {
         method: keystore::Method,
         /// What the key opens with now.
         now: Now,
+        /// As [`Locked::Made`]'s.
+        failed: Option<String>,
     },
     /// The key's lock of `method` was taken off.
     Removed {
@@ -313,6 +317,8 @@ pub enum Locked {
         method: keystore::Method,
         /// What the key opens with now.
         now: Now,
+        /// As [`Locked::Made`]'s.
+        failed: Option<String>,
     },
     /// Nothing was changed.
     Unchanged(Why),
@@ -371,6 +377,18 @@ pub struct Unconfirmed {
 pub struct Gone {
     /// The key file.
     pub path: std::path::PathBuf,
+}
+
+/// The refusal when a first key beside a root was made under the chosen passphrase but a step after its write
+/// failed, so Touch ID, which the command was asked for, was not added. The key is made: the screen says so,
+/// with the failure, and how to add Touch ID; the run still fails, since what was asked did not happen.
+#[derive(Debug, thiserror::Error)]
+#[error("Touch ID was not added")]
+pub struct TouchIdNotAdded {
+    /// The key made.
+    pub key: NodeId,
+    /// The failure after the write, as its chain reads.
+    pub failed: String,
 }
 
 /// One lock method or both: the locks a key was made with or given, never none.
@@ -518,16 +536,26 @@ pub enum Why {
 }
 
 /// The result of putting `method` on a key whose locks were `before` and are `now`, each read under
-/// `home.lock`: a lock of that method already there was replaced, else `method` was added.
-fn added(method: Methods, before: Locks, now: Now, root: Root) -> Locked {
+/// `home.lock`: a lock of that method already there was replaced, else `method` was added. `failed` is a
+/// failure the key store answered after the write was in place.
+fn added(method: Methods, before: Locks, now: Now, root: Root, failed: Option<String>) -> Locked {
     let replaced = match method {
         Methods::Passphrase => Some(keystore::Method::Passphrase),
         Methods::TouchId => Some(keystore::Method::TouchId),
         Methods::Both => None,
     };
     match replaced {
-        Some(method) if before.has(method) => Locked::Changed { method, now },
-        _ => Locked::Added { method, now, root },
+        Some(method) if before.has(method) => Locked::Changed {
+            method,
+            now,
+            failed,
+        },
+        _ => Locked::Added {
+            method,
+            now,
+            root,
+            failed,
+        },
     }
 }
 
@@ -567,7 +595,7 @@ async fn set_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<L
     let file = key_file(home);
     let locked = match file.load()? {
         None => {
-            let new = choose_new(prompt)?;
+            let new = choose_after(prompt, touch::MAKES_UNDER_PASSPHRASE)?;
             let secret = keystore::Secret::generate()?;
             let drawn = Drawn::of(&secret);
             let _home_lock = crate::home::HomeWrite::take(home).await?;
@@ -576,13 +604,13 @@ async fn set_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<L
             return drawn.made(&file, wrote.err());
         }
         Some(Stored::Plain(_)) => {
-            let new = choose_new(prompt)?;
+            let new = choose_after(prompt, touch::SEALS_UNDER_PASSPHRASE)?;
             let _home_lock = crate::home::HomeWrite::take(home).await?;
             let before = Locks::after(&file, prompt)?;
             let root = Root::of(home)?;
-            file.add_lock(None, keystore::NewLock::Passphrase(&new))?;
+            let failed = written(file.add_lock(None, keystore::NewLock::Passphrase(&new)))?;
             let now = Now::after(&file, prompt);
-            return Ok(added(Methods::Passphrase, before, now, root));
+            return Ok(added(Methods::Passphrase, before, now, root, failed));
         }
         Some(Stored::Locked(locked)) => locked,
     };
@@ -603,29 +631,24 @@ async fn set_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<L
         // before the prompts.
         let before = Locks::after(&file, prompt)?;
         let root = Root::of(home)?;
-        by_touch.change(
-            prompt,
-            &home_lock,
-            act,
-            touch::SET_PASSPHRASE_ON_MACHINE_KEY,
-        )?;
+        let failed = by_touch.change(prompt, &home_lock, act)?;
         let now = Now::after(&file, prompt);
         drop(home_lock);
         // A blank line, so the result stands apart from the wait.
         prompt.warn("");
-        return Ok(added(Methods::Passphrase, before, now, root));
+        return Ok(added(Methods::Passphrase, before, now, root, failed));
     }
     let current = prove_passphrase(prompt, &locked)?;
     let new = crate::passphrase::choose(prompt, Asked::MachineKey)?;
     let _home_lock = crate::home::HomeWrite::take(home).await?;
     let before = Locks::after(&file, prompt)?;
     let root = Root::of(home)?;
-    file.add_lock(
+    let failed = written(file.add_lock(
         Some(Unlock::Passphrase(&current)),
         keystore::NewLock::Passphrase(&new),
-    )?;
+    ))?;
     let now = Now::after(&file, prompt);
-    Ok(added(Methods::Passphrase, before, now, root))
+    Ok(added(Methods::Passphrase, before, now, root, failed))
 }
 
 /// Take the passphrase off this machine's key. Never where a root is kept and `touch-id` would be left alone.
@@ -647,18 +670,42 @@ async fn remove_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Resul
     if !prompt.terminal() {
         eyre::bail!(crate::passphrase::CHANGE_FOR_KEY_NEEDS_TERMINAL);
     }
+    // Touch ID left alone must open here, or the key store refuses the removal: a lock that does not, or
+    // cannot be checked, is refused now, before a line says it will open the key and a passphrase is typed.
+    if holds_touch_id(&locked) {
+        let lines = touch::Lines::of(Asked::MachineKey, &file, true);
+        match prompt.health(&locked) {
+            Some(keystore::Health::Live) => {}
+            Some(keystore::Health::Unchecked) => eyre::bail!("{}", lines.unchecked()),
+            // A build with no enclave reads no health, and Touch ID opens nothing here.
+            None if prompt.touch_here() == TouchHere::NoEnclave => {
+                eyre::bail!(touch::PASSPHRASE_STAYS_OFF_THE_MAC)
+            }
+            Some(keystore::Health::Dead) | None => eyre::bail!("{}", lines.dead()),
+        }
+    }
+    prompt.warn(if holds_touch_id(&locked) {
+        touch::TAKES_PASSPHRASE_OFF
+    } else {
+        touch::TAKES_LAST_LOCK_OFF
+    });
+    prompt.warn("");
     let current = prove_passphrase(prompt, &locked)?;
     let _home_lock = crate::home::HomeWrite::take(home).await?;
-    file.remove_lock(Unlock::Passphrase(&current), keystore::Method::Passphrase)?;
+    let failed =
+        written(file.remove_lock(Unlock::Passphrase(&current), keystore::Method::Passphrase))?;
     Ok(Locked::Removed {
         method: keystore::Method::Passphrase,
         now: Now::after(&file, prompt),
+        failed,
     })
 }
 
-/// The refusal of `lock --remove` on a key that keeps its passphrase beside `touch-id` where a root is kept.
-pub const KEEPS_PASSPHRASE: &str = "this machine's key keeps its passphrase while your root is on this machine; \
-     to remove touch-id instead: swoosh lock touch-id --remove";
+/// The refusal of `lock passphrase --remove` on a key that keeps its passphrase beside `touch-id` where a root
+/// is kept, with the removal that is allowed there.
+pub const KEEPS_PASSPHRASE: &str = "this machine's key keeps its passphrase while your root is here\n  \
+     To take Touch ID off instead:\n    \
+     swoosh lock touch-id --remove";
 
 /// Put a `touch-id` lock on this machine's key beside its passphrase, or set it again where it has a passphrase
 /// to open it by. Asked only at this Mac's own screen; says what the key will open with, and what a new
@@ -690,9 +737,10 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
         }));
     }
     // What the key will open with after, said before the first prompt. A key with a passphrase keeps it, so
-    // its line names both locks; a key with no lock yet gets a passphrase only where a root is kept.
-    // On a lock that does not open here, who opens the new one is said with the warning that comes with
-    // it, so the fingerprint line is not said twice.
+    // its line names both locks; a key with no lock yet gets a passphrase only where a root is kept, and is
+    // told what a new fingerprint does only where Touch ID will be its one lock. On a lock that does not
+    // open here, who opens the new one is said with the warning that comes with it, so the fingerprint line
+    // is not said twice.
     let dead = matches!(
         &stored,
         Some(Stored::Locked(locked)) if prompt.health(locked) == Some(keystore::Health::Dead)
@@ -705,8 +753,10 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
             }
         }
         Some(Stored::Locked(_)) => prompt.warn(touch::TOUCH_ID_BESIDE),
-        None | Some(Stored::Plain(_)) if keeps_root => prompt.warn(touch::BESIDE_PASSPHRASE),
-        None | Some(Stored::Plain(_)) => prompt.warn(touch::ONE_LOCK),
+        None if keeps_root => prompt.warn(touch::MAKES_BESIDE_ROOT),
+        None => prompt.warn(touch::MAKES_UNDER_TOUCH_ID),
+        Some(Stored::Plain(_)) if keeps_root => prompt.warn(touch::SEALS_BESIDE_ROOT),
+        Some(Stored::Plain(_)) => prompt.warn(touch::SEALS_UNDER_TOUCH_ID),
     }
     if keeps_root && root_opens_by_touch(home) {
         prompt.warn(touch::SHARED_FINGER);
@@ -716,15 +766,23 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
         // A first key beside a root is written under a chosen passphrase before the touch, so it is made
         // whether or not the touch lands.
         None if keeps_root => {
+            // A blank line, so the prompts stand apart from what was said before them.
+            prompt.warn("");
             let current = choose_new(prompt)?;
             let secret = keystore::Secret::generate()?;
             let drawn = Drawn::of(&secret);
             let home_lock = crate::home::HomeWrite::take(home).await?;
             make_machine_dir(home)?;
-            file.write(&secret, Protection::Passphrase(&current))?;
+            // A failure after the write was in place stops short of the touch: the key is made, under the
+            // passphrase alone, and the person is told Touch ID was not added.
+            if let Some(failed) = written(file.write(&secret, Protection::Passphrase(&current)))? {
+                return Err(drawn.touch_id_not_added(&file, failed));
+            }
             let act = TouchAct::BesidePassphrase { current };
             let touched = set_by_touch(prompt, &lines, &home_lock, &file, act);
-            return drawn.sealed_first(touched, &file);
+            return drawn
+                .sealed_first(touched, &file)
+                .inspect(|_| prompt.warn(""));
         }
         // A first key under Touch ID alone is written by the touch itself, so a touch that does not land
         // made nothing, which the file read back says.
@@ -735,18 +793,22 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
             make_machine_dir(home)?;
             let act = TouchAct::Write(secret);
             let touched = set_by_touch(prompt, &lines, &home_lock, &file, act);
-            return drawn.by_touch(touched, &file);
+            return drawn.by_touch(touched, &file).inspect(|_| prompt.warn(""));
         }
         // A plain key beside a root is sealed under a chosen passphrase before the touch, so it keeps that
         // lock whether or not the touch lands.
         Some(Stored::Plain(_)) if keeps_root => {
+            prompt.warn("");
             let current = choose_new(prompt)?;
             let home_lock = crate::home::HomeWrite::take(home).await?;
             let root = Root::of(home)?;
-            file.add_lock(None, keystore::NewLock::Passphrase(&current))?;
+            // A failure after the seal was in place still leaves the passphrase on, so the touch is asked,
+            // and the failure is said beside the result.
+            let sealed = written(file.add_lock(None, keystore::NewLock::Passphrase(&current)))?;
             let act = TouchAct::BesidePassphrase { current };
             let touched = set_by_touch(prompt, &lines, &home_lock, &file, act);
-            return sealed_then_touched(touched, &file, prompt, root);
+            return sealed_then_touched(touched, sealed, &file, prompt, root)
+                .inspect(|_| prompt.warn(""));
         }
         Some(Stored::Plain(_)) => TouchAct::SealPlain,
         // Under `touch-id` alone, the key returned above, so a sealed key here holds a passphrase. Opened with
@@ -769,14 +831,12 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
     // keeps the passphrase, so no step offers to take it off.
     let before = Locks::after(&file, prompt)?;
     let root = Root::of(home)?;
-    let opened_by_passphrase = matches!(act, TouchAct::BesidePassphrase { .. });
-    touch::changed(set_by_touch(prompt, &lines, &home_lock, &file, act), &lines)?;
+    let failed = touch::landed(set_by_touch(prompt, &lines, &home_lock, &file, act), &lines)?;
     let now = Now::after(&file, prompt);
     drop(home_lock);
-    if opened_by_passphrase {
-        prompt.warn("");
-    }
-    Ok(added(Methods::TouchId, before, now, root))
+    // A blank line, so the result stands apart from the wait.
+    prompt.warn("");
+    Ok(added(Methods::TouchId, before, now, root, failed))
 }
 
 /// Take the `touch-id` lock off this machine's key: opened with the passphrase where it has one, else with
@@ -793,28 +853,30 @@ async fn remove_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<
             keystore::Method::TouchId,
         )));
     }
-    let removed = |now| Locked::Removed {
+    let removed = |now, failed| Locked::Removed {
         method: keystore::Method::TouchId,
         now,
+        failed,
     };
     if !touch::holds_passphrase(&locked) {
         let by_touch = ByTouch::route(prompt, &file, &locked)?;
+        prompt.warn(touch::TAKES_LAST_LOCK_OFF);
         let home_lock = crate::home::HomeWrite::take(home).await?;
-        by_touch.change(
-            prompt,
-            &home_lock,
-            TouchAct::RemoveTouchId,
-            touch::REMOVE_TOUCH_ID_FROM_MACHINE_KEY,
-        )?;
-        return Ok(removed(Now::after(&file, prompt)));
+        let failed = by_touch.change(prompt, &home_lock, TouchAct::RemoveTouchId)?;
+        let now = Now::after(&file, prompt);
+        prompt.warn("");
+        return Ok(removed(now, failed));
     }
     if !prompt.terminal() {
         eyre::bail!(crate::passphrase::CHANGE_FOR_KEY_NEEDS_TERMINAL);
     }
+    prompt.warn(touch::TAKES_TOUCH_ID_OFF);
+    prompt.warn("");
     let current = prove_passphrase(prompt, &locked)?;
     let _home_lock = crate::home::HomeWrite::take(home).await?;
-    file.remove_lock(Unlock::Passphrase(&current), keystore::Method::TouchId)?;
-    Ok(removed(Now::after(&file, prompt)))
+    let failed =
+        written(file.remove_lock(Unlock::Passphrase(&current), keystore::Method::TouchId))?;
+    Ok(removed(Now::after(&file, prompt), failed))
 }
 
 /// Prove the passphrase on this machine's key, asking up to three times, and hand it back for the change.
@@ -849,8 +911,9 @@ pub fn touch_id_alone_beside_root(home: &Home) -> bool {
 
 /// What is said where [`touch_id_alone_beside_root`] holds: after a root is made or restored here, and in
 /// `status`.
-pub const TOUCH_ID_ALONE_BESIDE_ROOT: &str = "this machine's key needs a passphrase beside touch-id while your \
-     root is on this machine: swoosh lock passphrase";
+pub const TOUCH_ID_ALONE_BESIDE_ROOT: &str = "this machine's key needs a passphrase beside Touch ID while your \
+     root is here:\n  \
+     swoosh lock passphrase";
 
 /// Whether the root kept in `home` has a `touch-id` lock, read from its header. A root that cannot be read
 /// says nothing here; every use of it says why.
@@ -883,24 +946,20 @@ impl<'a> ByTouch<'a> {
         }
     }
 
-    /// Change the key's locks through `act`, which the touch opens it for, under `home.lock` (`_home_lock`),
-    /// with `reason` in the dialog: the act's own, so the person sees the change they asked for. The caller
-    /// holds the lock, so what it reads before and after is read under it too.
+    /// Change the key's locks through `act`, which the touch opens it for, under `home.lock` (`_home_lock`).
+    /// The waiting line and the dialog both name the act, so the person sees the change they asked for. The
+    /// caller holds the lock, so what it reads before and after is read under it too. Hands back a failure the
+    /// key store answered after the write was in place.
     fn change(
         self,
         prompt: &mut impl Prompt,
         _home_lock: &crate::home::HomeWrite,
         act: TouchAct,
-        reason: &'static str,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Option<String>> {
         let lines = touch::Lines::of(Asked::MachineKey, self.file, false);
-        prompt.say(&lines.waiting());
-        let touch = Touch {
-            file: self.file.clone(),
-            reason,
-            act,
-        };
-        touch::changed(prompt.touch(touch), &lines)
+        prompt.say(&lines.waiting(act.act()));
+        let touch = Touch::on_machine_key(self.file.clone(), act);
+        touch::landed(prompt.touch(touch), &lines)
     }
 }
 
@@ -913,12 +972,8 @@ fn set_by_touch(
     file: &KeyFile,
     act: TouchAct,
 ) -> touch::Touched {
-    prompt.say(&lines.checking());
-    prompt.touch(Touch {
-        file: file.clone(),
-        reason: touch::CHECK_MACHINE_KEY,
-        act,
-    })
+    prompt.say(&lines.waiting(act.act()));
+    prompt.touch(Touch::on_machine_key(file.clone(), act))
 }
 
 /// A key this run drew for a home with none: what the file read back after its write must claim, to be the
@@ -981,6 +1036,21 @@ impl Drawn {
         }
     }
 
+    /// The refusal for a first key beside a root whose write under the chosen passphrase landed, the key store
+    /// answering `failed` after it, so the touch that adds Touch ID was not asked: made, where the file read
+    /// back is this run's under the passphrase alone; any other read cannot be confirmed.
+    fn touch_id_not_added(&self, file: &KeyFile, failed: String) -> eyre::Report {
+        match self.found(file) {
+            Found::Mine(Methods::Passphrase) => TouchIdNotAdded {
+                key: self.key,
+                failed,
+            }
+            .into(),
+            Found::Unconfirmed(read) => unconfirmed(file, read),
+            Found::Mine(_) | Found::Absent | Found::Theirs => unconfirmed(file, None),
+        }
+    }
+
     /// The key the touch itself writes, under Touch ID alone: made only where the file read back is this
     /// run's key with Touch ID on it. A touch that did not land, over no file, made nothing; over another's
     /// key, it did not make that one either. A failure can come after the file is in place (its directory
@@ -1033,9 +1103,11 @@ impl Drawn {
 /// A plain key beside a kept root, sealed under a chosen passphrase before the touch that adds Touch ID
 /// beside it: the passphrase was added either way, so a touch that did not land says so, then what the key
 /// opens with, read back. A file read back with neither Touch ID nor the passphrase alone, or not at all, is
-/// not called anything.
+/// not called anything. `sealed` is a failure the key store answered after the seal was in place; the
+/// result says it, or the touch's own failure after its lock was in place.
 fn sealed_then_touched(
     touched: touch::Touched,
+    sealed: Option<String>,
     file: &KeyFile,
     prompt: &impl Prompt,
     root: Root,
@@ -1046,14 +1118,12 @@ fn sealed_then_touched(
         Err(error) => return Err(unconfirmed(file, Some(error))),
     };
     if now.has(keystore::Method::TouchId) {
-        // The lock landed, whatever the answer; a failure after it stays in the log.
-        if let touch::Touched::Failed(why) = &touched {
-            tracing::debug!(error = %format_args!("{why:#}"), "the lock landed, but the key store reported a failure");
-        }
+        // The lock landed, whatever the answer; a failure after it is said beside the result.
         return Ok(Locked::Added {
             method: Methods::Both,
             now: Now::Read(now),
             root,
+            failed: failure(&touched).or(sealed),
         });
     }
     let Locks::Passphrase = now else {
@@ -1066,7 +1136,22 @@ fn sealed_then_touched(
             method: Methods::Passphrase,
             now: Now::Read(now),
             root,
+            failed: sealed,
         }),
+    }
+}
+
+/// A write's answer, as a result takes it: done, or done with the failure the key store answered after the
+/// file was in place (its directory not synced), as its chain reads, to be said beside the result.
+///
+/// # Errors
+///
+/// Any other failure: the write did not land.
+fn written(answer: Result<(), keystore::Error>) -> Result<Option<String>, keystore::Error> {
+    match answer {
+        Ok(()) => Ok(None),
+        Err(error @ keystore::Error::Unsynced { .. }) => Ok(Some(crate::escape::causes(&error))),
+        Err(error) => Err(error),
     }
 }
 
@@ -1123,6 +1208,18 @@ pub const MADE_NO_KEY: &str = "This command made no key.";
 /// not called made, and `status` says what it is.
 pub const KEY_ALREADY_THERE: &str =
     "a key was already there\n  This command did not make it; swoosh status shows it.";
+
+/// A first passphrase for this machine's key, chosen at the terminal after `notice`, which says what the key
+/// will open with, and a blank line: said only once a terminal is there, so a refusal for want of one is the
+/// first thing heard.
+fn choose_after(prompt: &mut impl Prompt, notice: &str) -> eyre::Result<keystore::Passphrase> {
+    if !prompt.terminal() {
+        eyre::bail!(CHOOSE_FOR_KEY_NEEDS_TERMINAL);
+    }
+    prompt.warn(notice);
+    prompt.warn("");
+    choose_new(prompt)
+}
 
 /// A first passphrase for this machine's key, chosen at the terminal.
 fn choose_new(prompt: &mut impl Prompt) -> eyre::Result<keystore::Passphrase> {

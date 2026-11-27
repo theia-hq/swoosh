@@ -116,18 +116,98 @@ fn the_local_refusal_holds_the_law() {
     }
 }
 
-/// The lines said before a lock is added beside another, which the library prints as one warning each since
-/// it asks inside itself, held to the law as written: the code's own constants, not a copy of them.
+/// The lines said before and around a lock act, which the library prints itself since it asks inside
+/// itself: every before-line, every waiting line, every prompt (its trailing space trimmed) and the two
+/// refusals of a lock act, held to the law as written, the code's own lines, not a copy of them; the
+/// refusals by their bytes too. The law reads a lowercase line as a fact, so each line but a refusal's is
+/// held to its capital here. Red when a line breaks case, period or width, or a refusal moves off its words.
 #[test]
-fn the_lines_before_an_added_lock_hold_the_law() {
-    for notice in [
-        swoosh::touch::BESIDE_TOUCH_ID,
-        swoosh::touch::TOUCH_ID_BESIDE,
-        swoosh::touch::CHANGES_TOUCH_ID,
-        swoosh::touch::EVERY_FINGERPRINT,
+fn the_lock_lines_hold_the_law() {
+    use swoosh::touch::{self, Act};
+
+    let file = keystore::KeyFile::new(std::env::temp_dir().join("swoosh-law-lines").join("key"));
+    let mut lines: Vec<String> = [
+        touch::MAKES_UNDER_PASSPHRASE,
+        touch::MAKES_UNDER_TOUCH_ID,
+        touch::MAKES_BESIDE_ROOT,
+        touch::SEALS_UNDER_PASSPHRASE,
+        touch::SEALS_UNDER_TOUCH_ID,
+        touch::SEALS_BESIDE_ROOT,
+        touch::BESIDE_TOUCH_ID,
+        touch::TOUCH_ID_BESIDE,
+        touch::CHANGES_TOUCH_ID,
+        touch::EVERY_FINGERPRINT,
+        touch::TAKES_PASSPHRASE_OFF,
+        touch::TAKES_TOUCH_ID_OFF,
+        touch::TAKES_LAST_LOCK_OFF,
+        touch::ROOT_BESIDE_PASSPHRASE,
+        swoosh::passphrase::CHOOSE_HINT,
+        swoosh::passphrase::CHOOSE_FIRST,
+        swoosh::passphrase::CHOOSE_AGAIN,
+    ]
+    .map(str::to_owned)
+    .into();
+    let dir = std::path::Path::new("/tmp/stick");
+    for asked in [
+        swoosh::passphrase::Asked::MachineKey,
+        swoosh::passphrase::Asked::Root,
+        swoosh::passphrase::Asked::Copy(dir),
     ] {
-        if let Err(breach) = read(notice) {
-            panic!("{breach}\n{notice}");
+        lines.push(asked.prompt());
+        let said = touch::Lines::of(asked, &file, true);
+        for act in [
+            Act::Use,
+            Act::Make,
+            Act::Add,
+            Act::AddPassphrase,
+            Act::Remove,
+        ] {
+            lines.push(said.waiting(act));
+        }
+    }
+    for line in &lines {
+        let line = line.trim_end();
+        if let Err(breach) = read(line) {
+            panic!("{breach}\n{line}");
+        }
+        for sentence in line.lines() {
+            assert!(
+                sentence.starts_with(char::is_uppercase),
+                "a capital: {sentence}"
+            );
+        }
+    }
+    // Lowercase still (its law form is SW4's), so held to width and wrap only. `SHARED_FINGER`'s ruled
+    // wrap runs on at a deeper indent, which the law does not read as one sentence, so it is held to its
+    // width alone.
+    assert!(
+        touch::SHARED_FINGER
+            .lines()
+            .all(|line| line.chars().count() <= 80)
+    );
+    for line in [swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT] {
+        if let Err(breach) = read(line) {
+            panic!("{breach}\n{line}");
+        }
+    }
+    for (refused, printed) in [
+        (
+            swoosh::identity::KEEPS_PASSPHRASE,
+            "error: this machine's key keeps its passphrase while your root is here\n  \
+             To take Touch ID off instead:\n    \
+             swoosh lock touch-id --remove\n",
+        ),
+        (
+            touch::TIMED_OUT,
+            "error: Touch ID waited 60 seconds and no touch came\n",
+        ),
+    ] {
+        let mut screen = Vec::new();
+        crate::print_error(&eyre::eyre!(refused), &mut screen);
+        let screen = String::from_utf8(screen).expect("the refusal is UTF-8");
+        assert_eq!(screen, printed);
+        if let Err(breach) = read(&screen) {
+            panic!("{breach}\n{screen}");
         }
     }
 }

@@ -215,7 +215,7 @@ fn a_live_lock_opens_by_one_touch_and_asks_no_passphrase() {
     assert_eq!(prompt.touches().len(), 1);
     assert!(matches!(prompt.touches()[0].act, TouchAct::Open));
     assert_eq!(prompt.touches()[0].reason, USE_ROOT);
-    assert_eq!(prompt.said(), ["waiting for touch-id to use your root…"]);
+    assert_eq!(prompt.said(), ["Touch the sensor to use your root…"]);
     assert!(prompt.warned().is_empty(), "the wait attends the touch");
 }
 
@@ -248,7 +248,7 @@ fn a_declined_touch_falls_to_the_passphrase_once() {
     assert_eq!(key, locked.public_key());
     assert_eq!(prompt.touches().len(), 1, "one touch per key");
     assert_eq!(prompt.events(), 1);
-    assert_eq!(prompt.said(), ["waiting for touch-id to use your root…"]);
+    assert_eq!(prompt.said(), ["Touch the sensor to use your root…"]);
 }
 
 /// A lock that turns out dead after the dialog says so, then asks the passphrase.
@@ -262,7 +262,7 @@ fn a_touch_that_does_not_open_here_warns_then_asks_the_passphrase() {
     assert_eq!(prompt.touches().len(), 1);
     assert_eq!(prompt.events(), 1);
     assert!(
-        prompt.said()[1].starts_with("warning: touch-id does not open your root on this Mac now"),
+        prompt.said()[1].starts_with("warning: Touch ID does not open your root on this Mac now"),
         "{:?}",
         prompt.said()
     );
@@ -281,7 +281,7 @@ fn a_failed_touch_says_so_then_asks_the_passphrase() {
     assert_eq!(prompt.events(), 1);
     assert_eq!(
         prompt.said()[1],
-        "touch-id did not open your root: the unwrap refused"
+        "Touch ID did not open your root: the unwrap refused"
     );
 }
 
@@ -309,8 +309,8 @@ fn a_dead_root_lock_shows_no_dialog_and_leads_with_setting_it_again() {
     assert_eq!(
         prompt.warned(),
         [
-            "warning: touch-id does not open your root on this Mac now.\n\
-             check Touch ID & Password for a fingerprint you did not add, then set touch-id again: swoosh \
+            "warning: Touch ID does not open your root on this Mac now.\n\
+             check Touch ID & Password for a fingerprint you did not add, then set Touch ID again: swoosh \
              root lock touch-id"
         ]
     );
@@ -339,7 +339,7 @@ fn an_unchecked_lock_is_never_called_dead() {
     opened(&mut prompt, &file, &locked, Asked::Root).unwrap();
     assert!(prompt.touches().is_empty());
     assert_eq!(prompt.said().len(), 1);
-    assert!(prompt.said()[0].starts_with("touch-id cannot be checked now"));
+    assert!(prompt.said()[0].starts_with("Touch ID cannot be checked now"));
     assert!(!prompt.said()[0].contains("does not open"));
 }
 
@@ -355,7 +355,7 @@ fn over_ssh_no_touch_is_asked_and_the_variable_is_named() {
     assert!(prompt.touches().is_empty());
     assert_eq!(
         prompt.said(),
-        ["touch-id is not asked over ssh (SSH_TTY is set)."]
+        ["Touch ID is not asked over ssh (SSH_TTY is set)."]
     );
 }
 
@@ -409,7 +409,7 @@ fn a_machine_key_under_touch_id_alone_opens_by_the_touch() {
     assert_eq!(key, locked.public_key());
     assert_eq!(
         prompt.said(),
-        ["waiting for touch-id to use this machine's key…"]
+        ["Touch the sensor to use this machine's key…"]
     );
 }
 
@@ -424,7 +424,7 @@ fn a_touch_id_only_key_refuses_a_cancel() {
     let refused = opened(&mut prompt, &file, &locked, Asked::MachineKey).unwrap_err();
     assert_eq!(
         format!("{refused:#}"),
-        "touch-id was cancelled; this machine's key was not opened"
+        "Touch ID was cancelled; this machine's key was not opened"
     );
     assert_eq!(prompt.events(), 0);
     assert_eq!(prompt.touches().len(), 1);
@@ -439,8 +439,8 @@ fn a_dead_touch_id_only_key_names_the_finger_then_a_new_key() {
     let refused = opened(&mut prompt, &file, &locked, Asked::MachineKey).unwrap_err();
     assert_eq!(
         format!("{refused:#}"),
-        "touch-id does not open this machine's key on this Mac now.\n\
-         if you added a fingerprint, removing it lets touch-id open the key again.\n\
+        "Touch ID does not open this machine's key on this Mac now.\n\
+         if you added a fingerprint, removing it lets Touch ID open the key again.\n\
          otherwise, give this machine a new key and join again: swoosh leave --new-key"
     );
     assert!(prompt.touches().is_empty());
@@ -492,7 +492,7 @@ fn a_two_lock_machine_key_falls_to_its_passphrase() {
     let key = opened(&mut prompt, &file, &locked, Asked::MachineKey).unwrap();
     assert_eq!(key, locked.public_key());
     assert!(
-        prompt.said()[0].ends_with("then set touch-id again: swoosh lock touch-id"),
+        prompt.said()[0].ends_with("then set Touch ID again: swoosh lock touch-id"),
         "{:?}",
         prompt.said()
     );
@@ -658,5 +658,188 @@ mod hardware_acts {
     fn the_terminal_act_removes_touch_id() {
         let file = touched("hardware-remove");
         assert_eq!(after(&file, TouchAct::RemoveTouchId), Vec::<Method>::new());
+    }
+}
+
+/// Each act's waiting line and its dialog's reason name the same change, by the same verb, for every act a
+/// touch is asked for: the line from [`Lines::waiting`](super::Lines::waiting), the reason from the touch built
+/// for the act, both from one act. Red when `use` waits over an `add` or `remove` dialog, or a line or a reason
+/// moves off its words.
+#[test]
+fn the_waiting_line_names_the_dialogs_act() {
+    let passphrase =
+        || keystore::Passphrase::try_from(zeroize::Zeroizing::new(PASSPHRASE.to_owned())).unwrap();
+    let file = KeyFile::new(scratch("waiting-line").join("machine").join("key"));
+    let lines = super::Lines::of(Asked::MachineKey, &file, false);
+    let root = super::Lines::of(Asked::Root, &file, true);
+    let acts = [
+        TouchAct::Open,
+        TouchAct::Write(keystore::Secret::generate().unwrap()),
+        TouchAct::SealPlain,
+        TouchAct::BesidePassphrase {
+            current: passphrase(),
+        },
+        TouchAct::AddPassphrase { new: passphrase() },
+        TouchAct::RemoveTouchId,
+    ];
+    for act in acts {
+        // Exhaustive, so an act with no row fails to compile here.
+        let (waiting, reason) = match &act {
+            TouchAct::Open => (
+                "Touch the sensor to use this machine's key…",
+                "use this machine's key",
+            ),
+            TouchAct::Write(_) => (
+                "Touch the sensor to make this machine's key…",
+                "make this machine's key",
+            ),
+            TouchAct::SealPlain | TouchAct::BesidePassphrase { .. } => (
+                "Touch the sensor to add Touch ID…",
+                "add Touch ID to this machine's key",
+            ),
+            TouchAct::AddPassphrase { .. } => (
+                "Touch the sensor to add the passphrase…",
+                "add a passphrase to this machine's key",
+            ),
+            TouchAct::RemoveTouchId => (
+                "Touch the sensor to remove Touch ID…",
+                "remove Touch ID from this machine's key",
+            ),
+        };
+        assert_eq!(lines.waiting(act.act()), waiting);
+        let verb = reason.split(' ').next().unwrap();
+        assert!(
+            waiting.starts_with(&format!("Touch the sensor to {verb} ")),
+            "{waiting}"
+        );
+        assert_eq!(
+            super::Touch::on_machine_key(file.clone(), act).reason,
+            reason
+        );
+    }
+    // Your root is used and gets Touch ID, by the reasons its callers name.
+    assert_eq!(
+        root.waiting(super::Act::Use),
+        "Touch the sensor to use your root…"
+    );
+    assert_eq!(USE_ROOT, "use your root");
+    assert_eq!(
+        root.waiting(super::Act::Add),
+        "Touch the sensor to add Touch ID…"
+    );
+    assert_eq!(super::CHECK_ROOT, "add Touch ID to your root");
+}
+
+/// The lines said before a lock act, byte for byte: each is the ruled words, so a constant that drifts from
+/// them goes red here, where the tests that place it would follow it. Red when any byte moves.
+#[test]
+fn the_lines_before_a_lock_act_are_the_ruled_words() {
+    const EVERY: &str = "Every fingerprint in Touch ID & Password opens it.";
+    const LATER: &str =
+        "A fingerprint added later stops Touch ID opening this key until it is removed.";
+    const ROOT: &str = "Your root is on this machine, so the key keeps a passphrase.\n\
+                        A copy of the key file opens with the passphrase on any machine.";
+    for (said, ruled) in [
+        (
+            super::BESIDE_TOUCH_ID,
+            "This adds a passphrase beside Touch ID; either will open this machine's key.\n\
+             A copy of the key file would then open with the passphrase on any machine."
+                .to_owned(),
+        ),
+        (
+            super::TOUCH_ID_BESIDE,
+            format!(
+                "This adds Touch ID beside the passphrase; either will open this machine's key.\n\
+                 A copy of the key file still opens with the passphrase on any machine.\n{EVERY}"
+            ),
+        ),
+        (
+            super::CHANGES_TOUCH_ID,
+            "This changes Touch ID on this machine's key.\nOnce changed, either lock will open it.\n\
+             A copy of the key file still opens with the passphrase on any machine."
+                .to_owned(),
+        ),
+        (
+            super::MAKES_UNDER_PASSPHRASE,
+            "This machine has no key yet.\nThis makes one that opens with a passphrase.".to_owned(),
+        ),
+        (
+            super::MAKES_UNDER_TOUCH_ID,
+            format!(
+                "This machine has no key yet.\nThis makes one that only Touch ID on this Mac opens.\n\
+                 {EVERY}\n{LATER}"
+            ),
+        ),
+        (
+            super::MAKES_BESIDE_ROOT,
+            format!(
+                "This machine has no key yet.\n\
+                 This makes one that opens with Touch ID or a passphrase.\n{ROOT}\n{EVERY}"
+            ),
+        ),
+        (
+            super::SEALS_UNDER_PASSPHRASE,
+            "This machine's key has no lock.\nThis adds a passphrase.".to_owned(),
+        ),
+        (
+            super::SEALS_UNDER_TOUCH_ID,
+            format!(
+                "This machine's key has no lock.\n\
+                 This adds Touch ID, so only Touch ID on this Mac opens it.\n{EVERY}\n{LATER}"
+            ),
+        ),
+        (
+            super::SEALS_BESIDE_ROOT,
+            format!(
+                "This machine's key has no lock.\nThis adds Touch ID and a passphrase.\n{ROOT}\n{EVERY}"
+            ),
+        ),
+        (
+            super::TAKES_PASSPHRASE_OFF,
+            format!(
+                "This takes the passphrase off.\n\
+                 Only Touch ID on this Mac will then open this machine's key.\n{LATER}"
+            ),
+        ),
+        (
+            super::TAKES_TOUCH_ID_OFF,
+            "This takes Touch ID off.\nOnly the passphrase will then open this machine's key."
+                .to_owned(),
+        ),
+        (
+            super::TAKES_LAST_LOCK_OFF,
+            "This takes the last lock off this machine's key.\n\
+             Anyone with a copy of its key file could then act as this machine."
+                .to_owned(),
+        ),
+        (
+            super::ROOT_BESIDE_PASSPHRASE,
+            format!("Your root will open with Touch ID or its passphrase.\n{EVERY}"),
+        ),
+        (
+            super::SHARED_FINGER,
+            "Your root and this machine's key will both open with Touch ID on this Mac.\n\
+             Any program running as you can ask for a touch with any words in the dialog,\n  \
+             so touch it only for a command you just ran."
+                .to_owned(),
+        ),
+        (
+            crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT,
+            "this machine's key needs a passphrase beside Touch ID while your root is here:\n  \
+             swoosh lock passphrase"
+                .to_owned(),
+        ),
+        (
+            crate::passphrase::NO_TERMINAL_FOR_KEY,
+            "this machine's key has a passphrase and there is no terminal to type it at; start this from a \
+             terminal"
+                .to_owned(),
+        ),
+        (
+            super::PASSPHRASE_STAYS_OFF_THE_MAC,
+            "the passphrase stays: Touch ID opens this key only on the Mac that set it".to_owned(),
+        ),
+    ] {
+        assert_eq!(said, ruled);
     }
 }
