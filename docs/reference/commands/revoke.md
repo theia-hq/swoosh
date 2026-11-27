@@ -27,7 +27,7 @@ picks the block up without a restart. A link this machine made, and a link it ga
 admitted here, so that block is the whole revoke. A device is admitted by all your devices: where your root
 is kept (or with `--root <dir>`), the revoke asks for the root's passphrase after the block is written and
 then passes it to your other devices. If it cannot use your root, it says the device is blocked on this
-machine only, names how to finish, and exits 1. A revoked device's key can never be your device again: that
+machine only, says why your devices were not told, names how to finish, and exits 1. A revoked device's key can never be your device again: that
 machine runs `swoosh leave --new-key` at its console to be invited back. A stolen device can stop your
 other machines (`swoosh stop me/<name>`) until they learn it is revoked.
 

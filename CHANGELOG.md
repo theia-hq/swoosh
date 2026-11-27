@@ -11,6 +11,7 @@ All notable changes to swoosh, newest first.
   lock opens here.
 - **The Touch ID dialog says which command asked.** It reads `use this machine's key for swoosh serve`.
 - **Bare `swoosh lock` shows the key's locks and how to add one.**
+- **`join`, `leave` and `revoke` print where they landed.** `join` prints the root it now trusts once, whole, for you to compare, and `swoosh leave` if it differs. `revoke` says which of your devices took it, or why it could not tell them, and the command to finish.
 - **`revoke root:<key>` ends a root for good on the machine it runs on.** It needs a terminal and the
   8 characters after the key's `ed01` typed back. Where the root is kept, it asks for the root's passphrase
   and deletes the root; on one of its devices, the machine leaves it; anywhere else, this machine never

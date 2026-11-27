@@ -363,27 +363,58 @@ async fn a_stale_socket_binds_its_own() {
 }
 
 /// A `serve` that holds the lock but answers nowhere is an error for every riding verb, never an own
-/// bind; for `revoke`, `root restore` and `join`, whose act has landed by the decision, it is the error
-/// that says what landed first: for `revoke`, only this machine's block, and the rerun that finishes it.
+/// bind; for `root restore` and `join`, whose act has landed by the decision, it is the error that says
+/// what landed first. For `revoke`, only this machine's block landed: the partial landing, read back from
+/// `revoked`, with the error on its own lines and the rerun that finishes it.
 #[tokio::test]
 async fn a_held_unreachable_serve_after_a_landed_act_says_it_landed() {
     let scratch = scratch("landed");
     let mut served = Served::new("decision-landed").await;
     // The socket file stays and the lock stays held; nothing accepts on it.
     drop(served.listener());
-    for (name, verb, arm) in every_verb(&scratch).await {
+    let verbs = every_verb(&scratch).await;
+    // The revoke's block was written in the root's home; the served home is where it is read back.
+    let root = &scratch[1];
+    for file in [root.revoked(), root.revoked_written()] {
+        let name = file.file_name().unwrap();
+        std::fs::copy(&file, served.home.dir().join(name)).unwrap();
+    }
+    for (name, verb, arm) in verbs {
         let Some(_) = arm else { continue };
         let machine = machine_of(&verb);
         let Err(report) = decide(verb.split(), &served.home, machine.as_ref()).await else {
             panic!("{name}: a held lock with no answer is no own bind");
         };
-        let landed = ["revoke", "root restore", "join"].contains(&name);
+        let landed = ["root restore", "join"].contains(&name);
         assert_eq!(
             report.is::<crate::commands::through_serve::ActLanded>(),
             landed,
             "{name}"
         );
         let line = format!("error: {report:#}\n");
+        if name == "revoke" {
+            assert!(
+                line.starts_with(
+                    "error: me/phone is blocked on this machine only\n  this machine   blocks it now\n  your \
+                     devices   not told; the swoosh serve here could not be reached\n\n  swoosh serve is \
+                     running for this home, but this command cannot reach it\n"
+                ),
+                "{line}"
+            );
+            assert!(
+                line.ends_with("\n\nTo finish, run this again:\n  swoosh revoke me/phone\n"),
+                "{line}"
+            );
+            // Held but for the error's own socket path, whose length is the temporary directory's.
+            let held: Vec<_> = line
+                .lines()
+                .filter(|line| !line.contains("Nothing answers at "))
+                .collect();
+            if let Err(breach) = crate::screen::law::holds(&held.join("\n")) {
+                panic!("{breach}\n{line}");
+            }
+            continue;
+        }
         assert!(
             line.starts_with(
                 "error: swoosh serve is running for this home, but this command cannot reach it\n"
@@ -400,13 +431,8 @@ async fn a_held_unreachable_serve_after_a_landed_act_says_it_landed() {
                     left.is::<crate::commands::through_serve::Reported>(),
                     "{name}"
                 );
-                let said = match name {
-                    "revoke" => {
-                        "me/phone is blocked on this machine, not yet on your other devices\nto \
-                         finish, run it again: swoosh revoke me/phone"
-                    }
-                    _ => "The change is made and saved here. Your devices have not been told yet.",
-                };
+                let said =
+                    "The change is made and saved here. Your devices have not been told yet.";
                 assert_eq!(err, format!("{said}\n{line}"), "{name}");
             }
             false => {

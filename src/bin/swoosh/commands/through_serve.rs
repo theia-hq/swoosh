@@ -549,7 +549,7 @@ impl core::error::Error for Unreached {}
 #[error("{0:#}\n  Nothing was changed.")]
 pub(crate) struct Unchanged(eyre::Report);
 
-/// A root act (`revoke`, `root restore`, `join`) that landed here, then met a `serve` it could not trust
+/// A root act (`root restore`, `join`) that landed here, then met a `serve` it could not trust
 /// or reach before sending it anything: the composition root prints what [`Landed`] on its own lines, then
 /// the error, so the exit 1 is not read as the act failing.
 #[derive(Debug, thiserror::Error)]
@@ -566,16 +566,12 @@ pub(crate) struct ActLanded {
 pub(crate) enum Landed {
     /// `root restore` or `join`: the whole change, saved here; [`ACT_LANDED`].
     Saved,
-    /// `revoke me/<device>` with your root: only this machine's block, its root step not yet run. The
-    /// lines say so and name the rerun that finishes it, since "the change is made" would be false.
-    Blocked(String),
 }
 
 impl core::fmt::Display for Landed {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Saved => f.write_str(ACT_LANDED),
-            Self::Blocked(lines) => f.write_str(lines),
         }
     }
 }

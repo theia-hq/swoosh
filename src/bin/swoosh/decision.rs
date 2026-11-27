@@ -78,14 +78,15 @@ impl Run {
 }
 
 impl Exchanging {
-    /// What of this verb's act has landed before its path is decided: `revoke`, `root restore` and `join`
-    /// make their change locally first, so nothing a bind does can delay or stop it. A `revoke` has
-    /// landed only this machine's block; its root step runs after.
+    /// What of this verb's act has landed before its path is decided: `root restore` and `join` make their
+    /// change locally first, so nothing a bind does can delay or stop it. A `revoke` has landed only this
+    /// machine's block, which its partial landing says ([`Publish::unreached`]).
+    ///
+    /// [`Publish::unreached`]: crate::commands::revoke::Publish::unreached
     fn landed(&self) -> Option<Landed> {
         match self {
-            Self::Revoke(revoke) => Some(Landed::Blocked(revoke.publish.landed())),
             Self::RootRestore(_) | Self::Join(_) => Some(Landed::Saved),
-            Self::Sync(_) | Self::Invite(_) => None,
+            Self::Revoke(_) | Self::Sync(_) | Self::Invite(_) => None,
         }
     }
 }
@@ -106,9 +107,9 @@ impl Exchanging {
 /// [`ThisMachine`] for a dial to this machine, and by own bind a key file the check could not read. A
 /// control socket that cannot be trusted, a `serve` that holds the lock but cannot be reached, answers in
 /// another version or not in time, or a lock that could not be read: never an own bind, since a bind
-/// beside a `serve` this run cannot rule out is the thing this decision exists to prevent. For `revoke`,
-/// `root restore` and `join`, whose act has landed by now, the error is [`ActLanded`], saying what of it
-/// landed.
+/// beside a `serve` this run cannot rule out is the thing this decision exists to prevent. For `root
+/// restore` and `join`, whose act has landed by now, the error is [`ActLanded`], saying what of it landed;
+/// for `revoke`, whose block alone has, it is the partial landing, read back, with the error in it.
 pub(crate) async fn decide<'m>(
     run: Run,
     home: &Home,
@@ -149,9 +150,13 @@ pub(crate) async fn decide<'m>(
                 Ok(Decision::Exchanges { exchanging, socket })
             }
             Ok(Found::Absent) => Ok(Decision::Own(Run::Exchanges(exchanging))),
-            Err(report) => Err(match exchanging.landed() {
-                Some(landed) => ActLanded { landed, report }.into(),
-                None => report,
+            Err(report) => Err(match &exchanging {
+                // Only the block landed: the partial landing, read back, says so with the error in it.
+                Exchanging::Revoke(revoke) => revoke.publish.unreached(home, &report),
+                _ => match exchanging.landed() {
+                    Some(landed) => ActLanded { landed, report }.into(),
+                    None => report,
+                },
             }),
         },
     }

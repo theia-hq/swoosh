@@ -37,6 +37,13 @@ fn sync_prints_its_lines() {
             .map(|(name, row)| ((*name).to_owned(), *row))
             .collect()
     };
+    // Each report holds the screen law, but a fork's line, two sentences and two commands, whose new words
+    // are owed.
+    let report = |rows: &[(String, Row)]| -> String {
+        let printed = report(rows);
+        crate::screen::owed::hold_but_owed(&printed);
+        printed
+    };
     assert_eq!(
         report(&rows(&[
             ("me/nas", Row::InSync),

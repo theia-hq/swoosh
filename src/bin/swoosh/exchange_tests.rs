@@ -660,7 +660,7 @@ async fn serve_dies_inside_an_attached_exchange_is_named() {
 /// went.
 fn reach_line(name: &str) -> &'static str {
     match name {
-        "revoke" => "revoked me/phone",
+        "revoke" => "Revoked me/phone.",
         "invite" => "me/tv runs 90d from now",
         "restore" => "restored root:",
         _ => unreachable!("no such root act here"),
