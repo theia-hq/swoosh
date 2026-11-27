@@ -1392,8 +1392,9 @@ async fn a_hostile_refusal_prints_escaped() {
     assert!(ran.ended.is_err(), "a refused stream is a skip");
     assert_eq!(
         ran.err,
+        // Too long beside the name, the reason takes a detail line of its own.
         format!(
-            "skip swoosh-send-{}-refused.txt: stream refused: unavailable: \
+            "skip swoosh-send-{}-refused.txt:\n  stream refused: unavailable: \
              no\\r\\u{{1b}}[2Ksent a.txt (1 bytes)\\u{{202e}}\n",
             std::process::id()
         )
@@ -1423,8 +1424,7 @@ async fn a_hostile_connect_failure_prints_escaped() {
     );
     assert!(
         error.starts_with(&format!(
-            "could not reach {}: connect to peer: closed by peer: \
-             no\\r\\u{{1b}}[2Ksent hosts (1 bytes)\\u{{202e}}",
+            "could not reach {}: connect to peer: closed by peer: no\\r",
             cmd.peer
         )),
         "{error}"
@@ -1576,5 +1576,36 @@ async fn an_untrusted_socket_ends_a_send_once() {
         ran.out,
         format!("sending to {}...\n", peer.key()),
         "nothing sent"
+    );
+}
+
+/// A file skipped for a reason in wide glyphs, under a name in wide glyphs: the name is cut, and the
+/// reason, cut where it entered, takes a detail line when it does not fit beside the name, so neither can
+/// wrap and start a forged line of its own.
+#[test]
+fn a_wide_skip_line_cannot_forge_a_line() {
+    let forged = "error: me/boss refused ssh";
+    let wide = format!("{}{forged}", "\u{6587}\u{4ef6}".repeat(40));
+    let reason = format!(
+        "{:#}",
+        crate::commands::route::peer_error(&std::io::Error::other(wide.clone()))
+    );
+    for name in ["f0.txt".to_owned(), wide.clone()] {
+        let line = super::skip_line(&name, &reason);
+        let widest = crate::commands::through_serve::tests::columns_at_most(&line);
+        assert!(widest < 80, "{line}");
+        assert!(!line.contains(forged), "{line}");
+    }
+    // A sent file's name is cut so the line ends inside 80 columns.
+    let line = super::sent_line(&wide, 3);
+    assert!(
+        crate::commands::through_serve::tests::columns_at_most(&line) < 80,
+        "{line}"
+    );
+    assert!(!line.contains(forged), "{line}");
+    // A short reason stays beside its name.
+    assert_eq!(
+        super::skip_line("f0.txt", "connection lost"),
+        "skip f0.txt: connection lost"
     );
 }

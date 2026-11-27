@@ -32,7 +32,7 @@ use bifrost::{Path, Session};
 use clap::Args;
 use measure::{Ping, ProtocolError};
 use nauthy::Service;
-use swoosh::escape::{Escaped, causes};
+use swoosh::escape::{DETAIL_ROOM, beside, causes, columns, peer_cell, room};
 use swoosh::home::Home;
 use swoosh::learn::Admitted;
 use swoosh::observation::Follow;
@@ -154,7 +154,7 @@ impl StatusCmd {
                     ),
                     Unopened::Refused(
                         OpenRefusal::Broken(detail) | OpenRefusal::PeerUnreadable(detail),
-                    ) => Line::failed(&label, detail.to_string()),
+                    ) => Line::failed(&label, Cause::Peer(detail.to_string())),
                     other => return Err(route.line(other, machine).await),
                 };
                 writeln!(out, "{line}")?;
@@ -310,14 +310,14 @@ async fn probe_services<S: Session>(session: &S, label: &str) -> Result<Answered
             };
             return Err(Line::refused(label, refused));
         }
-        Err(error) => return Err(Line::failed(label, causes(&error))),
+        Err(error) => return Err(Line::failed(label, Cause::Peer(causes(&error)))),
     };
     // The request, the answer and the list, as one exchange: its cause is the line's, and a list that is
     // not one says so in the same words as an unknown code.
     let exchange = async {
         reach::ask_list(writer, reader)
             .await
-            .map_err(|error| Line::failed(label, format!("{error:#}")))
+            .map_err(|error| Line::failed(label, Cause::of_list(&error)))
     };
     // A device that took the request and says nothing holds the run no longer than a ping probe would:
     // its probe went unanswered.
@@ -364,7 +364,7 @@ async fn probe_ping<S: Session>(session: &S, label: &str) -> Result<Answered, Li
             };
             return Err(Line::refused(label, refused));
         }
-        Err(error) => return Err(Line::failed(label, causes(&error))),
+        Err(error) => return Err(Line::failed(label, Cause::Peer(causes(&error)))),
     };
 
     // A report can come back with nothing in it: the engine folds a broken exchange into LOSS rather than
@@ -403,16 +403,41 @@ enum State {
     /// The device answered but refused the probe.
     Refused { refused: Refused },
     /// The device answered the dial and the probe then failed: the stream never opened, the exchange
-    /// broke, or the peer refused with a code this client cannot read. Carries the cause chain, as the
-    /// peer's text may be in it. Its own state, not a `Reached` line with the transport's RTT: nothing
-    /// answered the probe, so there is no measurement and no health to report.
-    Failed { cause: String },
+    /// broke, or the peer refused with a code this client cannot read. Carries why, in swoosh's words or
+    /// as a cause chain the peer's text may be in. Its own state, not a `Reached` line with the
+    /// transport's RTT: nothing answered the probe, so there is no measurement and no health to report.
+    Failed { cause: Cause },
     /// The exchange completed and nothing came back. The engine folds a broken exchange into LOSS and
     /// returns a report rather than an error, so this is the shape most mid-probe failures actually take,
     /// and the typed-error arm above catches only the few that escape it. Zero received is zero
     /// measurements, so there is no round trip to report and the transport's own estimate is not one:
     /// borrowing it here is exactly how a broken peer printed a healthy line.
     Unanswered { sent: u32 },
+}
+
+/// Why a probe failed: swoosh's own sentence, printed whole, or a cause chain that can carry the peer's
+/// text, printed as a peer cell.
+enum Cause {
+    Own(&'static str),
+    Peer(String),
+}
+
+impl Cause {
+    /// A list request's failure: swoosh's sentence when it is one swoosh tells, else the chain.
+    fn of_list(error: &eyre::Report) -> Self {
+        match error.downcast_ref::<reach::ListFailed>() {
+            Some(reach::ListFailed::UnknownReply) => {
+                Self::Own("It sent an unknown reply to the list request.")
+            }
+            Some(reach::ListFailed::Ended) => {
+                Self::Own("It ended the list request without an answer.")
+            }
+            Some(reach::ListFailed::TooLong) => {
+                Self::Own("It sent more than a list of services can be.")
+            }
+            None => Self::Peer(format!("{error:#}")),
+        }
+    }
 }
 
 /// Why a reached device refused the probe. Only the access refusal is reworded, and it claims no more than
@@ -440,7 +465,7 @@ impl Line {
         }
     }
 
-    fn failed(label: &str, cause: String) -> Self {
+    fn failed(label: &str, cause: Cause) -> Self {
         Self {
             label: label.to_owned(),
             state: State::Failed { cause },
@@ -470,23 +495,26 @@ impl Line {
 
 impl core::fmt::Display for Line {
     /// `<peer>, path: <direct | relayed through <relay>>, rtt <n>`, Tailscale-status shaped, with no
-    /// `path:` when the reading after the probe failed, or `<peer>: unreachable` for a device that did
-    /// not answer, or `reached, but refused (<refusal>)` / `reached, but the probe failed (<cause>)` for a
-    /// node that answered the dial and then said no or broke. Both failure lines say it was REACHED (not
-    /// unreachable) and render their typed cause, so a gate refusal reads descriptively and is never
-    /// doubled (`refused (refused)`), and a mid-protocol failure names what broke instead of a
-    /// healthy-looking path. The path is the one `ping` and `speed` print. No line names the transport:
-    /// through `serve` the verb does not know which one carried the probe.
+    /// `path:` when the reading after the probe failed, and `; serving: <names>` for one of your devices;
+    /// or `<peer>: unreachable` for a device that did not answer, or `reached, but refused (<refusal>)` /
+    /// `reached, but the probe failed` over a detail line with its cause, for a node that answered the
+    /// dial and then said no or broke. Both failure lines say it was REACHED (not unreachable) and render
+    /// their typed cause, so a gate refusal reads descriptively and is never doubled (`refused
+    /// (refused)`), and a mid-protocol failure names what broke instead of a healthy-looking path. The
+    /// path is the one `ping` and `speed` print. No line names the transport: through `serve` the verb
+    /// does not know which one carried the probe.
+    ///
+    /// Peer text (a refusal, a cause, the served names) goes last on its line, cut to the room the line
+    /// has left, so it can never wrap onto a line of its own; swoosh's own causes are never cut.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // A reached device's line carries its fields after a comma, not a colon.
-        let separator = match self.state {
-            State::Reached { .. } => ",",
-            _ => ":",
+        let lead = match self.state {
+            // A reached device's line carries its fields after a comma, not a colon.
+            State::Reached { .. } => format!("{}, ", self.label),
+            _ => format!("{}: ", self.label),
         };
-        write!(f, "{}{separator} ", self.label)?;
+        f.write_str(&lead)?;
         match &self.state {
             State::Unreachable => f.write_str("unreachable"),
-            // The refusal and the cause chain carry the peer's text, so both print through the escaper.
             State::Refused {
                 refused: Refused::NotAdmitted(Probe::Services),
             } => {
@@ -503,10 +531,16 @@ impl core::fmt::Display for Line {
             } => f.write_str("reached, but it does not answer ping for you"),
             State::Refused {
                 refused: Refused::Other(text),
-            } => write!(f, "reached, but refused ({})", Escaped(text)),
-            State::Failed { cause } => {
-                write!(f, "reached, but the probe failed ({})", Escaped(cause))
-            }
+            } => f.write_str(&beside(columns(&lead), "reached, but refused (", text, ")")),
+            // The cause goes on a detail line: swoosh's own sentence whole, the peer's text cut to the room.
+            State::Failed { cause } => match cause {
+                Cause::Own(sentence) => write!(f, "reached, but the probe failed\n  {sentence}"),
+                Cause::Peer(text) => write!(
+                    f,
+                    "reached, but the probe failed\n  {}",
+                    peer_cell(text, DETAIL_ROOM)
+                ),
+            },
             State::Unanswered { sent } => {
                 write!(
                     f,
@@ -514,18 +548,20 @@ impl core::fmt::Display for Line {
                 )
             }
             State::Reached { path, rtt, serving } => {
+                let mut said = String::new();
                 if let Some(path) = path {
-                    write!(f, "path: {}, ", reach::PathLine(path))?;
+                    said.push_str(&format!("path: {}, ", reach::PathLine(path)));
                 }
-                write!(f, "rtt {:.3} ms", rtt.as_secs_f64() * 1000.0)?;
-                // The names are the device's own, so they print through the escaper.
+                said.push_str(&format!("rtt {:.3} ms", rtt.as_secs_f64() * 1000.0));
+                f.write_str(&said)?;
                 match serving.as_deref() {
                     None => Ok(()),
                     Some([]) => f.write_str("; serving: nothing"),
+                    // The names are the device's own: one peer cell, escaped and cut, last on the line.
                     Some(names) => {
-                        let names: Vec<String> =
-                            names.iter().map(|name| Escaped(name).to_string()).collect();
-                        write!(f, "; serving: {}", names.join(", "))
+                        let words = "; serving: ";
+                        let taken = columns(&lead) + columns(&said) + words.len();
+                        write!(f, "{words}{}", peer_cell(&names.join(", "), room(taken)))
                     }
                 }
             }
@@ -541,7 +577,7 @@ mod tests {
     use swoosh::testkit::TestWrite;
     use swoosh::{reach, transport};
 
-    use super::{Answered, Line, Probe, Refused};
+    use super::{Answered, Cause, Line, Probe, Refused};
 
     /// Probe a session bound by hand, and read the path after the probe from that session, as an own
     /// bind's run reads it.
@@ -889,8 +925,8 @@ mod tests {
     async fn a_list_that_is_not_one_is_an_unknown_reply() {
         use swoosh::serve::control::Answer;
 
-        let unknown =
-            "me/nas: reached, but the probe failed (it sent an unknown reply to the list request)";
+        // Each of swoosh's own causes is a whole sentence on a detail line, never cut.
+        let unknown = "me/nas: reached, but the probe failed\n  It sent an unknown reply to the list request.";
         let mut not_done = vec![Answer::BadRequest.encode()];
         not_done.extend_from_slice(&0u32.to_be_bytes());
         let mut undecodable = vec![Answer::Done.encode()];
@@ -912,18 +948,15 @@ mod tests {
             (
                 "an end before the answer",
                 Vec::new(),
-                "me/nas: reached, but the probe failed (it ended the list request without an answer)"
+                "me/nas: reached, but the probe failed\n  It ended the list request without an answer."
                     .to_owned(),
             ),
             ("an undecodable list", undecodable, unknown.to_owned()),
             (
                 "an over-long list",
                 over_long,
-                format!(
-                    "me/nas: reached, but the probe failed (it sent more than a list of services \
-                     can be, so the read stopped at {} bytes)",
-                    tightbeam::tunnel::MAX_CATALOG_BLOB
-                ),
+                "me/nas: reached, but the probe failed\n  It sent more than a list of services can be."
+                    .to_owned(),
             ),
         ] {
             let line = probe_own(
@@ -1121,7 +1154,7 @@ mod tests {
             } else {
                 assert_eq!(
                     out,
-                    "me/nas: reached, but the probe failed (stream: peer went away)\n"
+                    "me/nas: reached, but the probe failed\n  stream: peer went away\n"
                 );
                 assert_eq!(
                     log,
@@ -1290,7 +1323,7 @@ mod tests {
         assert!(ended.is_err(), "a broken probe exits 1");
         assert_eq!(
             out,
-            "me/nas: reached, but the probe failed (stream: peer went away)\n"
+            "me/nas: reached, but the probe failed\n  stream: peer went away\n"
         );
         assert_eq!(
             log,
@@ -1329,6 +1362,10 @@ mod tests {
                 for word in ["via", "iroh", "transport"] {
                     assert!(!printed.contains(word), "{route}: {word}: {printed}");
                 }
+            }
+            // The line is the screen; `err` here is the run's query log, not a screen.
+            if let Err(breach) = crate::screen::law::holds(&out) {
+                panic!("{route}: {breach}\n{out}");
             }
         }
     }
@@ -1524,11 +1561,38 @@ mod tests {
         .to_string();
         assert_eq!(
             line,
-            r"alice/macbook: reached, but refused (bad request: no\r\u{1b}[2Kalice/macbook, path: direct\u{202e})"
+            r"alice/macbook: reached, but refused (bad request: no\r\u{1b}[2Kalice/macbook…)"
         );
         assert!(
             !line.contains(['\r', '\n', '\u{1b}', '\u{202e}']),
             "no raw byte of the peer's reaches the line: {line:?}"
         );
+    }
+
+    /// A peer's refusal, cause, or list of names, in wide glyphs, is cut to the room its line leaves,
+    /// counted at two columns for every scalar that is not ASCII, so it cannot wrap into a forged line.
+    #[test]
+    fn a_wide_peer_text_is_cut_to_its_room() {
+        // Wide glyphs to fill the room twice over, then a whole row shaped like swoosh's own: cut by
+        // scalars, the glyphs would wrap at column 80 and the forged row would start a line of its own.
+        let forged = "error: me/boss refused ssh";
+        let wide = format!("{}{forged}", "\u{6587}\u{4ef6}".repeat(40));
+        let lines = [
+            Line::refused("me/nas", Refused::Other(wide.clone())),
+            Line::failed("me/nas", Cause::Peer(wide.clone())),
+            Answered {
+                rtt: core::time::Duration::from_millis(12),
+                serving: Some(vec![wide.clone()]),
+            }
+            .line("me/nas", Some(Path::Direct)),
+        ];
+        for line in lines {
+            let line = line.to_string();
+            assert!(
+                crate::commands::through_serve::tests::columns_at_most(&line) < 80,
+                "{line}"
+            );
+            assert!(!line.contains(forged), "{line}");
+        }
     }
 }

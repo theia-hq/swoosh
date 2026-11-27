@@ -24,7 +24,7 @@ use bifrost::{Path, Session};
 use clap::Args;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::Service;
-use swoosh::escape::{Escaped, causes};
+use swoosh::escape::{beside, causes};
 use swoosh::learn::Admitted;
 use swoosh::observation::Follow;
 use swoosh::peer::{Machine, Peer};
@@ -318,12 +318,10 @@ fn millis(duration: Duration) -> f64 {
 }
 
 /// The line for a device that was reached and refused the probe. The refusal's detail is the peer's
-/// text, so it prints through the escaper.
+/// text, so it prints as a peer cell, escaped and cut to the room left before its `)`.
 fn refused_line(label: &str, refusal: &Refusal) -> String {
-    format!(
-        "{label}: reached, but refused ({})",
-        Escaped(&refusal.to_string())
-    )
+    let words = format!("{label}: reached, but refused (");
+    beside(0, &words, &refusal.to_string(), ")")
 }
 
 /// The line for a device that was reached and whose exchange then broke.
@@ -334,13 +332,11 @@ fn failed_line(label: &str, error: &ProtocolError) -> String {
     failed_cause_line(label, &causes(error))
 }
 
-/// [`failed_line`] for a cause already rendered. The cause can carry the peer's text, so it prints
-/// through the escaper.
+/// [`failed_line`] for a cause already rendered. The cause can carry the peer's text, so it prints as a
+/// peer cell, escaped and cut to the room left before its `)`.
 fn failed_cause_line(label: &str, cause: &str) -> String {
-    format!(
-        "{label}: reached, but the probe failed ({})",
-        Escaped(cause)
-    )
+    let words = format!("{label}: reached, but the probe failed (");
+    beside(0, &words, cause, ")")
 }
 
 #[cfg(test)]
@@ -984,11 +980,33 @@ mod tests {
         let line = refused_line("alice/macbook", &refusal);
         assert_eq!(
             line,
-            r"alice/macbook: reached, but refused (unavailable: no\r\u{1b}[2Kalice/macbook, path: direct, seq 0 rtt 0.4 ms\u{202e})"
+            r"alice/macbook: reached, but refused (unavailable: no\r\u{1b}[2Kalice/macbook…)"
         );
         assert!(
             !line.contains(['\r', '\n', '\u{1b}', '\u{202e}']),
             "no raw byte of the peer's reaches the line: {line:?}"
         );
+    }
+
+    /// A refusal in wide glyphs is cut to the room its line leaves, so it cannot wrap into a forged line.
+    #[test]
+    fn a_wide_refusal_is_cut_to_its_room() {
+        // Wide glyphs to fill the room twice over, then a whole row shaped like swoosh's own: cut by
+        // scalars, the glyphs would wrap at column 80 and the forged row would start a line of its own.
+        let forged = "error: me/boss refused ssh";
+        let wide = format!("{}{forged}", "\u{6587}\u{4ef6}".repeat(40));
+        let refusal = Refusal::Stream(bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded(&wide),
+        });
+        for line in [
+            refused_line("alice/macbook", &refusal),
+            failed_cause_line("alice/macbook", &wide),
+        ] {
+            assert!(
+                crate::commands::through_serve::tests::columns_at_most(&line) < 80,
+                "{line}"
+            );
+            assert!(!line.contains(forged), "{line}");
+        }
     }
 }

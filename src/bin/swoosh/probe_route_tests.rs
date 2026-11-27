@@ -252,13 +252,13 @@ fn one_open_table_for_the_probe_verbs() {
                         bifrost::RefusalDetail::bounded("reset\r"),
                     )))
                 },
-                "me/nas: reached, but the probe failed (reset\\r)\n",
+                "me/nas: reached, but the probe failed\n  reset\\r\n",
                 "me/nas: reached, but the probe failed",
             ),
             (
                 &["status", "me/nas"],
                 || Some(Unopened::Refused(OpenRefusal::PeerUnreadable(detail()))),
-                "me/nas: reached, but the probe failed (busy)\n",
+                "me/nas: reached, but the probe failed\n  busy\n",
                 "me/nas: reached, but the probe failed",
             ),
             (

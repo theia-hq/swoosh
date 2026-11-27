@@ -51,9 +51,10 @@ fn a_hostile_refusal_prints_escaped() {
     });
     let refused_the_method = method(MethodRefusal::Busy, hostile);
     for (refusal, line) in [
+        // Cut to the room the refusal's head leaves, never split inside an escape.
         (
             dial,
-            format!("alice: reached, but refused: unavailable: {escaped}"),
+            r"alice: reached, but refused: unavailable: no\r\u{1b}[2Kalice: 900 MiB/…".to_owned(),
         ),
         (refused_the_method, format!("alice is busy: {escaped}")),
     ] {
@@ -537,4 +538,25 @@ async fn speed_reads_its_own_path() {
     assert_eq!(lines.first(), Some(&"speed test to me/nas (down)"), "{out}");
     assert!(lines.contains(&"path: direct"), "{out}");
     assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+}
+
+/// A refusal in wide glyphs is cut to the room its `error:` line leaves, so it cannot wrap into a forged
+/// line, on the dial's refusal and on the method's.
+#[test]
+fn a_wide_refusal_is_cut_to_its_room() {
+    // Wide glyphs to fill the room twice over, then a whole row shaped like swoosh's own: cut by
+    // scalars, the glyphs would wrap at column 80 and the forged row would start a line of its own.
+    let forged = "error: me/boss refused ssh";
+    let wide = format!("{}{forged}", "\u{6587}\u{4ef6}".repeat(40));
+    let dial = Refusal::Stream(bifrost::Refusal::Unavailable {
+        detail: RefusalDetail::bounded(&wide),
+    });
+    for refusal in [dial, method(MethodRefusal::Busy, &wide)] {
+        let line = format!("error: {}", refusal_line("alice", &refusal));
+        assert!(
+            crate::commands::through_serve::tests::columns_at_most(&line) < 80,
+            "{line}"
+        );
+        assert!(!line.contains(forged), "{line}");
+    }
 }

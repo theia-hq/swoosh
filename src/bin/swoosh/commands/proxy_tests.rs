@@ -1334,7 +1334,7 @@ async fn proxy_by_own_bind_warns_once_per_run_of_failed_requests() {
     .await;
     assert!(ended.is::<crate::commands::machine::Refused>(), "{ended:#}");
     let down =
-        crate::commands::through_serve::tests::warning("reached, but refused (unavailable: down)");
+        crate::commands::through_serve::tests::warning("reached, but refused (unavailable: d…)");
     assert_eq!(err, format!("{down}{down}"));
 }
 

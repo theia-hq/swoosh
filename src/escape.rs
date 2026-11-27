@@ -3,7 +3,8 @@
 //! [`Escaped`] and [`EscapedPath`] cap output and mark a cut with `...`.
 //! [`EscapedComplete`] uses the same escapes without a length cap; callers must
 //! bound its input independently. Both forms escape controls and characters that
-//! hide or reorder text.
+//! hide or reorder text. [`peer_cell`] escapes the same way and cuts to the room a
+//! line has left, so peer text beside swoosh's words never wraps onto a line of its own.
 
 use core::fmt;
 use std::path::Path;
@@ -75,14 +76,113 @@ impl Escaped<'_> {
                 }
                 *left -= width;
             }
-            if blank {
-                write!(f, "{}", ch.escape_unicode())?;
-            } else {
-                write!(f, "{}", ch.escape_debug())?;
-            }
+            escape(ch, f)?;
         }
         Ok(())
     }
+}
+
+/// Write one scalar as a line shows it: a blank letter as its code point, anything else as
+/// `char::escape_debug` writes it, which leaves printable text alone.
+fn escape(ch: char, out: &mut impl fmt::Write) -> fmt::Result {
+    if BLANK_LETTERS.contains(&ch) {
+        write!(out, "{}", ch.escape_unicode())
+    } else {
+        write!(out, "{}", ch.escape_debug())
+    }
+}
+
+/// The most columns `text` can fill in any terminal, the bound [`peer_cell`] cuts by: one per ASCII
+/// scalar, two per any other.
+pub fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|scalar| if scalar.is_ascii() { 1 } else { 2 })
+        .sum()
+}
+
+/// The mark a cut [`peer_cell`] ends in. It is not ASCII, so it costs two columns like any other such
+/// scalar.
+pub const CELL_CUT: char = '…';
+
+/// Peer text as it sits on a line beside swoosh's own words: escaped as [`Escaped`] escapes it, then cut
+/// so it fills at most `budget` terminal columns, marked with [`CELL_CUT`].
+///
+/// The count is an upper bound, never a width table: an ASCII scalar costs one column and every other
+/// scalar costs two, the most one fills in any terminal. So a cell of wide glyphs (CJK, full-width
+/// letters) can never fill more room than it was given, wrap at the screen's edge, and start a forged
+/// line with the text after it. A zero-width scalar costs two as well, so a flood of them is cut like any
+/// other text. The price is that a name in a wide script shows fewer glyphs than a table would allow.
+/// An escape is kept whole or cut whole, never split. A budget under two holds only the mark, which is
+/// swoosh's own glyph: a cut cell is at least the mark.
+///
+/// A cut is logged at debug with the whole text, so `RUST_LOG=debug` shows what the line left out.
+pub fn peer_cell(text: &str, budget: usize) -> String {
+    let (cell, cut) = cut(text, budget);
+    if cut {
+        tracing::debug!(text = %EscapedComplete(text), "peer text was cut to the room its line leaves");
+    }
+    cell
+}
+
+/// [`peer_cell`]'s cell, and whether it was cut.
+fn cut(text: &str, budget: usize) -> (String, bool) {
+    let mut cell = String::new();
+    let mut used = 0;
+    // Where the cell could end with the cut mark still inside the budget, and its length then.
+    let mut fits_cut = 0;
+    let mut piece = String::new();
+    for ch in text.chars() {
+        piece.clear();
+        // Writing to a `String` cannot fail.
+        let _ = escape(ch, &mut piece);
+        let next = used + columns(&piece);
+        if next > budget {
+            cell.truncate(fits_cut);
+            cell.push(CELL_CUT);
+            return (cell, true);
+        }
+        cell.push_str(&piece);
+        used = next;
+        if used + 2 <= budget {
+            fits_cut = cell.len();
+        }
+    }
+    (cell, false)
+}
+
+/// The widest line swoosh prints, in columns.
+pub const LINE_WIDTH: usize = 80;
+
+/// The least room peer text keeps beside swoosh's words; with less, it takes a detail line of its own,
+/// so a true word the person can read is never shrunk to a mark.
+pub const PEER_FLOOR: usize = 16;
+
+/// The room peer text has on a detail line of its own: the line, less its indent of two and the last
+/// column.
+pub const DETAIL_ROOM: usize = LINE_WIDTH - 2 - 1;
+
+/// The columns left for peer text on a line whose own words take `taken` columns: what a line holds, less
+/// one, so a line that ends in peer text cut to this room never wraps.
+pub fn room(taken: usize) -> usize {
+    LINE_WIDTH.saturating_sub(taken + 1)
+}
+
+/// The columns left for peer text at the end of a refusal's head, after `error: ` and `words`.
+pub fn head_room(words: &str) -> usize {
+    room("error: ".len() + columns(words))
+}
+
+/// Peer `text` placed after swoosh's `words` on a line whose start takes `taken` columns, closed by
+/// `close` (a `)`, or nothing): on the line, cut to its room, while that room is at least [`PEER_FLOOR`];
+/// else on a detail line of its own under `words`, indented two and cut to [`DETAIL_ROOM`], with `words`
+/// losing a trailing space or opening parenthesis.
+pub fn beside(taken: usize, words: &str, text: &str, close: &str) -> String {
+    let room = room(taken + columns(words) + columns(close));
+    if room >= PEER_FLOOR {
+        return format!("{words}{}{close}", peer_cell(text, room));
+    }
+    let words = words.trim_end_matches([' ', '(']);
+    format!("{words}\n  {}", peer_cell(text, DETAIL_ROOM))
 }
 
 /// A path as it may appear on a line: [`Escaped`] over its lossy text. A home's directory names, and the
@@ -113,9 +213,10 @@ pub fn causes(error: &dyn core::error::Error) -> String {
 /// A report as `main` prints it, its whole chain flattened into one escaped message. A connect's cause
 /// carries the reason the peer gave for closing and a gate's refusal carries the peer's own detail, and
 /// iroh nests that text several causes deep, so the whole chain is the only boundary: it is escaped here,
-/// where it leaves the reach, with its words as they were.
+/// where it leaves the reach, with its words as they were, and cut to the room an `error:` line leaves.
+/// The chain runs swoosh's words first and the peer's deepest, so a cut takes the peer's text first.
 pub fn escaped_report(error: eyre::Report) -> eyre::Report {
-    eyre::eyre!("{}", Escaped(&format!("{error:#}")))
+    eyre::eyre!("{}", peer_cell(&format!("{error:#}"), head_room("")))
 }
 
 #[cfg(test)]

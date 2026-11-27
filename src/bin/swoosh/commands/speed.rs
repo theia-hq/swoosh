@@ -26,7 +26,7 @@ use measure::{
     Throughput,
 };
 use nauthy::Service;
-use swoosh::escape::{Escaped, causes};
+use swoosh::escape::{beside, causes, head_room, peer_cell};
 use swoosh::learn::Admitted;
 use swoosh::observation::{Follow, Observed};
 use swoosh::peer::{Machine, Peer};
@@ -324,28 +324,31 @@ fn mib(bytes: u64) -> String {
 /// detail prose: `WrongMethod` names the method the peer does not serve; `RateLimited` and `Busy` name the
 /// bound that stopped the run, so a capped run never reads as a missing service (the render table in
 /// `notes/design/typed-refusal-and-errors.md`). A new code breaks this match at compile time. A refusal
-/// of the dial itself says it was reached and refused. The detail is the peer's text, so it prints
-/// through the escaper.
+/// of the dial itself says it was reached and refused. The detail is the peer's text, so it prints last
+/// as a peer cell, escaped and cut to the room the refusal's head leaves.
 fn refusal_line(label: &str, refusal: &Refusal) -> String {
-    let Refusal::Method { code, detail } = refusal else {
-        return format!(
-            "{label}: reached, but refused: {}",
-            Escaped(&refusal.to_string())
-        );
+    let (words, detail) = match refusal {
+        Refusal::Method { code, detail } => (
+            match code {
+                MethodRefusal::WrongMethod => format!("{label} does not serve `speed`: "),
+                MethodRefusal::RateLimited => format!("{label} is rate limited: "),
+                MethodRefusal::Busy => format!("{label} is busy: "),
+            },
+            detail.as_str().to_owned(),
+        ),
+        _ => (
+            format!("{label}: reached, but refused: "),
+            refusal.to_string(),
+        ),
     };
-    let detail = Escaped(detail.as_str());
-    match code {
-        MethodRefusal::WrongMethod => format!("{label} does not serve `speed`: {detail}"),
-        MethodRefusal::RateLimited => format!("{label} is rate limited: {detail}"),
-        MethodRefusal::Busy => format!("{label} is busy: {detail}"),
-    }
+    beside("error: ".len(), &words, &detail, "")
 }
 
 /// The line for a run that was reached and then broke: the error's cause chain, `outer: inner`, as a
 /// report would print it. A cause can carry the peer's text (the reason it gave for closing), so the
-/// chain prints through the escaper.
+/// chain is escaped and cut to the room its `error:` line leaves.
 fn failed_line(error: &ProtocolError) -> String {
-    Escaped(&causes(error)).to_string()
+    peer_cell(&causes(error), head_room(""))
 }
 
 #[cfg(test)]

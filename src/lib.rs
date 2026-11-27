@@ -38,6 +38,7 @@ pub mod roster;
 pub mod secret;
 pub mod serve;
 pub mod serve_toml;
+pub mod size;
 pub mod standing;
 pub mod streams;
 pub mod sync;
