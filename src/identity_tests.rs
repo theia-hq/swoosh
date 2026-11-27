@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use keystore::{Method, Stored};
 
+use super::{Methods, Root};
 use crate::home::Home;
 use crate::passphrase::Scripted;
 use crate::testkit::Counting;
@@ -282,7 +283,16 @@ pub(super) async fn sealed(home: &Home, passphrase: &'static str) -> bifrost::No
     )
     .await
     .expect("seal a fresh key");
-    assert_eq!(locked, super::Locked::Set { first: true });
+    assert!(
+        matches!(
+            locked,
+            super::Locked::Made {
+                now: Methods::Passphrase,
+                ..
+            }
+        ),
+        "{locked:?}"
+    );
     crate::testkit::stored_key(&keystore::KeyFile::new(home.key()))
 }
 
@@ -512,10 +522,7 @@ async fn lock_touch_id_on_a_passphrase_key_goes_beside_it() {
     sealed(&home, PASSPHRASE).await;
     let mut prompt = proving([PASSPHRASE]);
     let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
-    assert_eq!(
-        locked,
-        super::Locked::TouchIdBesidePassphrase { root_kept: false }
-    );
+    assert_eq!(added_as(locked), Some((Methods::TouchId, Root::NotKept)));
     assert_eq!(prompt.events(), 1, "the passphrase that opens it");
     let [touch] = prompt.touches() else {
         panic!("one touch: {:?}", prompt.touches());
@@ -541,10 +548,7 @@ async fn lock_touch_id_beside_a_kept_root_keeps_the_passphrase() {
     root_with_touch_id(&home);
     let mut prompt = proving([PASSPHRASE]);
     let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
-    assert_eq!(
-        locked,
-        super::Locked::TouchIdBesidePassphrase { root_kept: true }
-    );
+    assert_eq!(added_as(locked), Some((Methods::TouchId, Root::Kept)));
     assert!(matches!(
         prompt.touches()[0].act,
         TouchAct::BesidePassphrase { .. }
@@ -593,7 +597,10 @@ async fn a_declined_touch_after_sealing_says_the_passphrase_stays() {
         .at_this_mac(keystore::Health::Live)
         .touching([Touched::Declined]);
     let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
-    assert_eq!(format!("{refused:#}"), super::SEALED_NOT_TOUCHED);
+    assert_eq!(
+        format!("{refused:#}"),
+        "Touch ID was cancelled\n  Added a passphrase to this machine's key, which now opens with the passphrase."
+    );
     assert_eq!(locks(&home), [Method::Passphrase]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -639,8 +646,8 @@ async fn touch_id_on_touch_id_alone_beside_a_root_changes_nothing() {
     placed(&home, &DEVICE_TOUCH_ID_ALONE);
     let before = std::fs::read(home.key()).unwrap();
     for (root_kept, answer) in [
-        (false, super::Locked::HasTouchId),
-        (true, super::Locked::NeedsPassphrase),
+        (false, super::Locked::Unchanged(super::Why::TouchIdAlone)),
+        (true, super::Locked::Unchanged(super::Why::NeedsPassphrase)),
     ] {
         if root_kept {
             std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
@@ -713,10 +720,7 @@ async fn lock_passphrase_on_a_touch_id_only_key_beside_a_root_goes_beside_it() {
     let locked = super::lock(&home, Method::Passphrase, false, &mut prompt)
         .await
         .unwrap();
-    assert_eq!(
-        locked,
-        super::Locked::PassphraseBesideTouchId { root_kept: true }
-    );
+    assert_eq!(added_as(locked), Some((Methods::Passphrase, Root::Kept)));
     assert_eq!(
         prompt.touches()[0].reason,
         crate::touch::SET_PASSPHRASE_ON_MACHINE_KEY
@@ -734,7 +738,16 @@ async fn lock_touch_id_remove_on_a_touch_id_only_key_names_the_removal() {
     let locked = super::lock(&home, Method::TouchId, true, &mut prompt)
         .await
         .unwrap();
-    assert_eq!(locked, super::Locked::TouchIdRemoved { plain: true });
+    assert!(
+        matches!(
+            locked,
+            super::Locked::Removed {
+                method: Method::TouchId,
+                ..
+            }
+        ),
+        "{locked:?}"
+    );
     assert!(matches!(prompt.touches()[0].act, TouchAct::RemoveTouchId));
     assert_eq!(
         prompt.touches()[0].reason,
@@ -756,8 +769,8 @@ async fn a_failed_touch_after_sealing_says_the_passphrase_stays() {
     let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
     assert_eq!(
         format!("{refused:#}"),
-        "touch-id did not open this machine's key: the enclave refused\n\
-         the key is locked with the passphrase you chose."
+        "Touch ID failed\n  Added a passphrase to this machine's key, which now opens with the passphrase.\n  \
+         the enclave refused"
     );
     assert_eq!(locks(&home), [Method::Passphrase]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -775,10 +788,7 @@ async fn adding_a_lock_never_drops_one() {
     sealed(&home, PASSPHRASE).await;
     let mut prompt = proving([PASSPHRASE]);
     let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
-    assert_eq!(
-        locked,
-        super::Locked::TouchIdBesidePassphrase { root_kept: false }
-    );
+    assert_eq!(added_as(locked), Some((Methods::TouchId, Root::NotKept)));
     assert!(matches!(
         prompt.touches()[0].act,
         TouchAct::BesidePassphrase { .. }
@@ -794,10 +804,7 @@ async fn adding_a_lock_never_drops_one() {
     let locked = super::lock(&home, Method::Passphrase, false, &mut prompt)
         .await
         .unwrap();
-    assert_eq!(
-        locked,
-        super::Locked::PassphraseBesideTouchId { root_kept: false }
-    );
+    assert_eq!(added_as(locked), Some((Methods::Passphrase, Root::NotKept)));
     assert!(matches!(
         prompt.touches()[0].act,
         TouchAct::AddPassphrase { .. }
@@ -836,7 +843,13 @@ async fn lock_touch_id_remove_leaves_the_passphrase() {
     let locked = super::lock(&home, Method::TouchId, true, &mut prompt)
         .await
         .unwrap();
-    assert_eq!(locked, super::Locked::TouchIdRemoved { plain: false });
+    assert_eq!(
+        locked,
+        super::Locked::Removed {
+            method: Method::TouchId,
+            now: super::Now::Read(super::Locks::Passphrase)
+        }
+    );
     assert_eq!(locks(&home), [Method::Passphrase]);
     assert!(prompt.touches().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
@@ -851,7 +864,10 @@ async fn lock_touch_id_remove_with_none_changes_nothing() {
     let locked = super::lock(&home, Method::TouchId, true, &mut prompt)
         .await
         .unwrap();
-    assert_eq!(locked, super::Locked::NoTouchId);
+    assert_eq!(
+        locked,
+        super::Locked::Unchanged(super::Why::NoSuchLock(Method::TouchId))
+    );
     assert_eq!(prompt.events(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -918,7 +934,13 @@ async fn setting_a_dead_touch_id_again_says_to_check_touch_id_first() {
         .at_this_mac(keystore::Health::Dead)
         .touching([Touched::Opened(None)]);
     let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
-    assert_eq!(locked, super::Locked::TouchIdChanged);
+    assert_eq!(
+        locked,
+        super::Locked::Changed {
+            method: Method::TouchId,
+            now: super::Now::Read(super::Locks::Both(Some(keystore::Health::Dead))),
+        }
+    );
     assert_eq!(
         prompt.warned(),
         [
@@ -1159,13 +1181,20 @@ async fn touch_id_beside_a_passphrase_answers_by_the_file_under_the_lock() {
             "lost",
             DEVICE_PASSPHRASE_AND_TOUCH_ID.to_vec(),
             passphrase_alone.clone(),
-            super::Locked::TouchIdBesidePassphrase { root_kept: false },
+            super::Locked::Added {
+                method: Methods::TouchId,
+                now: super::Now::Read(super::Locks::Passphrase),
+                root: Root::NotKept,
+            },
         ),
         (
             "gained",
             passphrase_alone.clone(),
             DEVICE_PASSPHRASE_AND_TOUCH_ID.to_vec(),
-            super::Locked::TouchIdChanged,
+            super::Locked::Changed {
+                method: Method::TouchId,
+                now: super::Now::Read(super::Locks::Both(Some(keystore::Health::Live))),
+            },
         ),
     ] {
         let (home, dir) = home(&format!("under-lock-{tag}"));
@@ -1196,17 +1225,12 @@ async fn lock_touch_id_with(
 #[tokio::test]
 async fn a_root_that_arrives_during_the_prompts_is_read_under_the_lock() {
     for (tag, key, method, answer) in [
-        (
-            "p-plus-t",
-            None,
-            Method::TouchId,
-            super::Locked::TouchIdBesidePassphrase { root_kept: true },
-        ),
+        ("p-plus-t", None, Method::TouchId, Methods::TouchId),
         (
             "t-plus-p",
             Some(&DEVICE_TOUCH_ID_ALONE[..]),
             Method::Passphrase,
-            super::Locked::PassphraseBesideTouchId { root_kept: true },
+            Methods::Passphrase,
         ),
     ] {
         let (home, dir) = home(&format!("root-arrives-{tag}"));
@@ -1226,7 +1250,585 @@ async fn a_root_that_arrives_during_the_prompts_is_read_under_the_lock() {
         let locked = super::lock(&home, method, false, &mut prompt)
             .await
             .unwrap();
-        assert_eq!(locked, answer, "{tag}");
+        assert_eq!(added_as(locked), Some((answer, Root::Kept)), "{tag}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// The locks an add put on, and whether a root is kept, where `locked` is an add.
+fn added_as(locked: super::Locked) -> Option<(Methods, Root)> {
+    match locked {
+        super::Locked::Added { method, root, .. } => Some((method, root)),
+        _ => None,
+    }
+}
+
+/// `bytes` at `path`, owner-only, as a key store write would leave them.
+fn put(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::write(path, bytes).expect("write the key file");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod 600");
+}
+
+/// The key a touch's act is on: the one it writes, or the one the file's header names now.
+fn acted_on(touch: &crate::touch::Touch) -> keystore::PublicKey {
+    match &touch.act {
+        TouchAct::Write(secret) => secret.public_key(),
+        _ => match touch.file.load().expect("load").expect("a key") {
+            Stored::Plain(secret) => secret.public_key(),
+            Stored::Locked(locked) => locked.public_key(),
+        },
+    }
+}
+
+/// A stand-in for what the key store's act leaves on disk, since a scripted touch writes nothing: the file
+/// `land` makes from the key the act is on.
+fn landing(
+    land: impl Fn(&keystore::PublicKey) -> Vec<u8> + 'static,
+) -> impl FnMut(&crate::touch::Touch) + 'static {
+    move |touch| put(touch.file.path(), &land(&acted_on(touch)))
+}
+
+/// `fixture`'s locks under the key the act is on.
+fn landing_as(fixture: &'static [u8]) -> impl FnMut(&crate::touch::Touch) + 'static {
+    landing(move |public| crate::testkit::touch_id::claiming(fixture, public))
+}
+
+/// What `home`'s key file holds, as the result reads it, Touch ID reading live.
+fn now_in(home: &Home) -> super::Locks {
+    let stored = keystore::KeyFile::new(home.key())
+        .load()
+        .expect("load")
+        .expect("a key");
+    super::Locks::of(
+        &stored,
+        &Counting::new([]).at_this_mac(keystore::Health::Live),
+    )
+}
+
+/// The fixtures' key, plain: what taking the last lock off leaves, which names no key in a header.
+const PLAIN: [u8; 32] = [0x11; 32];
+
+/// The state a cell starts from.
+#[derive(Clone, Copy, Debug)]
+enum Start {
+    None,
+    Plain,
+    P,
+    T,
+    Pt,
+}
+
+/// Every start a key can be in, by every act `lock` takes, each a scripted run: every one gives its own outcome, and every lock
+/// set in it is the file's header read after the act. A touch that lands leaves the file its act would, so
+/// the set read back is the act's. Taking the passphrase off both locks is not here: the key store refuses
+/// to leave a key under a Touch ID lock that opens on no enclave, and the fixtures' opens on none, so that
+/// result's bytes are the screen's row alone. Red when two acts share an outcome, or a set is not the file's.
+#[tokio::test]
+async fn each_cell_has_its_own_outcome() {
+    use keystore::Health::Live;
+
+    use super::{Locked, Locks, Now, Why};
+
+    let pt = &DEVICE_PASSPHRASE_AND_TOUCH_ID[..];
+    let t = &DEVICE_TOUCH_ID_ALONE[..];
+    let made = |now| {
+        move |key| Locked::Made {
+            key,
+            now,
+            failed: None,
+        }
+    };
+    let fixed = |locked: Locked| move |_| locked.clone();
+    type Cell = (
+        &'static str,
+        Start,
+        bool,
+        Method,
+        bool,
+        Option<&'static [u8]>,
+        &'static [&'static str],
+        Box<dyn Fn(bifrost::NodeId) -> Locked>,
+    );
+    // One cell a line: tag, start, root kept, method, remove, what a landed touch leaves, the answers, and the
+    // outcome. The `unlanded` cells leave the file as it was, so a set taken from the ask is caught.
+    #[rustfmt::skip]
+    let cells: Vec<Cell> = vec![
+        ("none-p", Start::None, false, Method::Passphrase, false, None, &[LONG], Box::new(made(Methods::Passphrase))),
+        ("none-t", Start::None, false, Method::TouchId, false, Some(t), &[], Box::new(made(Methods::TouchId))),
+        ("none-root-t", Start::None, true, Method::TouchId, false, Some(pt), &[LONG], Box::new(made(Methods::Both))),
+        ("plain-p", Start::Plain, false, Method::Passphrase, false, None, &[LONG], Box::new(fixed(Locked::Added { method: Methods::Passphrase, now: super::Now::Read(super::Locks::Passphrase), root: Root::NotKept }))),
+        ("plain-t", Start::Plain, false, Method::TouchId, false, Some(t), &[], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::TouchId(Some(Live))), root: Root::NotKept }))),
+        ("plain-root-t", Start::Plain, true, Method::TouchId, false, Some(pt), &[LONG], Box::new(fixed(Locked::Added { method: Methods::Both, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::Kept }))),
+        ("p-p", Start::P, false, Method::Passphrase, false, None, &[PASSPHRASE, LONG], Box::new(fixed(Locked::Changed { method: Method::Passphrase, now: super::Now::Read(super::Locks::Passphrase) }))),
+        ("p-t", Start::P, false, Method::TouchId, false, Some(pt), &[PASSPHRASE], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::NotKept }))),
+        ("p-p-remove", Start::P, false, Method::Passphrase, true, None, &[PASSPHRASE], Box::new(fixed(Locked::Removed { method: Method::Passphrase, now: super::Now::Read(super::Locks::None) }))),
+        ("p-t-unlanded", Start::P, false, Method::TouchId, false, None, &[PASSPHRASE], Box::new(fixed(Locked::Added { method: Methods::TouchId, now: super::Now::Read(super::Locks::Passphrase), root: Root::NotKept }))),
+        ("p-t-remove", Start::P, false, Method::TouchId, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoSuchLock(Method::TouchId))))),
+        ("t-p", Start::T, false, Method::Passphrase, false, Some(pt), &[LONG], Box::new(fixed(Locked::Added { method: Methods::Passphrase, now: super::Now::Read(super::Locks::Both(Some(Live))), root: Root::NotKept }))),
+        ("t-t", Start::T, false, Method::TouchId, false, None, &[], Box::new(fixed(Locked::Unchanged(Why::TouchIdAlone)))),
+        ("t-root-t", Start::T, true, Method::TouchId, false, None, &[], Box::new(fixed(Locked::Unchanged(Why::NeedsPassphrase)))),
+        ("t-p-remove", Start::T, false, Method::Passphrase, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoSuchLock(Method::Passphrase))))),
+        ("t-t-remove", Start::T, false, Method::TouchId, true, Some(&PLAIN), &[], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::None) }))),
+        ("t-t-remove-unlanded", Start::T, false, Method::TouchId, true, None, &[], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::TouchId(Some(Live))) }))),
+        ("pt-p", Start::Pt, false, Method::Passphrase, false, None, &[PASSPHRASE, LONG], Box::new(fixed(Locked::Changed { method: Method::Passphrase, now: Now::Read(Locks::Both(Some(Live))) }))),
+        ("pt-t", Start::Pt, false, Method::TouchId, false, Some(pt), &[PASSPHRASE], Box::new(fixed(Locked::Changed { method: Method::TouchId, now: Now::Read(Locks::Both(Some(Live))) }))),
+        ("pt-t-remove", Start::Pt, false, Method::TouchId, true, None, &[PASSPHRASE], Box::new(fixed(Locked::Removed { method: Method::TouchId, now: super::Now::Read(super::Locks::Passphrase) }))),
+        ("plain-p-remove", Start::Plain, false, Method::Passphrase, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoLock)))),
+        ("none-p-remove", Start::None, false, Method::Passphrase, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoKey)))),
+        ("none-t-remove", Start::None, false, Method::TouchId, true, None, &[], Box::new(fixed(Locked::Unchanged(Why::NoKey)))),
+    ];
+    let mut seen = Vec::new();
+    for (tag, start, root_kept, method, remove, lands, answers, answer) in cells {
+        let (home, dir) = home(&format!("cell-{tag}"));
+        match start {
+            Start::None => {}
+            Start::Plain => {
+                super::inspect(&home).expect("a plain key");
+            }
+            Start::P => {
+                sealed(&home, PASSPHRASE).await;
+            }
+            Start::T => placed(&home, t),
+            Start::Pt => placed(&home, pt),
+        }
+        if root_kept {
+            std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+        }
+        let mut prompt = Counting::new(answers.iter().copied())
+            .at_this_mac(Live)
+            .touching([Touched::Opened(None)]);
+        if let Some(fixture) = lands {
+            prompt = prompt.publishing(landing_as(fixture));
+        }
+        let locked = super::lock(&home, method, remove, &mut prompt)
+            .await
+            .unwrap_or_else(|error| panic!("{tag}: {error:#}"));
+        let key = keystore::KeyFile::new(home.key())
+            .load()
+            .expect("load")
+            .map(|_| crate::testkit::stored_key(&keystore::KeyFile::new(home.key())));
+        let expected =
+            answer(key.unwrap_or_else(|| bifrost::NodeId::from_ed25519_secret(&[0; 32])));
+        assert_eq!(locked, expected, "{tag}");
+        match &locked {
+            Locked::Added { now, .. }
+            | Locked::Removed { now, .. }
+            | Locked::Changed { now, .. } => {
+                assert_eq!(*now, Now::Read(now_in(&home)), "{tag}: the set read back");
+            }
+            Locked::Made { now, .. } => {
+                assert_eq!(
+                    now_in(&home).methods(),
+                    Some(*now),
+                    "{tag}: the set read back"
+                );
+            }
+            Locked::Unchanged(_) => {}
+        }
+        assert!(
+            !seen.contains(&locked),
+            "{tag}: {locked:?} is another cell's"
+        );
+        if !matches!(
+            locked,
+            Locked::Unchanged(Why::NoKey | Why::NoSuchLock(_)) | Locked::Changed { .. }
+        ) {
+            seen.push(locked);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    assert!(
+        matches!(
+            super::lock(
+                &{
+                    let (home, _) = home("cell-pt-root-p-remove");
+                    placed(&home, pt);
+                    std::fs::write(home.root_key(), b"a root kept here").expect("a root");
+                    home
+                },
+                Method::Passphrase,
+                true,
+                &mut Counting::new([PASSPHRASE]),
+            )
+            .await,
+            Err(refused) if format!("{refused:#}") == super::KEEPS_PASSPHRASE
+        ),
+        "PT beside a root keeps its passphrase"
+    );
+}
+
+/// How each end of a touch that did not land reads as a head, with the failure's own chain where it has one.
+const MISSES: [(&str, &str); 4] = [
+    ("declined", "Touch ID was cancelled"),
+    ("not here", "Touch ID did not open the new lock on this Mac"),
+    ("failed", "Touch ID failed"),
+    ("timed out", crate::touch::TIMED_OUT),
+];
+
+/// The touch end each of [`MISSES`] names.
+fn miss(tag: &str) -> Touched {
+    match tag {
+        "declined" => Touched::Declined,
+        "not here" => Touched::NotHere,
+        "failed" => Touched::Failed(eyre::eyre!("the enclave refused")),
+        _ => Touched::TimedOut,
+    }
+}
+
+/// The refusal for `tag`'s miss: its head, then `detail`, then a failure's chain on its own line.
+fn refusal(tag: &str, head: &str, detail: &str) -> String {
+    if tag == "failed" {
+        format!("{head}\n  {detail}\n  the enclave refused")
+    } else {
+        format!("{head}\n  {detail}")
+    }
+}
+
+/// On an empty home, a `lock touch-id` whose touch does not land says so and that this command made no key,
+/// read from the file: nothing is there. Red when the line says nothing changed or that the touch did not
+/// open this machine's key, or a key is there.
+#[tokio::test]
+async fn a_missed_make_says_no_key_was_made() {
+    for (tag, head) in MISSES {
+        let (home, dir) = home(&format!("missed-make-{tag}"));
+        let mut prompt = Counting::new([])
+            .at_this_mac(keystore::Health::Live)
+            .touching([miss(tag)]);
+        let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+        let printed = format!("{refused:#}");
+        assert_eq!(printed, refusal(tag, head, super::MADE_NO_KEY), "{tag}");
+        assert!(!printed.contains("nothing changed"), "{tag}");
+        assert!(
+            !printed.contains("did not open this machine's key"),
+            "{tag}"
+        );
+        assert!(!home.key().exists(), "{tag}: no key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A make whose touch did not land is `Made` only over a file holding the key this run drew, under the Touch
+/// ID lock it wrote: a failure can come after the file is in place. Any other file there (another key, as a
+/// first `serve` mints with no `home.lock`, this run's key under no Touch ID lock, or one that cannot be
+/// read) was not made by this command, and says so, naming `swoosh status`, never `Made` and never that no
+/// key was made. Red when the key or the lock set is not checked, or an unreadable file is called made.
+#[tokio::test]
+async fn a_make_is_made_only_over_this_runs_key() {
+    let (mine, mine_dir) = home("make-over-mine");
+    let mut prompt = Counting::new([])
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Failed(eyre::eyre!("the directory was not synced"))])
+        .publishing(landing_as(&DEVICE_TOUCH_ID_ALONE));
+    let locked = lock_touch_id(&mine, &mut prompt).await.unwrap();
+    assert_eq!(
+        locked,
+        super::Locked::Made {
+            key: crate::testkit::stored_key(&keystore::KeyFile::new(mine.key())),
+            now: Methods::TouchId,
+            failed: Some("the directory was not synced".to_owned()),
+        }
+    );
+    let _ = std::fs::remove_dir_all(&mine_dir);
+
+    let theirs = |_: &keystore::PublicKey| DEVICE_TOUCH_ID_ALONE.to_vec();
+    let mine_by_passphrase = |touch: &crate::touch::Touch| {
+        let TouchAct::Write(secret) = &touch.act else {
+            panic!("a make writes: {:?}", touch.act);
+        };
+        let passphrase =
+            crate::passphrase::passphrase(zeroize::Zeroizing::new(PASSPHRASE.to_owned()))
+                .expect("a passphrase");
+        touch
+            .file
+            .write(secret, keystore::Protection::Passphrase(&passphrase))
+            .expect("this run's key, under a passphrase");
+    };
+    for (tag, _) in MISSES {
+        for (what, others, answer) in [
+            (
+                "theirs",
+                Box::new(landing(theirs)) as Box<dyn FnMut(&crate::touch::Touch)>,
+                Refusal::AlreadyThere,
+            ),
+            (
+                "theirs-plain",
+                Box::new(landing(|_| PLAIN.to_vec())),
+                Refusal::AlreadyThere,
+            ),
+            (
+                "mine-by-passphrase",
+                Box::new(mine_by_passphrase),
+                Refusal::Unconfirmed { read: false },
+            ),
+            (
+                "unreadable",
+                Box::new(landing(|_| b"not a key".to_vec())),
+                Refusal::Unconfirmed { read: true },
+            ),
+        ] {
+            let (home, dir) = home(&format!("make-over-{what}-{tag}"));
+            let mut prompt = Counting::new([])
+                .at_this_mac(keystore::Health::Live)
+                .touching([miss(tag)])
+                .publishing(others);
+            let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+            assert_eq!(
+                Refusal::of(&refused),
+                Some(answer),
+                "{what}, {tag}: {refused:#}"
+            );
+            assert!(
+                !format!("{refused:#}").contains(super::MADE_NO_KEY),
+                "{what}, {tag}"
+            );
+            assert!(home.key().exists(), "{what}, {tag}: the file is left");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// Which refusal a make that found a file it cannot call its own gave: another's key, read whole, or a file
+/// it could not confirm, with or without the read's error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    AlreadyThere,
+    Unconfirmed { read: bool },
+    Gone,
+}
+
+impl Refusal {
+    fn of(refused: &eyre::Report) -> Option<Self> {
+        if let Some(unconfirmed) = refused.downcast_ref::<super::Unconfirmed>() {
+            return Some(Self::Unconfirmed {
+                read: unconfirmed.read.is_some(),
+            });
+        }
+        if refused.downcast_ref::<super::Gone>().is_some() {
+            return Some(Self::Gone);
+        }
+        (format!("{refused:#}") == super::KEY_ALREADY_THERE).then_some(Self::AlreadyThere)
+    }
+}
+
+/// Where this command wrote a key file and cannot say what it holds when read back, it claims nothing: a first
+/// key beside a root whose file is gone after its touch is gone, never made or not; a plain key sealed beside a
+/// root whose file reads back plain, or cannot be read, is unconfirmed, with the read's error where one failed.
+/// A write that landed on a key that was there and then cannot be read back is the act, unconfirmed, not a
+/// failure. Red when any of these claims an outcome, or a landed add exits as failed.
+#[tokio::test]
+async fn a_file_this_command_cannot_read_back_claims_nothing() {
+    let (first, first_dir) = home("unconfirmed-gone");
+    std::fs::write(first.root_key(), b"a root kept here").expect("a root beside it");
+    let mut prompt = Counting::new([LONG])
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Declined])
+        .publishing(|touch| std::fs::remove_file(touch.file.path()).expect("the file goes"));
+    let refused = lock_touch_id(&first, &mut prompt).await.unwrap_err();
+    assert_eq!(Refusal::of(&refused), Some(Refusal::Gone), "{refused:#}");
+    let _ = std::fs::remove_dir_all(&first_dir);
+
+    for (what, lands, answer) in [
+        (
+            "plain",
+            PLAIN.to_vec(),
+            Refusal::Unconfirmed { read: false },
+        ),
+        (
+            "unreadable",
+            b"not a key".to_vec(),
+            Refusal::Unconfirmed { read: true },
+        ),
+    ] {
+        let (plain, plain_dir) = home(&format!("unconfirmed-sealed-{what}"));
+        super::inspect(&plain).expect("a plain key");
+        std::fs::write(plain.root_key(), b"a root kept here").expect("a root beside it");
+        let mut prompt = Counting::new([LONG])
+            .at_this_mac(keystore::Health::Live)
+            .touching([Touched::Declined])
+            .publishing(landing(move |_| lands.clone()));
+        let refused = lock_touch_id(&plain, &mut prompt).await.unwrap_err();
+        assert_eq!(Refusal::of(&refused), Some(answer), "{what}: {refused:#}");
+        let _ = std::fs::remove_dir_all(&plain_dir);
+    }
+
+    let (added, added_dir) = home("unconfirmed-added");
+    placed(&added, &DEVICE_TOUCH_ID_ALONE);
+    let mut prompt = Counting::new([LONG])
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Opened(None)])
+        .publishing(landing(|_| b"not a key".to_vec()));
+    let locked = super::lock(&added, Method::Passphrase, false, &mut prompt)
+        .await
+        .expect("the add landed, so it is not a failure");
+    let super::Locked::Added {
+        method: Methods::Passphrase,
+        now: super::Now::Unread(unread),
+        ..
+    } = &locked
+    else {
+        panic!("an unconfirmed add: {locked:?}");
+    };
+    assert_eq!(unread.path, added.key().to_string_lossy());
+    assert!(
+        unread.read.contains("not in a format this build reads"),
+        "{}",
+        unread.read
+    );
+    let _ = std::fs::remove_dir_all(&added_dir);
+}
+
+/// A Touch ID lock's health is read from a real header, so a lock that reads dead here reaches the result as
+/// dead, beside a passphrase or alone, and as unknown where nothing can say; and a dead lock is never what a
+/// line says the key opens with. Red when the health is dropped between the header and the result.
+#[test]
+fn a_dead_touch_id_lock_reads_dead_from_its_header() {
+    use keystore::Health::{Dead, Live};
+
+    use super::Locks;
+
+    let read = |bytes: &[u8], health: Option<keystore::Health>| {
+        let (home, dir) = home(&format!("dead-header-{}-{health:?}", bytes.len()));
+        placed(&home, bytes);
+        let stored = keystore::KeyFile::new(home.key())
+            .load()
+            .expect("load")
+            .expect("a key");
+        let prompt = match health {
+            Some(health) => Counting::new([]).at_this_mac(health),
+            None => Counting::new([]),
+        };
+        let locks = Locks::of(&stored, &prompt);
+        let _ = std::fs::remove_dir_all(&dir);
+        locks
+    };
+    assert_eq!(
+        read(&DEVICE_PASSPHRASE_AND_TOUCH_ID, Some(Dead)),
+        Locks::Both(Some(Dead))
+    );
+    assert_eq!(
+        read(&DEVICE_TOUCH_ID_ALONE, Some(Dead)),
+        Locks::TouchId(Some(Dead))
+    );
+    assert_eq!(
+        read(&DEVICE_PASSPHRASE_AND_TOUCH_ID, None),
+        Locks::Both(None)
+    );
+    assert_eq!(
+        read(&DEVICE_TOUCH_ID_ALONE, Some(Live)),
+        Locks::TouchId(Some(Live))
+    );
+    assert_eq!(Locks::Both(Some(Dead)).opens_with(), None);
+    assert_eq!(Locks::TouchId(Some(Dead)).opens_with(), None);
+}
+
+/// Beside a root, a key is sealed under a chosen passphrase before the touch that adds Touch ID, at both
+/// places that seal one: a first key, made either way, and a plain key, which keeps the passphrase it was
+/// given. A touch that does not land, a timeout included, says so and then what the key was left with, read
+/// back: the made key and its passphrase, or the passphrase added; and a failure after Touch ID landed is the
+/// key as it is. Red when only the touch's end prints, a plain key's line says it was made, or the line is
+/// not the file's.
+#[tokio::test]
+async fn a_sealed_make_that_times_out_keeps_its_last_line() {
+    for (tag, head) in MISSES {
+        let (first, first_dir) = home(&format!("sealed-first-{tag}"));
+        std::fs::write(first.root_key(), b"a root kept here").expect("a root beside it");
+        let mut prompt = Counting::new([LONG])
+            .at_this_mac(keystore::Health::Live)
+            .touching([miss(tag)]);
+        let refused = lock_touch_id(&first, &mut prompt).await.unwrap_err();
+        let key = crate::testkit::stored_key(&keystore::KeyFile::new(first.key()));
+        assert_eq!(
+            format!("{refused:#}"),
+            refusal(
+                tag,
+                head,
+                &format!(
+                    "Made this machine's key, locked with the passphrase you chose:\n    {key}"
+                )
+            ),
+            "{tag}"
+        );
+        let opened = super::resolve_with(
+            super::Identity::Persisted,
+            &first,
+            &mut Counting::new([LONG]),
+        )
+        .expect("the chosen passphrase opens it");
+        assert_eq!(opened.node_id(), key, "{tag}");
+        let _ = std::fs::remove_dir_all(&first_dir);
+
+        let (home, dir) = home(&format!("sealed-plain-{tag}"));
+        super::inspect(&home).expect("a plain key");
+        std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+        let mut prompt = Counting::new([LONG])
+            .at_this_mac(keystore::Health::Live)
+            .touching([miss(tag)]);
+        let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+        assert_eq!(
+            format!("{refused:#}"),
+            refusal(
+                tag,
+                head,
+                "Added a passphrase to this machine's key, which now opens with the passphrase."
+            ),
+            "{tag}"
+        );
+        assert_eq!(locks(&home), [Method::Passphrase], "{tag}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    for (tag, plain) in [
+        ("sealed-first-landed", false),
+        ("sealed-plain-landed", true),
+    ] {
+        let (home, dir) = home(tag);
+        if plain {
+            super::inspect(&home).expect("a plain key");
+        }
+        std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+        let mut prompt = Counting::new([LONG])
+            .at_this_mac(keystore::Health::Live)
+            .touching([Touched::Failed(eyre::eyre!("the directory was not synced"))])
+            .publishing(landing_as(&DEVICE_PASSPHRASE_AND_TOUCH_ID));
+        let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
+        let expected = if plain {
+            super::Locked::Added {
+                method: Methods::Both,
+                now: super::Now::Read(super::Locks::Both(Some(keystore::Health::Live))),
+                root: Root::Kept,
+            }
+        } else {
+            super::Locked::Made {
+                key: crate::testkit::stored_key(&keystore::KeyFile::new(home.key())),
+                now: Methods::Both,
+                failed: Some("the directory was not synced".to_owned()),
+            }
+        };
+        assert_eq!(locked, expected, "{tag}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A cancelled `lock touch-id` on an empty home made no key, so the `lock passphrase` after it makes one, and
+/// says so, never that it added a lock. Red when the second answers as an add.
+#[tokio::test]
+async fn lock_after_a_missed_make_says_made() {
+    let (home, dir) = home("missed-then-made");
+    let mut prompt = Counting::new([])
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Declined]);
+    let _ = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+    let locked = super::lock(&home, Method::Passphrase, false, &mut Counting::new([LONG]))
+        .await
+        .unwrap();
+    assert_eq!(
+        locked,
+        super::Locked::Made {
+            key: crate::testkit::stored_key(&keystore::KeyFile::new(home.key())),
+            now: Methods::Passphrase,
+            failed: None,
+        }
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

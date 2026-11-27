@@ -229,7 +229,7 @@ pub enum Touched {
     /// Anything else: the enclave failed, the unwrap refused (a lock someone else made with this Mac's
     /// enclave reads live and fails here), or the act's own write.
     Failed(eyre::Report),
-    /// Nobody touched in time: the key store closed the dialog, and nothing was written.
+    /// Nobody touched in time: the key store closed the dialog, and the act wrote nothing.
     TimedOut,
 }
 
@@ -454,9 +454,11 @@ pub fn holds_passphrase(locked: &Locked) -> bool {
     locked.methods().any(|method| method == Method::Passphrase)
 }
 
-/// The refusal when a touch is not answered in time: every act shows one dialog, waited [`TOUCH_WAIT`]. It
-/// never says nothing changed: a lock change the touch was for may have finished in the last instant, and
-/// `status` says what is there.
+/// The refusal when a touch is not answered in time: every act shows one dialog, waited [`TOUCH_WAIT`]. The
+/// key store closes the dialog itself and answers this only when no touch came, a touch in the last instant
+/// answering as one, so the act the touch was for wrote nothing. It still never says nothing changed: a lock
+/// change may have been written before the touch (a key sealed under a chosen passphrase first), which stands,
+/// so the caller says what is left.
 pub const TIMED_OUT: &str = "touch-id waited 60 seconds and no touch came";
 
 /// The lines a touch on one key file says, in the words of whose key it is.

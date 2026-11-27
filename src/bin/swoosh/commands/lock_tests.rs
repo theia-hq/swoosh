@@ -84,10 +84,10 @@ fn lock_help_lists_exactly_the_lockmethod_values() {
     );
 }
 
-/// A plain key gets a passphrase: the header is sealed, and the first time says `serve` asks at each start.
-/// Red when either is skipped.
+/// A plain key gets a passphrase: the header is sealed, and the result says what it opens with now. Red when
+/// either is skipped.
 #[tokio::test]
-async fn lock_sets_one_and_warns_about_restart() {
+async fn lock_puts_a_passphrase_on_a_plain_key() {
     let home = scratch("lock-sets");
     let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
     let (result, err) = lock(&home, &[], &mut Counting::new([LONG])).await;
@@ -100,9 +100,8 @@ async fn lock_sets_one_and_warns_about_restart() {
     );
     assert_eq!(
         err,
-        "set a passphrase on this machine's key.\n\
-         every command that acts as this machine now asks for it, so swoosh serve cannot start with nobody \
-         at a terminal.\n"
+        "Added a passphrase to this machine's key.\n\
+         It now opens with the passphrase.\n"
     );
 }
 
@@ -127,8 +126,9 @@ async fn lock_changes_an_existing_one_after_the_current_one() {
     let (result, err) = lock(&home, &[], &mut Counting::new([LONG, OTHER])).await;
     result.unwrap();
     assert_eq!(
-        err, "changed the passphrase on this machine's key.\n",
-        "no warning the second time"
+        err,
+        "Changed the passphrase on this machine's key.\n\
+         A copy made earlier still opens with the old passphrase.\n",
     );
     let mut opens = Counting::new([OTHER]);
     swoosh::identity::resolve_with(swoosh::identity::Identity::Persisted, &home, &mut opens)
@@ -159,8 +159,8 @@ async fn lock_remove_needs_the_current_one() {
     assert!(locks(&home).is_empty(), "plain now");
     assert_eq!(
         err,
-        "removed the passphrase from this machine's key, which now has no lock.\n\
-         anyone with a copy of its key file can act as this machine.\n"
+        "Removed the passphrase from this machine's key.\n\
+         It now has no lock.\n"
     );
 }
 
@@ -173,7 +173,7 @@ async fn lock_remove_on_an_unlocked_key_says_so_and_exits_0() {
     result.unwrap();
     assert_eq!(
         err,
-        "this machine's key has no passphrase; nothing was changed.\n"
+        "This machine's key has no lock, so nothing was changed.\n"
     );
     assert_eq!(prompt.events(), 0);
 }
@@ -311,7 +311,7 @@ async fn lock_touch_id_on_a_touch_id_only_key_says_nothing_changed() {
     result.unwrap();
     assert_eq!(
         err,
-        "this machine's key already has touch-id as its only lock; nothing was changed.\n"
+        "This machine's key already opens with Touch ID alone, so nothing was changed.\n"
     );
     assert_eq!(prompt.events(), 0);
     assert!(prompt.touches().is_empty());
@@ -329,11 +329,23 @@ fn placed(home: &Home, bytes: &[u8], root_kept: bool) {
     }
 }
 
-/// At this Mac, the touch scripted to open.
+/// At this Mac, the touch scripted to open, leaving the file under the passphrase and Touch ID as the key
+/// store's act would: a scripted touch writes nothing itself.
 fn proving(answers: impl IntoIterator<Item = &'static str>) -> Counting {
     Counting::new(answers)
         .at_this_mac(keystore::Health::Live)
         .touching([swoosh::touch::Touched::Opened(None)])
+        .publishing(|touch| {
+            let public = match touch.file.load().unwrap() {
+                Some(Stored::Locked(locked)) => locked.public_key(),
+                other => panic!("an add on a sealed key: {other:?}"),
+            };
+            let both = swoosh::testkit::touch_id::claiming(
+                &swoosh::testkit::touch_id::DEVICE_PASSPHRASE_AND_TOUCH_ID,
+                &public,
+            );
+            std::fs::write(touch.file.path(), both).unwrap();
+        })
 }
 
 /// What an added passphrase prints where no root is kept: the step back to Touch ID alone.
@@ -451,4 +463,308 @@ fn lock_remove_help_names_this_lock() {
         .render_help()
         .to_string();
     assert!(help.contains("remove this lock instead"), "{help}");
+}
+
+/// What a write that landed and could not be read back prints, under the act's own first line at `{act}`.
+const UNREAD: &str = "\
+{act}
+warning: this command could not confirm the key file
+  swoosh status shows what is there.
+  file   /h/machine/key
+  read   could not access the key file /h/machine/key: denied
+";
+
+/// Every outcome `lock` can have prints its own lines, byte for byte, through the screen law: a made key alone
+/// on its line at indent two, what the key opens with now from the set read back, a step only where it would
+/// not be refused, and the copy line wherever a lock is taken off and another stays. Red when any byte
+/// differs from the ruled words.
+#[test]
+fn each_result_prints_its_ruled_lines() {
+    use keystore::Health::{Dead, Live};
+    use swoosh::identity::{Locked, Locks, Methods, Now, Root, Unread, Why};
+
+    let key = swoosh::testkit::TestNode::seeded(0x11).node_id();
+    let made = |now| Locked::Made {
+        key,
+        now,
+        failed: None,
+    };
+    let added = |method, now, root| Locked::Added {
+        method,
+        now: Now::Read(now),
+        root,
+    };
+    let unread = || {
+        Now::Unread(Unread {
+            path: "/h/machine/key".to_owned(),
+            read: "could not access the key file /h/machine/key: denied".to_owned(),
+        })
+    };
+    let rows: Vec<(Locked, String)> = vec![
+        (made(Methods::Passphrase), format!("Made this machine's key, locked with a passphrase:\n  {key}\n")),
+        (made(Methods::TouchId), format!("Made this machine's key, locked with Touch ID:\n  {key}\n")),
+        (made(Methods::Both), format!("Made this machine's key, locked with Touch ID or a passphrase:\n  {key}\n")),
+        (added(Methods::Passphrase, Locks::Both(Some(Live)), Root::NotKept), ADDED_PASSPHRASE.to_owned()),
+        (
+            added(Methods::Passphrase, Locks::Both(Some(Live)), Root::Kept),
+            "Added a passphrase to this machine's key.\nIt now opens with Touch ID or the passphrase.\n".to_owned(),
+        ),
+        (
+            added(Methods::TouchId, Locks::Both(Some(Live)), Root::NotKept),
+            "Added Touch ID to this machine's key.\n\
+             It now opens with Touch ID or the passphrase.\n\
+             \n\
+             To make Touch ID its only lock:\n  \
+             swoosh lock passphrase --remove\n"
+                .to_owned(),
+        ),
+        (
+            added(Methods::TouchId, Locks::Both(Some(Live)), Root::Kept),
+            "Added Touch ID to this machine's key.\nIt now opens with Touch ID or the passphrase.\n".to_owned(),
+        ),
+        (
+            added(Methods::Passphrase, Locks::Passphrase, Root::NotKept),
+            "Added a passphrase to this machine's key.\nIt now opens with the passphrase.\n".to_owned(),
+        ),
+        (
+            added(Methods::TouchId, Locks::TouchId(Some(Live)), Root::NotKept),
+            "Added Touch ID to this machine's key.\nIt now opens with Touch ID, on this Mac only.\n".to_owned(),
+        ),
+        (
+            added(Methods::Both, Locks::Both(Some(Live)), Root::Kept),
+            "Added Touch ID and a passphrase to this machine's key.\n\
+             It now opens with Touch ID or the passphrase.\n"
+                .to_owned(),
+        ),
+        (
+            Locked::Changed { method: Method::Passphrase, now: Now::Read(Locks::Both(Some(Live))) },
+            "Changed the passphrase on this machine's key.\n\
+             A copy made earlier still opens with the old passphrase.\n"
+                .to_owned(),
+        ),
+        (Locked::Changed { method: Method::TouchId, now: Now::Read(Locks::Both(Some(Live))) }, "Changed Touch ID on this machine's key.\n".to_owned()),
+        (
+            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::TouchId(Some(Live))) },
+            "Removed the passphrase from this machine's key.\n\
+             It now opens with Touch ID, on this Mac only.\n\
+             A copy made earlier still opens with the passphrase.\n"
+                .to_owned(),
+        ),
+        (
+            Locked::Removed { method: Method::TouchId, now: Now::Read(Locks::Passphrase) },
+            "Removed Touch ID from this machine's key.\n\
+             It now opens with the passphrase.\n\
+             A copy made earlier still opens with Touch ID on this Mac.\n"
+                .to_owned(),
+        ),
+        (
+            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::None) },
+            "Removed the passphrase from this machine's key.\nIt now has no lock.\n".to_owned(),
+        ),
+        (
+            Locked::Removed { method: Method::TouchId, now: Now::Read(Locks::None) },
+            "Removed Touch ID from this machine's key.\nIt now has no lock.\n".to_owned(),
+        ),
+        // A key made with a failure after it in place says so under the key.
+        (
+            Locked::Made { key, now: Methods::TouchId, failed: Some("the directory could not be synced".to_owned()) },
+            format!(
+                "Made this machine's key, locked with Touch ID:\n  {key}\n\n\
+                 warning: the key file was written, but a step after it failed\n  \
+                 failure   the directory could not be synced\n"
+            ),
+        ),
+        // Over a Touch ID lock that reads dead, no step offers the removal the key store would refuse.
+        (
+            added(Methods::Passphrase, Locks::Both(Some(Dead)), Root::NotKept),
+            "Added a passphrase to this machine's key.\n\
+             It opens with the passphrase; Touch ID does not open on this Mac now.\n"
+                .to_owned(),
+        ),
+        // A Touch ID lock that reads dead is said as such, beside the passphrase or alone.
+        (
+            added(Methods::Passphrase, Locks::Both(Some(Dead)), Root::Kept),
+            "Added a passphrase to this machine's key.\n\
+             It opens with the passphrase; Touch ID does not open on this Mac now.\n"
+                .to_owned(),
+        ),
+        (
+            Locked::Removed { method: Method::Passphrase, now: Now::Read(Locks::TouchId(Some(Dead))) },
+            "Removed the passphrase from this machine's key.\n\
+             Touch ID does not open on this Mac now, so nothing opens this machine's key.\n\
+             A copy made earlier still opens with the passphrase.\n"
+                .to_owned(),
+        ),
+        // A write that landed and could not be read back says the act, then that it could not confirm it.
+        (
+            Locked::Added { method: Methods::TouchId, now: unread(), root: Root::NotKept },
+            UNREAD.replace("{act}", "Added Touch ID to this machine's key."),
+        ),
+        (
+            Locked::Changed { method: Method::Passphrase, now: unread() },
+            UNREAD.replace("{act}", "Changed the passphrase on this machine's key."),
+        ),
+        (
+            Locked::Removed { method: Method::TouchId, now: unread() },
+            UNREAD.replace("{act}", "Removed Touch ID from this machine's key."),
+        ),
+        (
+            Locked::Unchanged(Why::NoKey),
+            "This machine has no key yet, so nothing was changed.\n".to_owned(),
+        ),
+        (
+            Locked::Unchanged(Why::NoLock),
+            "This machine's key has no lock, so nothing was changed.\n".to_owned(),
+        ),
+        (
+            Locked::Unchanged(Why::NoSuchLock(Method::Passphrase)),
+            "This machine's key has no passphrase, so nothing was changed.\n".to_owned(),
+        ),
+        (
+            Locked::Unchanged(Why::NoSuchLock(Method::TouchId)),
+            "This machine's key has no Touch ID lock, so nothing was changed.\n".to_owned(),
+        ),
+        (
+            Locked::Unchanged(Why::TouchIdAlone),
+            "This machine's key already opens with Touch ID alone, so nothing was changed.\n".to_owned(),
+        ),
+        (
+            Locked::Unchanged(Why::NeedsPassphrase),
+            "Your root is on this machine, so its key needs a passphrase beside Touch ID.\n\
+             Nothing was changed.\n\
+             To add the passphrase:\n  \
+             swoosh lock passphrase\n"
+                .to_owned(),
+        ),
+    ];
+    for (locked, expected) in rows {
+        let text = match &locked {
+            Locked::Made { key, .. } => key.to_string(),
+            _ => String::new(),
+        };
+        let mut err = Vec::new();
+        super::result(&locked, &text).write(&mut err).unwrap();
+        assert_eq!(String::from_utf8(err).unwrap(), expected, "{locked:?}");
+    }
+}
+
+/// Taking off a key's last lock says it has none now, and never lists `none` as one lock among others. Red
+/// when the line names `none`, or a copy line follows a key left with no lock.
+#[tokio::test]
+async fn a_removal_down_to_no_lock_says_so() {
+    let home = scratch("lock-remove-last-passphrase");
+    lock(&home, &[], &mut Counting::new([LONG]))
+        .await
+        .0
+        .unwrap();
+    let (result, err) = lock(
+        &home,
+        &["passphrase", "--remove"],
+        &mut Counting::new([LONG]),
+    )
+    .await;
+    result.unwrap();
+    assert_eq!(
+        err,
+        "Removed the passphrase from this machine's key.\nIt now has no lock.\n"
+    );
+    assert!(!err.contains("none"), "{err}");
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = scratch("lock-remove-last-touch-id");
+        placed(
+            &home,
+            &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+            false,
+        );
+        let mut prompt = Counting::new([])
+            .at_this_mac(keystore::Health::Live)
+            .touching([swoosh::touch::Touched::Opened(None)])
+            .publishing(|touch| std::fs::write(touch.file.path(), [0x11; 32]).unwrap());
+        let (result, err) = lock(&home, &["touch-id", "--remove"], &mut prompt).await;
+        result.unwrap();
+        assert!(locks(&home).is_empty(), "plain now");
+        assert_eq!(
+            err,
+            "Removed Touch ID from this machine's key.\nIt now has no lock.\n"
+        );
+    }
+}
+
+/// At the command line, a cancelled `lock touch-id` on an empty home made no key and says so, and the `lock
+/// passphrase` after it makes one and shows it. Red when the second reads as an add, or no key is on its
+/// screen.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn lock_after_a_missed_make_shows_the_made_key() {
+    let dir = std::env::temp_dir().join(format!("swoosh-lock-missed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    swoosh::config::create_store_dir(&dir).unwrap();
+    let home = Home::resolve(Some(dir.clone())).unwrap();
+    let mut cancelled = Counting::new([])
+        .at_this_mac(keystore::Health::Live)
+        .touching([swoosh::touch::Touched::Declined]);
+    let (refused, _) = lock(&home, &["touch-id"], &mut cancelled).await;
+    assert_eq!(
+        format!("{:#}", refused.unwrap_err()),
+        "Touch ID was cancelled\n  This command made no key."
+    );
+    let (result, err) = lock(&home, &["passphrase"], &mut Counting::new([LONG])).await;
+    result.unwrap();
+    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
+    assert_eq!(
+        err,
+        format!("Made this machine's key, locked with a passphrase:\n  {key}\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A key file this command could not confirm, or that is gone, refuses as a screen through the law, with its
+/// path and the read's error as rows where a read failed, and exits 1 without `main` printing it again; any
+/// other refusal is `main`'s to print. Red when a row is missing, a `read` row prints with no read error, or
+/// the refusal is printed twice.
+#[test]
+fn a_file_this_command_cannot_confirm_refuses_as_a_screen() {
+    use swoosh::identity::{Gone, Unconfirmed};
+
+    let path = std::path::PathBuf::from("/h/machine/key");
+    for (report, expected) in [
+        (
+            eyre::Report::new(Unconfirmed {
+                path: path.clone(),
+                read: Some(keystore::Error::Absent { path: path.clone() }),
+            }),
+            "error: this command could not confirm the key file\n  \
+             swoosh status shows what is there.\n  \
+             file   /h/machine/key\n  \
+             read   there is no key file at /h/machine/key\n",
+        ),
+        (
+            eyre::Report::new(Unconfirmed {
+                path: path.clone(),
+                read: None,
+            }),
+            "error: this command could not confirm the key file\n  \
+             swoosh status shows what is there.\n  \
+             file   /h/machine/key\n",
+        ),
+        (
+            eyre::Report::new(Gone { path: path.clone() }),
+            "error: the key file this command wrote is gone\n  \
+             swoosh status shows what is there.\n",
+        ),
+    ] {
+        let mut err = Vec::new();
+        let refused = super::refused(report, &mut err);
+        assert!(
+            refused.is::<crate::commands::through_serve::Reported>(),
+            "{refused:#}"
+        );
+        assert_eq!(String::from_utf8(err).unwrap(), expected);
+    }
+    let mut err = Vec::new();
+    let passed = super::refused(eyre::eyre!("another refusal"), &mut err);
+    assert_eq!(format!("{passed:#}"), "another refusal");
+    assert!(err.is_empty(), "main prints it");
 }
