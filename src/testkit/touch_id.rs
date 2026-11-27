@@ -7,6 +7,20 @@
 //! with a passphrase by it; how a touch goes comes from the test's script. A change to the key file format
 //! breaks them loudly, which is wanted.
 
+/// Where a sealed key file's header names its key: after the eight-byte signature, the version and the kind.
+const PUBLIC_KEY_AT: core::ops::Range<usize> = 10..42;
+
+/// `fixture` with its header claiming `public` instead of its own key: a file whose lock list a test needs
+/// under a key the run drew, which no fixture can hold. Only its header is read: it opens for nobody. A plain
+/// file has no header, so it is left as it is.
+pub fn claiming(fixture: &[u8], public: &keystore::PublicKey) -> Vec<u8> {
+    let mut bytes = fixture.to_vec();
+    if let Some(header) = bytes.get_mut(PUBLIC_KEY_AT) {
+        header.copy_from_slice(public.bytes());
+    }
+    bytes
+}
+
 /// The passphrase of every fixture here that holds one.
 pub const PASSPHRASE: &str = "correct horse battery staple";
 

@@ -132,6 +132,66 @@ fn the_lines_before_an_added_lock_hold_the_law() {
     }
 }
 
+/// A make whose touch did not land, as the run prints it, holds the law at each end and at both places a key
+/// is sealed first: the code's own lines through `print_error`, not a copy of them. And the refusal over a
+/// file this command did not make.
+#[tokio::test]
+async fn the_missed_make_refusals_hold_the_law() {
+    use swoosh::touch::Touched;
+
+    let ends = || {
+        [
+            Touched::Declined,
+            Touched::NotHere,
+            Touched::Failed(eyre::eyre!("the enclave refused")),
+            Touched::TimedOut,
+        ]
+    };
+    let mut printed = Vec::new();
+    for (at, (touched, plain)) in ends()
+        .into_iter()
+        .map(|end| (end, None))
+        .chain(ends().into_iter().map(|end| (end, Some(false))))
+        .chain(ends().into_iter().map(|end| (end, Some(true))))
+        .enumerate()
+    {
+        let dir =
+            std::env::temp_dir().join(format!("swoosh-law-missed-{}-{at}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        swoosh::config::create_store_dir(&dir).expect("a home");
+        let home = swoosh::home::Home::resolve(Some(dir.clone())).expect("a home");
+        let answers: &[&str] = match plain {
+            None => &[],
+            Some(true) => {
+                swoosh::identity::inspect(&home).expect("a plain key");
+                std::fs::write(home.root_key(), b"a root kept here").expect("a root");
+                &["a passphrase long enough"]
+            }
+            Some(false) => {
+                std::fs::write(home.root_key(), b"a root kept here").expect("a root");
+                &["a passphrase long enough"]
+            }
+        };
+        let mut prompt = swoosh::testkit::Counting::new(answers.iter().copied())
+            .at_this_mac(keystore::Health::Live)
+            .touching([touched]);
+        let refused = swoosh::identity::lock(&home, keystore::Method::TouchId, false, &mut prompt)
+            .await
+            .expect_err("a miss refuses");
+        printed.push(refused);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    printed.push(eyre::eyre!(swoosh::identity::KEY_ALREADY_THERE));
+    for refused in printed {
+        let mut screen = Vec::new();
+        crate::print_error(&refused, &mut screen);
+        let screen = String::from_utf8(screen).expect("the refusal is UTF-8");
+        if let Err(breach) = read(&screen) {
+            panic!("{breach}\n{screen}");
+        }
+    }
+}
+
 /// A lowercase fact of fixed words, 81 columns: it breaks only the width, since no word is a token alone.
 const WIDE: &str =
     "a line of fixed words that runs one column past the screen's width, so it breaks.";

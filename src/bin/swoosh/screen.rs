@@ -143,6 +143,11 @@ enum Line<'a> {
     Row(Vec<Cell<'a>>),
     /// A sentence or line as written, flush left. The caller escapes any peer text in it.
     Text(String),
+    /// A sentence of swoosh's own fixed words, flush left, styled [`Style::RISK`]: a state that puts the key at
+    /// risk.
+    Risk(&'static str),
+    /// A refusal's or a warning's head: its fixed word (`error:`, `warning:`) styled, then the clause.
+    Head(Style, &'static str, String),
     /// A command to type, at indent two, so a triple-click copies exactly it.
     Command(String),
 }
@@ -182,6 +187,18 @@ impl<'a> Block<'a> {
         self
     }
 
+    /// Add a sentence of fixed words, flush left, styled as a risk.
+    pub(crate) fn risk(mut self, line: &'static str) -> Self {
+        self.lines.push(Line::Risk(line));
+        self
+    }
+
+    /// Add a head line: `word` (`error:`, `warning:`) in `style`, then `clause`, as `main` prints a refusal.
+    pub(crate) fn head(mut self, style: Style, word: &'static str, clause: String) -> Self {
+        self.lines.push(Line::Head(style, word, clause));
+        self
+    }
+
     /// Add a command to type, alone on its line at indent two.
     pub(crate) fn command(mut self, line: String) -> Self {
         self.lines.push(Line::Command(line));
@@ -203,7 +220,7 @@ impl<'a> Block<'a> {
             .iter()
             .map(|line| match line {
                 Line::Row(cells) => Some(Measured::of(cells)),
-                Line::Text(_) | Line::Command(_) => None,
+                Line::Text(_) | Line::Risk(_) | Line::Head(..) | Line::Command(_) => None,
             })
             .collect();
         let widths = self.widths(&rows);
@@ -211,6 +228,12 @@ impl<'a> Block<'a> {
             match (line, row) {
                 (Line::Row(cells), Some(row)) => row.print(cells, &widths, paint, &mut printed)?,
                 (Line::Text(text), _) => printed.push((Shape::Prose, text.clone())),
+                (Line::Risk(text), _) => {
+                    printed.push((Shape::Prose, paint(Style::RISK, text).to_string()))
+                }
+                (Line::Head(style, word, clause), _) => {
+                    printed.push((Shape::Prose, format!("{} {clause}", paint(*style, word))))
+                }
                 (Line::Command(command), _) => {
                     printed.push((Shape::Command, format!("  {command}")))
                 }

@@ -409,6 +409,9 @@ pub fn stored_key(file: &keystore::KeyFile) -> NodeId {
     crate::identity::key_of(file, &stored).expect("the key file names a key")
 }
 
+/// What a [`Counting`] runs on a touch before it answers, as [`Counting::publishing`] sets it.
+type Publish = Box<dyn FnMut(&Touch)>;
+
 /// A [`Prompt`] that counts prompt events and the passphrases they read, answers from a script, and keeps
 /// what it was told between tries.
 ///
@@ -432,6 +435,7 @@ pub struct Counting {
     health: Option<Health>,
     touched: VecDeque<Touched>,
     touches: Vec<Touch>,
+    publish: Option<Publish>,
 }
 
 impl Counting {
@@ -447,6 +451,7 @@ impl Counting {
             health: None,
             touched: VecDeque::new(),
             touches: Vec::new(),
+            publish: None,
         }
     }
 
@@ -471,6 +476,16 @@ impl Counting {
     pub fn touching(self, touched: impl IntoIterator<Item = Touched>) -> Self {
         Self {
             touched: touched.into_iter().collect(),
+            ..self
+        }
+    }
+
+    /// Before each touch answers, `publish` runs on it, standing in for what the key store's act would leave
+    /// on disk: a scripted touch writes nothing itself, so a test that reads the file after needs this.
+    #[must_use]
+    pub fn publishing(self, publish: impl FnMut(&Touch) + 'static) -> Self {
+        Self {
+            publish: Some(Box::new(publish)),
             ..self
         }
     }
@@ -568,6 +583,9 @@ impl Prompt for Counting {
     }
 
     fn touch(&mut self, touch: Touch) -> Touched {
+        if let Some(publish) = &mut self.publish {
+            publish(&touch);
+        }
         self.touches.push(touch);
         self.touched
             .pop_front()
