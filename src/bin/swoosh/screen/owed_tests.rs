@@ -114,6 +114,12 @@ pub(crate) const OWED: &[Owed] = &[
         printed: "sessions from devices of root:ed01rbfyqv7u… end now, yours too if you reached this machine \
                   as one.",
     },
+    // `serve`'s warning of links made for another target passes 80: f11's words replace it (SW4f).
+    Owed {
+        phrase: "and they are refused while it serves something else",
+        printed: "warning: drop has live links made when it served nothing, and they are refused while it serves \
+                  something else (swoosh status lists them under links you shared)",
+    },
     // `leave --new-key`'s path line passes 80 under a long home.
     Owed {
         phrase: "kept the old key at ",

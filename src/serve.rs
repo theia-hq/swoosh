@@ -67,7 +67,7 @@ pub use self::definition::{DefinitionCause, DefinitionError, Operand};
 #[cfg(test)]
 pub(crate) use self::lookup::answer as lookup_answer;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
-pub use self::serving::{Added, EditError, Mistyped, ServingError, Started};
+pub use self::serving::{Added, EditError, MissingFile, Mistyped, ServingError, Started};
 
 /// The node's own control route: every `serve` binds it, member-only, and answers one request per stream on
 /// it, a list of what it serves or a stop ([`control::Serve`]). Bound by the node, never named in a `serve`
@@ -92,50 +92,6 @@ pub const RENEWAL_SERVICE: &str = "control.renewal";
 /// Like the pick-up route it is bound by the node, never named in a `serve` entry, and dotted, so no name a
 /// person types can be it.
 pub const LOOKUP_ROOT_SERVICE: &str = "lookup.root";
-
-/// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
-/// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the
-/// node to stop and it did, so the process exits 0. A real teardown FAILURE never becomes a `Stopped`, it
-/// stays an `Err` the run propagates, so "graceful" and "errored" cannot be confused: the type only exists
-/// on the success path. This is the distinction a CI action reads, a deliberate stop is green.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stopped {
-    /// An owner requested the stop: an admitted `control.serve` stop, or a `--expires` deadline. The exposer's
-    /// `run` returned `Ok` because its teardown token fired, the ordinary end of a node's life.
-    Requested,
-    /// The local operator pressed Ctrl-C: the same graceful stop, driven from the keyboard rather than the
-    /// overlay.
-    Interrupted,
-    /// A same-user local client asked over the resident control socket: the socket twin of a SIGTERM
-    /// the local user already holds. Kept distinct from `Requested` (the wire stop) so the stop
-    /// source bookkeeping never collapses the two.
-    Local,
-}
-
-impl Stopped {
-    /// The one clear line printed on a graceful stop, so a CI action log (a CI teardown) reads a
-    /// deliberate stop as a clean end, not a mystery exit. Names the reason plainly.
-    pub fn message(self) -> &'static str {
-        match self {
-            Self::Requested => "\nnode stopped gracefully.",
-            Self::Interrupted => "\nnode stopped (interrupted).",
-            Self::Local => "\nnode stopped (local request).",
-        }
-    }
-}
-
-/// Classify a finished resident run from its recorded [`StopSource`], never from the select arm
-/// that happened to complete: the socket `Stop` records [`StopKind::Socket`] before it cancels the
-/// token, so the local stop stays [`Stopped::Local`] even when the exposer arm wins the poll. A
-/// wire `control.serve` stop records the key that asked and a `--expires` deadline records nothing, so both
-/// render as [`Stopped::Requested`]; a Ctrl-C records itself and renders [`Stopped::Interrupted`].
-pub fn classify_stop(source: Option<StopKind>) -> Stopped {
-    match source {
-        Some(StopKind::Socket) => Stopped::Local,
-        Some(StopKind::Interrupted) => Stopped::Interrupted,
-        Some(StopKind::Expires | StopKind::Wire(_)) | None => Stopped::Requested,
-    }
-}
 
 /// The services a `serve` with nothing named and nothing to resume serves: the two diagnostics, each its
 /// own service, so a node may later offer one without the other.

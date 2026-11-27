@@ -1,7 +1,6 @@
-//! Unit tests for `serve`'s stop classification and banner: a GRACEFUL stop is a typed [`Stopped`] the run
-//! reports and exits 0 on, and an ERRORED teardown never becomes one (it stays an `Err` the run propagates,
-//! so the process exits non-zero). The end-to-end proof that a member's `control.serve` stop makes the exposer
-//! return `Ok` (which the run turns into [`Stopped::Requested`], exit 0) lives in `tests/gated_stop.rs`.
+//! Unit tests for `serve`'s stop line and banner: a GRACEFUL stop exits 0 and prints `Stopped serving.`, and
+//! an ERRORED teardown stays an `Err` the run propagates, so the process exits non-zero. The end-to-end proof
+//! that a member's `control.serve` stop makes the exposer return `Ok` lives in `tests/gated_stop.rs`.
 //!
 //! What only the real composition root can prove is driven by spawning the compiled `swoosh` binary: one
 //! `serve` per home, the resumed list, the runtime directory, and that a `serve` stays the foreground
@@ -23,7 +22,7 @@ use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
     CONTROL_SERVE_SERVICE, DEFAULT_SERVICES, Internet, Lan, Picks, ProxyScope, ProxyService,
-    Reachable, SYNC_SERVICE, Stopped, bind_entry, control, extract_recv_services,
+    Reachable, SYNC_SERVICE, bind_entry, control, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
@@ -33,8 +32,8 @@ use tightbeam::tunnel::{
 };
 
 use super::{
-    AT_LOGIN, Head, ReachRows, Reader, Scope, Serving, Stop, Until, banner, expire, log_bind,
-    off_lines, span, supervised, waiting_warnings,
+    AT_LOGIN, Head, ReachRows, Reader, Scope, Serving, Stop, Until, admitting_lines, banner,
+    expire, log_bind, off_lines, span, supervised, waiting_warnings, warning,
 };
 
 #[path = "serve_relative_tests.rs"]
@@ -1122,78 +1121,260 @@ fn a_public_route_cannot_arm_an_uncapped_diagnostic() {
         .expect("the capped engine is openable");
 }
 
-/// Every graceful-stop reason reports a distinct, non-empty line, so a CI action log (a CI teardown)
-/// reads a deliberate stop as a clean end rather than a bare exit. The line names WHY the node stopped.
+/// Every end of a `serve` prints the one line, `Stopped serving.`, on stderr after a blank line, and no
+/// cause: the `--expires` deadline (the requested end a wire stop shares), a stop over the socket, ctrl-c,
+/// and the SIGTERM a service manager sends; and `--quiet` keeps it. Red when `node` returns, a cause joins
+/// the line, it moves to stdout, or `--quiet` withholds it.
 #[test]
-fn each_graceful_stop_reason_has_a_distinct_legible_message() {
-    let requested = Stopped::Requested.message();
-    let interrupted = Stopped::Interrupted.message();
-    let local = Stopped::Local.message();
-
-    assert!(
-        requested.contains("gracefully"),
-        "an owner-requested stop reads as a graceful success: {requested:?}"
-    );
-    assert!(
-        interrupted.contains("interrupted"),
-        "a Ctrl-C reads as an interrupt: {interrupted:?}"
-    );
-    assert!(
-        local.contains("local"),
-        "a socket stop reads as a local stop: {local:?}"
-    );
-    assert_ne!(
-        requested, interrupted,
-        "the two graceful reasons print distinct lines, so a log tells them apart"
-    );
-    assert_ne!(requested, local, "the socket stop prints its own line");
-    assert_ne!(
-        interrupted, local,
-        "the interrupt and the socket stop are the pair a log reader most often must tell apart"
-    );
-}
-
-/// `Stopped` exists ONLY on the success path: it has an arm for each way an owner GRACEFULLY stops the
-/// node (a requested `control.serve` stop or `--expires`, a socket stop, or a Ctrl-C), and NO arm for a
-/// failure. A real teardown error stays an `Err` the run propagates, so a graceful stop and an
-/// errored teardown are unconflatable by construction: this is why a deliberate `swoosh stop`
-/// exits 0 while a crash exits non-zero.
-#[test]
-fn stopped_has_an_arm_only_for_graceful_reasons() {
-    // A total destructuring of `Stopped`: every variant is a graceful (exit-0) reason, so adding a
-    // non-graceful variant would fail to compile here, forcing the author to keep failures OFF this
-    // type and on the `Err` path. The compile-time exhaustiveness is the whole check; there is
-    // deliberately no runtime assertion to make.
-    for reason in [Stopped::Requested, Stopped::Interrupted, Stopped::Local] {
-        let (Stopped::Requested | Stopped::Interrupted | Stopped::Local) = reason;
+fn every_serve_end_says_stopped_serving() {
+    for (end, stdout, stderr) in serve_ends() {
+        let lines: Vec<&str> = stderr.lines().collect();
+        let at = lines.iter().position(|line| *line == "Stopped serving.");
+        assert!(
+            at.is_some_and(|at| at > 0 && lines[at - 1].is_empty())
+                && stderr.matches("Stopped serving.").count() == 1,
+            "{end}: {stderr}"
+        );
+        assert!(
+            !stdout.contains("Stopped serving.") && !stdout.contains("node stopped"),
+            "{end}: {stdout}"
+        );
+        assert!(!stderr.contains("node stopped"), "{end}: {stderr}");
     }
 }
 
-/// M3: a resident stop is classified from the recorded source, never from which select arm the
-/// reactor completed. A socket stop renders the local line even if the exposer arm wins the poll;
-/// a wire `control.serve` stop or a `--expires` (both record nothing) renders the requested line.
-#[test]
-fn resident_stop_classifies_from_its_source() {
-    use swoosh::serve::{StopKind, classify_stop};
+/// What a piped `serve` printed on stdout and on stderr at each of its ends, by the end.
+fn serve_ends() -> Vec<(&'static str, String, String)> {
+    let scratch = ProcessScratch::new("ends");
+    let printed = |out: std::process::Output| {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (expired, expired_err) = printed(serve_once(
+        &scratch,
+        &["--local", "--expires", "1s", "ping"],
+    ));
+    let (quiet, quiet_err) = printed(serve_once(
+        &scratch,
+        &["--local", "--quiet", "--expires", "1s", "ping"],
+    ));
+    let signalled = |signal| {
+        let mut running = Running::start(&scratch, &["--local", "ping"]);
+        let pid = libc::pid_t::try_from(running.child.0.id()).expect("a pid");
+        // SAFETY: `kill` only sends a signal to the child this test spawned and still holds.
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0, "the signal is sent");
+        let status = running.child.0.wait().expect("reap serve");
+        assert!(status.success(), "a signalled serve exits 0: {status}");
+        running.printed()
+    };
+    let (socket, socket_err) = Running::start(&scratch, &["--local", "ping"]).stopped();
+    let (interrupted, interrupted_err) = signalled(libc::SIGINT);
+    let (terminated, terminated_err) = signalled(libc::SIGTERM);
+    vec![
+        ("--expires", expired, expired_err),
+        ("--quiet", quiet, quiet_err),
+        ("a socket stop", socket, socket_err),
+        ("ctrl-c", interrupted, interrupted_err),
+        ("SIGTERM", terminated, terminated_err),
+    ]
+}
 
-    assert_eq!(
-        classify_stop(Some(StopKind::Socket)),
-        Stopped::Local,
-        "the socket stop renders as the local stop"
-    );
-    let wire = StopKind::Wire(swoosh::testkit::TestNode::seeded(0x0b).verify_key());
-    for source in [None, Some(wire), Some(StopKind::Expires)] {
+/// A `file:` target typed to name a file that is not there refuses before the lock: exit 1, the path as it
+/// was typed, and no lock file or socket left. A path under a file, not a directory, is not there either. A
+/// path that cannot be checked starts as it always did, and so does a file that is there. Red when the run
+/// starts, or the path prints anchored.
+#[test]
+fn a_missing_file_target_refuses_before_bind() {
+    let scratch = ProcessScratch::new("missing");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
+    std::fs::write(scratch.base.join("here.txt"), "bytes").expect("a file to serve");
+    let absent = scratch.base.join("gone.txt");
+    let with = format!("doc=file:{}", absent.display());
+    for (args, typed) in [
+        (vec!["doc=file:missing.txt"], "missing.txt".to_owned()),
+        (vec!["--with", &with], absent.display().to_string()),
+        (
+            vec!["doc=file:here.txt/inside"],
+            "here.txt/inside".to_owned(),
+        ),
+    ] {
+        let refused = serve_in(
+            &scratch,
+            &[&["--local", "--expires", "1s"][..], &args].concat(),
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(refused.status.code(), Some(1), "{args:?}: {stderr}");
         assert_eq!(
-            classify_stop(source),
-            Stopped::Requested,
-            "a wire or expires stop renders as requested: {source:?}"
+            stderr,
+            format!("error: {typed} does not exist\n"),
+            "{args:?}"
+        );
+        assert!(refused.stdout.is_empty(), "{args:?} binds nothing");
+        assert!(!home.serve_lock().exists(), "{args:?} takes no lock");
+        assert!(!socket.exists(), "{args:?} leaves no socket");
+    }
+    let shut = scratch.base.join("shut");
+    std::fs::create_dir(&shut).expect("a directory to close");
+    let _closed = Closed::shut(&shut);
+    // Root reads through any mode, so for root the closed directory proves nothing.
+    // SAFETY: `geteuid` reads this process's effective user id and has no failure mode.
+    let root = unsafe { libc::geteuid() } == 0;
+    for target in ["doc=file:here.txt", "doc=file:shut/inside.txt"] {
+        if root && target.contains("shut") {
+            continue;
+        }
+        let served = serve_in(&scratch, &["--local", "--expires", "1s", target]);
+        assert!(
+            served.status.success(),
+            "{target}: {}",
+            String::from_utf8_lossy(&served.stderr)
         );
     }
+}
+
+/// A directory closed to every user, opened again when this drops, so its scratch is removed whatever an
+/// assert did first.
+struct Closed<'p>(&'p Path);
+
+impl<'p> Closed<'p> {
+    fn shut(dir: &'p Path) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).expect("closed");
+        Self(dir)
+    }
+}
+
+impl Drop for Closed<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// Run `swoosh serve <args>` under `scratch` to its end from the scratch's own directory, so a relative
+/// path reads there.
+fn serve_in(scratch: &ProcessScratch, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(swoosh_binary());
+    command
+        .current_dir(&scratch.base)
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .arg("serve")
+        .args(args)
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME");
+    run_binary_with_deadline(&mut command, Duration::from_secs(60))
+}
+
+/// A run that admits a root's devices says so in four lines, the root alone on its row, and prints them as
+/// the screen draws them. Red when the words drift, `root root:` returns, or the run prints them some other
+/// way.
+#[test]
+fn admitting_a_root_prints_its_four_lines() {
+    let root = admitted_root();
+    let mut drawn = Vec::new();
+    admitting_lines(&root)
+        .write(&mut drawn)
+        .expect("a Vec takes the screen");
+    let drawn = String::from_utf8(drawn).expect("the screen is UTF-8");
     assert_eq!(
-        classify_stop(Some(StopKind::Interrupted)),
-        Stopped::Interrupted,
-        "a recorded interrupt renders as interrupted"
+        drawn,
+        format!(
+            "Admitting the devices of this root for this run:\n  {root}\nThis machine does not get the keys \
+             that root revoked.\nA device that root revoked still gets in.\n"
+        )
     );
+    let printed = admitting_run(&ProcessScratch::new("admit"));
+    assert!(printed.contains(&drawn), "{printed}");
+    assert!(!printed.contains("root root:"), "{printed}");
+}
+
+/// The root an admitting run names: one this scratch home neither is nor knows.
+fn admitted_root() -> String {
+    format!("root:{}", swoosh::testkit::TestRoot::seeded(0x5d).node_id())
+}
+
+/// What a run that admits [`admitted_root`]'s devices printed on stderr, to its end.
+fn admitting_run(scratch: &ProcessScratch) -> String {
+    let root = admitted_root();
+    let run = serve_in(
+        scratch,
+        &["--local", "--expires", "1s", "--admit", &root, "ping"],
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(run.status.success(), "{stderr}");
+    stderr
+}
+
+/// A `serve` warning is one line through the screen: the `warning:` head, a space, the fact as written.
+/// The fact's own words are pinned whole where a run prints it (`tests/anchored_serve.rs`).
+#[test]
+fn a_serve_warning_is_one_head_line() {
+    let mut out = Vec::new();
+    warning(&"web has live links")
+        .write(&mut out)
+        .expect("a Vec takes the screen");
+    assert_eq!(out, b"warning: web has live links\n");
+}
+
+/// The screen law holds on every serve-side screen this file prints: each end's stdout, the missing file's
+/// refusal, the admitting lines, and the start's warning of links made for another target, less its owed
+/// line. Red on any break.
+#[test]
+fn every_serve_side_screen_holds_the_law() {
+    let scratch = ProcessScratch::new("law");
+    let refused = serve_in(&scratch, &["--local", "doc=file:missing.txt"]);
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    swoosh::grants::Grants::at(home.links())
+        .append(
+            &swoosh::testkit::lock(),
+            &swoosh::grants::GrantRecord {
+                target: "drop".parse().expect("a service name"),
+                serves: None,
+                kind: swoosh::grants::GrantKind::Bearer,
+                delegation: swoosh::grants::Delegation::Delegable,
+                holder: swoosh::grants::ANYONE.to_owned(),
+                root_id: nauthy::RevocationId::from_bytes(vec![0x5c, 1]),
+                expiry: std::time::SystemTime::now() + Duration::from_secs(3600),
+            },
+        )
+        .expect("a link made while drop served nothing");
+    let inbox = scratch.base.join("drop");
+    std::fs::create_dir(&inbox).expect("a directory to receive into");
+    let entry = format!("drop=recv:{}", inbox.display());
+    let warned = serve_in(&scratch, &["--local", "--expires", "1s", &entry]);
+    let warned = String::from_utf8_lossy(&warned.stderr).into_owned();
+    assert!(warned.contains("warning: drop has live links"), "{warned}");
+    crate::screen::owed::hold_but_owed(&warned);
+    let mut screens: Vec<(String, String)> = serve_ends()
+        .into_iter()
+        .flat_map(|(end, stdout, stderr)| {
+            [
+                (format!("{end} stdout"), stdout),
+                (format!("{end} stderr"), stderr),
+            ]
+        })
+        .filter(|(end, screen)| !(end.starts_with("--quiet") && screen.is_empty()))
+        .collect();
+    screens.push((
+        "a missing file".to_owned(),
+        String::from_utf8_lossy(&refused.stderr).into_owned(),
+    ));
+    screens.push(("admitting".to_owned(), admitting_run(&scratch)));
+    for (what, screen) in &screens {
+        assert!(!screen.is_empty(), "{what} printed nothing");
+        if let Err(breach) = crate::screen::law::holds(screen) {
+            panic!("{what}: {breach}\n{screen}");
+        }
+    }
 }
 
 /// The route table a BARE `swoosh serve` builds, assembled from the product's own default set through
@@ -1362,14 +1543,17 @@ fn the_control_socket_adds_no_service() {
 /// A `serve` for `scratch` running in the background: the child, what it printed, and its control socket.
 struct Running {
     child: KillOnDrop,
-    stdout: std::sync::Arc<std::sync::Mutex<String>>,
+    /// What it prints on stdout, whole once it has exited.
+    stdout: std::thread::JoinHandle<String>,
+    /// What it prints on stderr, whole once it has exited.
+    stderr: std::thread::JoinHandle<String>,
     socket: PathBuf,
 }
 
 impl Running {
     /// Start `swoosh serve <args>` under `scratch` and wait until its control socket answers.
     fn start(scratch: &ProcessScratch, args: &[&str]) -> Self {
-        use std::io::Read as _;
+        use std::io::Read;
 
         let home =
             Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
@@ -1384,22 +1568,22 @@ impl Running {
             .env_remove("SWOOSH_HOME")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = KillOnDrop(command.spawn().expect("serve spawns"));
-        let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let mut pipe = child.0.stdout.take().expect("piped stdout");
-        let sink = std::sync::Arc::clone(&stdout);
-        std::thread::spawn(move || {
-            let mut byte = [0u8; 256];
-            while let Ok(read @ 1..) = pipe.read(&mut byte) {
-                sink.lock()
-                    .expect("the capture lock")
-                    .push_str(&String::from_utf8_lossy(&byte[..read]));
-            }
-        });
+        // Each pipe is read to its end on its own thread, so neither fills while the other waits.
+        let capture = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).into_owned()
+            })
+        };
+        let stdout = capture(Box::new(child.0.stdout.take().expect("piped stdout")));
+        let stderr = capture(Box::new(child.0.stderr.take().expect("piped stderr")));
         let mut running = Self {
             child,
             stdout,
+            stderr,
             socket,
         };
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -1457,8 +1641,13 @@ impl Running {
         }
     }
 
-    /// Stop it over its socket and wait for a clean exit; what it printed.
-    fn stop(mut self) -> String {
+    /// Stop it over its socket and wait for a clean exit; what it printed on stdout.
+    fn stop(self) -> String {
+        self.stopped().0
+    }
+
+    /// Stop it over its socket and wait for a clean exit; what it printed on stdout and on stderr.
+    fn stopped(mut self) -> (String, String) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1466,8 +1655,16 @@ impl Running {
         let _ = runtime.block_on(control_round_trip(&self.socket, Request::Stop));
         let status = self.child.0.wait().expect("reap serve");
         assert!(status.success(), "a stopped serve exits 0: {status}");
-        std::thread::sleep(Duration::from_millis(100));
-        self.stdout.lock().expect("the capture lock").clone()
+        self.printed()
+    }
+
+    /// What it printed on stdout and on stderr, once it has exited: its pipes are closed, so each reader
+    /// ends.
+    fn printed(self) -> (String, String) {
+        (
+            self.stdout.join().expect("the stdout reader joins"),
+            self.stderr.join().expect("the stderr reader joins"),
+        )
     }
 }
 
