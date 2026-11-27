@@ -731,3 +731,39 @@ fn a_broken_root_key_is_not_a_name() {
         "{stderr}"
     );
 }
+
+/// A path `send` cannot read refuses before anything is dialed, bound or read: a missing one says there
+/// is no such path, one that is there and will not open says it could not be read, and both exit 1 with
+/// nothing on stdout and no key made in the home.
+#[test]
+fn a_missing_file_refuses_before_any_dial() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("send-missing");
+    let machine = key(9);
+    let missing = scratch.base.join("no-such-file");
+    let shut = scratch.base.join("shut.txt");
+    std::fs::write(&shut, b"hello").unwrap();
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+    for (path, line) in [
+        (
+            &missing,
+            format!("error: no such path: {}\n", missing.display()),
+        ),
+        (&shut, format!("error: could not read {}\n", shut.display())),
+    ] {
+        let out = swoosh(&scratch, &["send", path.to_str().unwrap(), &machine]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{stderr}");
+        assert_eq!(stderr, line);
+        assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    }
+    // Never dialed: the run made no key of its own in the home.
+    assert!(
+        !Home::resolve(Some(scratch.home.clone()))
+            .unwrap()
+            .key()
+            .exists()
+    );
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o600)).unwrap();
+}

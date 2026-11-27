@@ -1000,6 +1000,10 @@ async fn run() -> eyre::Result<()> {
             )
         })
         .transpose()?;
+    // A path `send` cannot read refuses here, before the key is read or anything is dialed or bound.
+    if let Outward::Send(cmd) = &reach {
+        cmd.check_paths().await?;
+    }
 
     // What the own bind reads off the verb, and what runs beside it on either path, read before the verb
     // splits into how it runs: facts of the verb alone, so nothing is opened or read for them.
@@ -1422,10 +1426,7 @@ impl Dialing {
                     .await
             }
             Self::Status(cmd) => cmd.probe(source, route, machine, admitted, out, err).await,
-            Self::Send(cmd) => {
-                cmd.send(source, route, machine, admitted, sent, out, err)
-                    .await
-            }
+            Self::Send(cmd) => cmd.send(source, route, machine, admitted, sent, err).await,
             // None of these asks a root, so the signal goes unheard.
             Self::Forward(cmd) => cmd.forward(source, route, machine, contacts, stdio).await,
             Self::Proxy(cmd) => cmd.proxy(source, route, machine, contacts, out).await,

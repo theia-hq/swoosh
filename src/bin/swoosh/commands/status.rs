@@ -32,7 +32,7 @@ use bifrost::{Path, Session};
 use clap::Args;
 use measure::{Ping, ProtocolError};
 use nauthy::Service;
-use swoosh::escape::{DETAIL_ROOM, beside, causes, columns, peer_cell, room};
+use swoosh::escape::{beside, causes, columns, peer_cell, reason_row, room};
 use swoosh::home::Home;
 use swoosh::learn::Admitted;
 use swoosh::observation::Follow;
@@ -494,22 +494,21 @@ impl Line {
 }
 
 impl core::fmt::Display for Line {
-    /// `<peer>, path: <direct | relayed through <relay>>, rtt <n>`, Tailscale-status shaped, with no
-    /// `path:` when the reading after the probe failed, and `; serving: <names>` for one of your devices;
-    /// or `<peer>: unreachable` for a device that did not answer, or `reached, but refused (<refusal>)` /
-    /// `reached, but the probe failed` over a detail line with its cause, for a node that answered the
-    /// dial and then said no or broke. Both failure lines say it was REACHED (not unreachable) and render
-    /// their typed cause, so a gate refusal reads descriptively and is never doubled (`refused
-    /// (refused)`), and a mid-protocol failure names what broke instead of a healthy-looking path. The
-    /// path is the one `ping` and `speed` print. No line names the transport: through `serve` the verb
-    /// does not know which one carried the probe.
+    /// `<peer>   reachable, <direct | relayed through <relay>>, <n> ms`, with no path when the reading
+    /// after the probe failed, and `; serving <names>` for one of your devices; or `<peer>: unreachable`
+    /// for a device that did not answer, or `reached, but refused (<refusal>)` / `reached, but the probe
+    /// failed` over a detail line with its cause, for a node that answered the dial and then said no or
+    /// broke. Both failure lines say it was REACHED (not unreachable) and render their typed cause, so a
+    /// gate refusal reads descriptively and is never doubled (`refused (refused)`), and a mid-protocol
+    /// failure names what broke instead of a healthy-looking path. The path is the one `ping` and `speed`
+    /// print. No line names the transport: through `serve` the verb does not know which one carried the
+    /// probe.
     ///
     /// Peer text (a refusal, a cause, the served names) goes last on its line, cut to the room the line
     /// has left, so it can never wrap onto a line of its own; swoosh's own causes are never cut.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let lead = match self.state {
-            // A reached device's line carries its fields after a comma, not a colon.
-            State::Reached { .. } => format!("{}, ", self.label),
+            State::Reached { .. } => format!("{}   reachable, ", self.label),
             _ => format!("{}: ", self.label),
         };
         f.write_str(&lead)?;
@@ -532,14 +531,12 @@ impl core::fmt::Display for Line {
             State::Refused {
                 refused: Refused::Other(text),
             } => f.write_str(&beside(columns(&lead), "reached, but refused (", text, ")")),
-            // The cause goes on a detail line: swoosh's own sentence whole, the peer's text cut to the room.
+            // The cause goes on a detail line: swoosh's own sentence whole, the peer's text as a `reason` row.
             State::Failed { cause } => match cause {
                 Cause::Own(sentence) => write!(f, "reached, but the probe failed\n  {sentence}"),
-                Cause::Peer(text) => write!(
-                    f,
-                    "reached, but the probe failed\n  {}",
-                    peer_cell(text, DETAIL_ROOM)
-                ),
+                Cause::Peer(text) => {
+                    write!(f, "reached, but the probe failed\n{}", reason_row(text))
+                }
             },
             State::Unanswered { sent } => {
                 write!(
@@ -550,16 +547,16 @@ impl core::fmt::Display for Line {
             State::Reached { path, rtt, serving } => {
                 let mut said = String::new();
                 if let Some(path) = path {
-                    said.push_str(&format!("path: {}, ", reach::PathLine(path)));
+                    said.push_str(&format!("{}, ", reach::PathLine(path)));
                 }
-                said.push_str(&format!("rtt {:.3} ms", rtt.as_secs_f64() * 1000.0));
+                said.push_str(&format!("{:.1} ms", rtt.as_secs_f64() * 1000.0));
                 f.write_str(&said)?;
                 match serving.as_deref() {
                     None => Ok(()),
-                    Some([]) => f.write_str("; serving: nothing"),
+                    Some([]) => f.write_str("; serving nothing"),
                     // The names are the device's own: one peer cell, escaped and cut, last on the line.
                     Some(names) => {
-                        let words = "; serving: ";
+                        let words = "; serving ";
                         let taken = columns(&lead) + columns(&said) + words.len();
                         write!(f, "{words}{}", peer_cell(&names.join(", "), room(taken)))
                     }
@@ -784,16 +781,16 @@ mod tests {
                 url::Url::parse(url).expect("a relay url"),
             ))
         };
-        assert_eq!(line(Path::Direct), "alice/nas, path: direct, rtt 12.000 ms");
+        assert_eq!(line(Path::Direct), "alice/nas   reachable, direct, 12.0 ms");
         assert_eq!(
             line(relay("https://euw1-1.relay.iroh.network./")),
-            "alice/nas, path: relayed through euw1-1.relay.iroh.network, rtt 12.000 ms"
+            "alice/nas   reachable, relayed through euw1-1.relay.iroh.network, 12.0 ms"
         );
         // A peer can name the relay, so its host prints through the escaper, and nothing else of its URL
         // (no path, no query) reaches the line.
         assert_eq!(
             line(relay("https://relay.example/\u{1b}[2K?ok=1")),
-            "alice/nas, path: relayed through relay.example, rtt 12.000 ms"
+            "alice/nas   reachable, relayed through relay.example, 12.0 ms"
         );
         // A path that could not be read after the probe leaves the field out, never a dangling comma.
         assert_eq!(
@@ -803,7 +800,7 @@ mod tests {
             }
             .line("me/nas", None)
             .to_string(),
-            "me/nas, rtt 12.031 ms; serving: ssh, web"
+            "me/nas   reachable, 12.0 ms; serving ssh, web"
         );
     }
 
@@ -915,7 +912,7 @@ mod tests {
         .await;
         assert_eq!(line.outcome(), reach::Outcome::Healthy);
         let text = line.to_string();
-        assert!(text.starts_with("me/nas, path: direct, rtt "), "{text}");
+        assert!(text.starts_with("me/nas   reachable, direct, "), "{text}");
     }
 
     /// A list request answered with anything but `Done`, or with a list that does not decode, gets the
@@ -983,7 +980,7 @@ mod tests {
         )
         .await
         .to_string();
-        assert!(line.ends_with(" ms; serving: web"), "{line}");
+        assert!(line.ends_with(" ms; serving web"), "{line}");
         // The list holds `control.serve` itself, so a dotted name that reached the line would show here.
         assert!(!line.contains("control."), "no internal route: {line}");
         assert!(!line.contains("internal routes"), "{line}");
@@ -997,7 +994,7 @@ mod tests {
         )
         .await
         .to_string();
-        assert!(empty.ends_with(" ms; serving: nothing"), "{empty}");
+        assert!(empty.ends_with(" ms; serving nothing"), "{empty}");
     }
 
     /// `status me/nas` through `serve`, over `session`, the Open having attached on a relayed path and the
@@ -1099,7 +1096,7 @@ mod tests {
         assert_eq!(started.elapsed(), core::time::Duration::from_secs(4));
         assert_eq!(
             String::from_utf8(out).expect("text"),
-            "me/nas, path: direct, rtt 0.000 ms; serving: web\n"
+            "me/nas   reachable, direct, 0.0 ms; serving web\n"
         );
     }
 
@@ -1154,7 +1151,7 @@ mod tests {
             } else {
                 assert_eq!(
                     out,
-                    "me/nas: reached, but the probe failed\n  stream: peer went away\n"
+                    "me/nas: reached, but the probe failed\n  reason   stream: peer went away\n"
                 );
                 assert_eq!(
                     log,
@@ -1266,7 +1263,7 @@ mod tests {
         let own = probe_own(&AnswersAnEnd { answers: true }, Probe::Services, "me/nas").await;
         assert_eq!(
             own.to_string(),
-            "me/nas, path: direct, rtt 0.000 ms; serving: web"
+            "me/nas   reachable, direct, 0.0 ms; serving web"
         );
         let direct = ConnInfo {
             path: Path::Direct,
@@ -1275,7 +1272,7 @@ mod tests {
         let (out, _, ended) =
             through_serve(&AnswersAnEnd { answers: true }, [PathReply::Sample(direct)]).await;
         ended.expect("the device answered");
-        assert_eq!(out, "me/nas, path: direct, rtt 0.000 ms; serving: web\n");
+        assert_eq!(out, "me/nas   reachable, direct, 0.0 ms; serving web\n");
     }
 
     /// Through `serve` the line's path is the Finish's, read after the probe, never the path the stream
@@ -1293,12 +1290,12 @@ mod tests {
         };
         let (out, log, ended) = through_serve(&answering, [PathReply::Sample(direct)]).await;
         ended.expect("an answered probe exits green");
-        assert_eq!(out, "me/nas, path: direct, rtt 0.000 ms; serving: web\n");
+        assert_eq!(out, "me/nas   reachable, direct, 0.0 ms; serving web\n");
         assert_eq!(log, ["Finish"]);
     }
 
-    /// `status <machine>`'s part of the no-transport rule, on both paths: the line reads `me/nas, path:
-    /// <path>, rtt <n> ms`, then what the machine serves, and nothing printed, the error included, names
+    /// `status <machine>`'s part of the no-transport rule, on both paths: the line reads `me/nas
+    /// reachable, <path>, <n> ms`, then what the machine serves, and nothing printed, the error included, names
     /// the transport. A probe through `serve` that answered ends with no error, so the error's part is
     /// read off one that broke, whose line and error print on stdout and stderr.
     #[tokio::test(start_paused = true)]
@@ -1323,7 +1320,7 @@ mod tests {
         assert!(ended.is_err(), "a broken probe exits 1");
         assert_eq!(
             out,
-            "me/nas: reached, but the probe failed\n  stream: peer went away\n"
+            "me/nas: reached, but the probe failed\n  reason   stream: peer went away\n"
         );
         assert_eq!(
             log,
@@ -1352,8 +1349,8 @@ mod tests {
                 .err()
                 .map(|error| format!("{error:#}"))
                 .unwrap_or_default();
-            let line = out.strip_prefix(&format!("me/nas, path: {path}, rtt "));
-            let rtt = line.and_then(|line| line.split_once(" ms; serving: web\n"));
+            let line = out.strip_prefix(&format!("me/nas   reachable, {path}, "));
+            let rtt = line.and_then(|line| line.split_once(" ms; serving web\n"));
             assert!(
                 rtt.is_some_and(|(rtt, rest)| rtt.parse::<f64>().is_ok() && rest.is_empty()),
                 "{route}: {out}"
@@ -1379,7 +1376,7 @@ mod tests {
         };
         let (out, log, ended) = through_serve(&answering, []).await;
         ended.expect("the probe answered; the missing path does not fail it");
-        assert_eq!(out, "me/nas, rtt 0.000 ms; serving: web\n");
+        assert_eq!(out, "me/nas   reachable, 0.0 ms; serving web\n");
         assert_eq!(
             log,
             [
@@ -1594,5 +1591,21 @@ mod tests {
             );
             assert!(!line.contains(forged), "{line}");
         }
+    }
+
+    /// A failed probe's cause from the peer sits on its detail line as a labelled row, `reason`, so it
+    /// never reads as swoosh's own sentence, its value cut to the 68 columns the label leaves.
+    #[test]
+    fn a_peer_cause_is_a_labelled_reason_row() {
+        let line = Line::failed("me/nas", Cause::Peer("x".repeat(200))).to_string();
+        let (head, detail) = line
+            .split_once('\n')
+            .expect("the cause takes a detail line");
+        assert_eq!(head, "me/nas: reached, but the probe failed");
+        let value = detail
+            .strip_prefix("  reason   ")
+            .expect("the detail line is labelled `reason`");
+        assert_eq!(value, format!("{}\u{2026}", "x".repeat(66)));
+        assert_eq!(swoosh::escape::columns(value), 68);
     }
 }

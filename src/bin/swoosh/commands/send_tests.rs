@@ -71,10 +71,10 @@ fn empty_home(tag: &str) -> Home {
 /// A run that presents this home's standing, for a stream a row holds beside the run's.
 const FAMILY: Credential = Credential::Family { present: None };
 
-/// The names `out`'s `sent` lines give, in the order they were sent.
-fn sent_names(out: &str) -> Vec<&str> {
-    out.lines()
-        .filter_map(|line| line.strip_prefix("sent "))
+/// The names `err`'s `Sent` lines give, in the order they were sent.
+fn sent_names(err: &str) -> Vec<&str> {
+    err.lines()
+        .filter_map(|line| line.strip_prefix("Sent "))
         .filter_map(|line| line.split(" (").next())
         .collect()
 }
@@ -105,7 +105,6 @@ fn device_home(tag: &str, this: NodeId) -> (Home, nauthy::Link) {
 /// What a run printed and how it ended.
 struct Ran {
     ended: eyre::Result<()>,
-    out: String,
     err: String,
 }
 
@@ -137,7 +136,7 @@ async fn by_own_bind<T: Transport, D: Discovery>(
         lane: SEND_LANE,
         slip: cmd.peer.self_present(),
     };
-    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut err = Vec::new();
     let ended = cmd
         .run_send(
             OwnBind::new(peers, home, this, &cmd.credential()),
@@ -146,13 +145,11 @@ async fn by_own_bind<T: Transport, D: Discovery>(
             ask,
             Admitted::unheard(),
             &Cell::new(false),
-            &mut out,
             &mut err,
         )
         .await;
     Ran {
         ended,
-        out: String::from_utf8(out).unwrap(),
         err: String::from_utf8(err).unwrap(),
     }
 }
@@ -194,7 +191,7 @@ async fn through_socket(
         dial: &dial,
         socket: &socket,
     };
-    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut err = Vec::new();
     let ended = tokio::time::timeout(
         ROW_BOUND,
         cmd.run_send(
@@ -204,7 +201,6 @@ async fn through_socket(
             ask,
             Admitted::unheard(),
             &Cell::new(false),
-            &mut out,
             &mut err,
         ),
     )
@@ -212,7 +208,6 @@ async fn through_socket(
     .expect("the run ended");
     Ran {
         ended,
-        out: String::from_utf8(out).unwrap(),
         err: String::from_utf8(err).unwrap(),
     }
 }
@@ -276,6 +271,13 @@ async fn send_through_serve_binds_nothing_and_reads_no_key() {
         .unwrap()
         .unwrap();
     assert_eq!(file_opens(&heard).len(), 3);
+    // Every result is a line on stderr, held to the screen law; nothing of the run reaches stdout.
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    let err = String::from_utf8(err).unwrap();
+    assert_eq!(sent_names(&err).len(), 3, "{err}");
+    if let Err(breach) = crate::screen::law::holds(&err) {
+        panic!("{breach}\n{err}");
+    }
 }
 
 /// By own bind, N files are N streams on one Bulk session of the run's own: a Main session already held
@@ -654,10 +656,10 @@ async fn send_ends_when_serve_stops_before_an_open_is_answered() {
             "{:#}",
             ran.ended.expect_err("a skipped file ends the run non-zero")
         ),
-        "1 item(s) could not be sent"
+        "1 item could not be sent\n  The others were sent."
     );
-    let sent = sent_names(&ran.out);
-    assert_eq!(sent.len(), 1, "{}", ran.out);
+    let sent = sent_names(&ran.err);
+    assert_eq!(sent.len(), 1, "{}", ran.err);
     let skipped = skips(&ran.err);
     assert_eq!(skipped.len(), 1, "{}", ran.err);
     let (name, line) = skipped[0];
@@ -697,8 +699,8 @@ async fn a_serve_stopped_after_a_sent_file_ends_without_resending() {
     assert_eq!(format!("{report:#}"), STOPPED_AFTER_SENT);
     assert!(!report.is::<ThisMachine>(), "exit 1, not a usage error");
     // The run ends at the first file to meet the stop; the files still in flight print nothing.
-    assert!(!sent_names(&ran.out).is_empty(), "{}", ran.out);
-    assert_eq!(ran.err, "", "no skip line");
+    assert!(!sent_names(&ran.err).is_empty(), "{}", ran.err);
+    assert!(skips(&ran.err).is_empty(), "no skip line: {}", ran.err);
     tokio::time::timeout(ROW_BOUND, resident)
         .await
         .unwrap()
@@ -714,7 +716,7 @@ async fn a_serve_stopped_after_a_sent_file_ends_without_resending() {
     let _ = std::fs::remove_dir_all(dir);
     let report = ran.ended.expect_err("the run ended non-zero");
     assert_eq!(format!("{report:#}"), SERVE_STOPPED);
-    assert!(sent_names(&ran.out).is_empty(), "{}", ran.out);
+    assert!(sent_names(&ran.err).is_empty(), "{}", ran.err);
     tokio::time::timeout(ROW_BOUND, resident)
         .await
         .unwrap()
@@ -750,8 +752,8 @@ async fn a_serve_stopped_mid_transfer_ends_without_resending() {
     let report = ran.ended.expect_err("the run ended non-zero");
     assert_eq!(format!("{report:#}"), STOPPED_AFTER_SENT);
     assert!(!report.is::<ThisMachine>(), "exit 1, not a usage error");
-    assert!(!sent_names(&ran.out).is_empty(), "{}", ran.out);
-    assert_eq!(ran.err, "", "no skip line");
+    assert!(!sent_names(&ran.err).is_empty(), "{}", ran.err);
+    assert!(skips(&ran.err).is_empty(), "no skip line: {}", ran.err);
     let heard = tokio::time::timeout(ROW_BOUND, resident)
         .await
         .unwrap()
@@ -768,7 +770,7 @@ async fn a_serve_stopped_mid_transfer_ends_without_resending() {
     let _ = std::fs::remove_dir_all(dir);
     let report = ran.ended.expect_err("the run ended non-zero");
     assert_eq!(format!("{report:#}"), SERVE_STOPPED);
-    assert!(sent_names(&ran.out).is_empty(), "{}", ran.out);
+    assert!(sent_names(&ran.err).is_empty(), "{}", ran.err);
     assert_eq!(ran.err, "", "no skip line");
     let heard = tokio::time::timeout(ROW_BOUND, resident)
         .await
@@ -797,10 +799,10 @@ async fn a_cut_transfer_with_serve_answering_skips_its_file() {
             "{:#}",
             ran.ended.expect_err("a skipped file ends the run non-zero")
         ),
-        "1 item(s) could not be sent"
+        "1 item could not be sent\n  The others were sent."
     );
-    let sent = sent_names(&ran.out);
-    assert_eq!(sent.len(), 1, "{}", ran.out);
+    let sent = sent_names(&ran.err);
+    assert_eq!(sent.len(), 1, "{}", ran.err);
     let skipped = skips(&ran.err);
     assert_eq!(skipped.len(), 1, "{}", ran.err);
     let (name, _) = skipped[0];
@@ -846,10 +848,10 @@ async fn send_skips_an_unreached_file_after_one_was_admitted() {
             "{:#}",
             ran.ended.expect_err("a skipped file ends the run non-zero")
         ),
-        "1 item(s) could not be sent"
+        "1 item could not be sent\n  The others were sent."
     );
-    let sent = sent_names(&ran.out);
-    assert_eq!(sent.len(), many - 1, "{}", ran.out);
+    let sent = sent_names(&ran.err);
+    assert_eq!(sent.len(), many - 1, "{}", ran.err);
     let skipped = skips(&ran.err);
     assert_eq!(skipped.len(), 1, "{}", ran.err);
     let (name, line) = skipped[0];
@@ -891,10 +893,10 @@ async fn send_skip_lines_name_their_file() {
             "{:#}",
             ran.ended.expect_err("a skipped file ends the run non-zero")
         ),
-        "2 item(s) could not be sent"
+        "2 items could not be sent\n  The others were sent."
     );
-    let sent = sent_names(&ran.out);
-    assert_eq!(sent.len(), 1, "{}", ran.out);
+    let sent = sent_names(&ran.err);
+    assert_eq!(sent.len(), 1, "{}", ran.err);
     let mut named: Vec<&str> = skips(&ran.err).into_iter().map(|(name, _)| name).collect();
     assert_eq!(named.len(), 2, "{}", ran.err);
     named.extend(&sent);
@@ -1034,21 +1036,32 @@ async fn send_skips_a_file_whose_open_fails_alone() {
     );
     let ran = through(&cmd, &served.home, &peer, None, &contacts).await;
     let _ = std::fs::remove_dir_all(dir);
+    let report = ran.ended.expect_err("a skipped file ends the run non-zero");
     assert_eq!(
-        format!(
-            "{:#}",
-            ran.ended.expect_err("a skipped file ends the run non-zero")
-        ),
-        "1 item(s) could not be sent"
+        format!("{report:#}"),
+        "1 item could not be sent\n  The others were sent."
     );
-    let sent = sent_names(&ran.out);
-    assert_eq!(sent.len(), 2, "{}", ran.out);
+    // What the person sees, the run's lines and its refusal as `main` prints it, holds the screen law.
+    let lines = crate::error_lines(&report, &Vec::new());
+    for screen in [&ran.err, &lines] {
+        if let Err(breach) = crate::screen::law::holds(screen) {
+            panic!("{breach}\n{screen}");
+        }
+    }
+    let sent = sent_names(&ran.err);
+    assert_eq!(sent.len(), 2, "{}", ran.err);
     let skipped = ["f0.txt", "f1.txt", "f2.txt"]
         .into_iter()
         .find(|name| !sent.contains(name))
         .unwrap();
+    let unsent: String = ran
+        .err
+        .lines()
+        .filter(|line| !line.starts_with("Sent "))
+        .map(|line| format!("{line}\n"))
+        .collect();
     assert_eq!(
-        ran.err,
+        unsent,
         format!(
             "skip {skipped}: too many connections open through swoosh serve on this machine\n  Close \
              one, or wait for one to end, then try again.\n"
@@ -1102,7 +1115,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
             slip: None,
         };
         let (admitted, lookup) = crate::lookup(swoosh::learn::Asked::of(&peer));
-        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut err = Vec::new();
         let sent = Cell::new(false);
         let (ended, _shown) = tokio::join!(
             cmd.run_send(
@@ -1112,7 +1125,6 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
                 ask,
                 admitted,
                 &sent,
-                &mut out,
                 &mut err,
             ),
             lookup
@@ -1159,7 +1171,7 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
             socket: &socket,
         };
         let (admitted, lookup) = crate::lookup(swoosh::learn::Asked::of(&peer));
-        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut err = Vec::new();
         let sent = Cell::new(false);
         let _ = tokio::time::timeout(ROW_BOUND, async {
             tokio::join!(
@@ -1170,7 +1182,6 @@ async fn the_lookup_asks_after_the_first_admitted_file() {
                     ask,
                     admitted,
                     &sent,
-                    &mut out,
                     &mut err
                 ),
                 lookup
@@ -1392,10 +1403,11 @@ async fn a_hostile_refusal_prints_escaped() {
     assert!(ran.ended.is_err(), "a refused stream is a skip");
     assert_eq!(
         ran.err,
-        // Too long beside the name, the reason takes a detail line of its own.
+        // Too long beside the name, the reason takes a detail line of its own, labelled as a row, and is cut
+        // to the room the label leaves, the last escape cut whole.
         format!(
-            "skip swoosh-send-{}-refused.txt:\n  stream refused: unavailable: \
-             no\\r\\u{{1b}}[2Ksent a.txt (1 bytes)\\u{{202e}}\n",
+            "skip swoosh-send-{}-refused.txt:\n  reason   stream refused: unavailable: \
+             no\\r\\u{{1b}}[2Ksent a.txt (1 bytes)\u{2026}\n",
             std::process::id()
         )
     );
@@ -1503,7 +1515,7 @@ async fn a_stalled_serve_ends_a_send_once() {
         dial: &dial,
         socket: &socket,
     };
-    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut err = Vec::new();
     let ended = tokio::time::timeout(
         core::time::Duration::from_secs(600),
         cmd.send(
@@ -1512,7 +1524,6 @@ async fn a_stalled_serve_ends_a_send_once() {
             &peer,
             Admitted::unheard(),
             &Cell::new(false),
-            &mut out,
             &mut err,
         ),
     )
@@ -1522,8 +1533,11 @@ async fn a_stalled_serve_ends_a_send_once() {
     let _ = std::fs::remove_dir_all(dir);
     let report = ended.expect_err("a stalled serve ends the run non-zero");
     assert!(report.is::<through_serve::Unresponsive>(), "{report:#}");
-    assert_eq!(String::from_utf8(err).unwrap(), "", "no skip line");
-    assert!(sent_names(&String::from_utf8(out).unwrap()).is_empty());
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        "",
+        "no skip line, and nothing sent"
+    );
     let heard = resident.await.unwrap();
     assert_eq!(file_opens(&heard).len(), 1, "no Open after the stall");
 }
@@ -1571,12 +1585,7 @@ async fn an_untrusted_socket_ends_a_send_once() {
         "{report}"
     );
     assert!(!report.contains("could not be sent"), "{report}");
-    assert_eq!(ran.err, "", "no skip line");
-    assert_eq!(
-        ran.out,
-        format!("sending to {}...\n", peer.key()),
-        "nothing sent"
-    );
+    assert_eq!(ran.err, "", "no skip line, and nothing sent");
 }
 
 /// A file skipped for a reason in wide glyphs, under a name in wide glyphs: the name is cut, and the
@@ -1597,7 +1606,7 @@ fn a_wide_skip_line_cannot_forge_a_line() {
         assert!(!line.contains(forged), "{line}");
     }
     // A sent file's name is cut so the line ends inside 80 columns.
-    let line = super::sent_line(&wide, 3);
+    let line = super::sent_line(&wide, swoosh::size::Size(3), "me/nas");
     assert!(
         crate::commands::through_serve::tests::columns_at_most(&line) < 80,
         "{line}"
@@ -1608,4 +1617,35 @@ fn a_wide_skip_line_cannot_forge_a_line() {
         super::skip_line("f0.txt", "connection lost"),
         "skip f0.txt: connection lost"
     );
+}
+
+/// A reason that does not fit beside its file's name takes a detail line labelled as a row, `reason`, so a
+/// peer's words never read as swoosh's own sentence. Already escaped where it entered, it is not escaped
+/// again, and its value is cut to the 68 columns the label leaves.
+#[test]
+fn a_skip_reason_on_its_own_line_is_a_labelled_row() {
+    let name = "n".repeat(70);
+    let line = super::skip_line(&name, r"peer said: no\r");
+    assert_eq!(line, format!("skip {name}:\n  reason   peer said: no\\r"));
+    let line = super::skip_line(&name, &"x".repeat(200));
+    let (_, detail) = line
+        .split_once('\n')
+        .expect("the reason takes a detail line");
+    let value = detail
+        .strip_prefix("  reason   ")
+        .expect("the detail line is labelled `reason`");
+    assert_eq!(value, format!("{}\u{2026}", "x".repeat(66)));
+}
+
+/// A named path that is not there refuses before the dial on one line, as `main` prints it, held to the
+/// screen law.
+#[tokio::test]
+async fn a_missing_path_refuses_on_one_line_that_holds_the_law() {
+    let cmd = send(&["no-such-file.txt", "me/nas"]);
+    let report = cmd.check_paths().await.expect_err("a missing path refuses");
+    let lines = crate::error_lines(&report, &Vec::new());
+    assert_eq!(lines, "error: no such path: no-such-file.txt\n");
+    if let Err(breach) = crate::screen::law::holds(&lines) {
+        panic!("{breach}\n{lines}");
+    }
 }

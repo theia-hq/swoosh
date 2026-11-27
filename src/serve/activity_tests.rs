@@ -1,5 +1,5 @@
-//! The activity renderer's guards, asserted on the bytes a writer receives: a hostile peer-named path is
-//! escaped and capped at the one render site, a stalled writer never blocks the engine's report call,
+//! The activity renderer's guards, asserted on the bytes a writer receives: the sender leads a row and a
+//! hostile peer-named path is escaped and cut to its room at the one render site, a stalled writer never blocks the engine's report call,
 //! the queue holds exactly its bound while the rest are dropped and counted, and the count reaches the
 //! same writer once it moves again.
 
@@ -11,8 +11,9 @@ use std::{io, thread};
 
 use transfer::{Received, ReceivedSink as _};
 
-use super::Activity;
-use crate::escape::{BLANK_LETTERS, MAX_ESCAPED};
+use super::{Activity, Book};
+use crate::contacts::Contacts;
+use crate::escape::BLANK_LETTERS;
 
 /// Long enough that a green run never waits on it; a red run fails with a message rather than hanging.
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -80,18 +81,24 @@ fn capture() -> (Capture, Captured) {
     )
 }
 
-fn recv_route() -> nauthy::Service {
-    "recv".parse().expect("a valid service name")
+/// A book that names no sender, so every row carries the sender's whole key.
+fn nameless() -> Book {
+    Box::new(Contacts::default)
+}
+
+/// A book that names the sender `name`, as a home that saved its key would.
+fn named(name: &'static str) -> Book {
+    Box::new(move || {
+        let mut book = Contacts::default();
+        book.save(&name.parse().expect("a name"), sender().node_id())
+            .expect("the name is free");
+        book
+    })
 }
 
 /// The node every fact here is pushed by.
 fn sender() -> crate::testkit::TestNode {
     crate::testkit::TestNode::seeded(7)
-}
-
-/// The sender's key as a line ends with it: whole, after `from`.
-fn from_sender() -> String {
-    format!("from {}", sender().verify_key())
 }
 
 fn landed(path: &str, bytes: u64) -> Received {
@@ -102,19 +109,82 @@ fn landed(path: &str, bytes: u64) -> Received {
     }
 }
 
-/// Everything one fact renders to, end to end: the sink, the queue, the renderer thread, the writer.
-/// Held as a `String` so a failure prints the bytes escaped; string equality is byte equality.
+/// `rows` with each row's clock read as `HH:MM` and replaced by `00:00`, so a row's bytes are asserted
+/// whatever the time; a continuation line, indented, is kept as it is.
+fn unclocked(rows: &str) -> String {
+    rows.lines()
+        .map(|line| {
+            if line.len() < 5 || line.starts_with(' ') || line.starts_with("warning: ") {
+                return format!("{line}\n");
+            }
+            let (clock, rest) = line.split_at(5);
+            let digits = clock.bytes().filter(u8::is_ascii_digit).count();
+            assert!(
+                digits == 4 && clock.as_bytes()[2] == b':',
+                "a clock: {line:?}"
+            );
+            format!("00:00{rest}\n")
+        })
+        .collect()
+}
+
+/// Everything one fact renders to, end to end, the sender named `me/laptop`: the sink, the queue, the
+/// renderer thread, the writer. Held as a `String` so a failure prints the bytes escaped; string
+/// equality is byte equality.
 fn rendered(path: &str, bytes: u64) -> String {
+    rendered_by(named("me/laptop"), path, bytes)
+}
+
+/// [`rendered`], the sender named by `names`.
+fn rendered_by(names: Book, path: &str, bytes: u64) -> String {
     let (out, captured) = capture();
-    let activity = Activity::spawn(out).expect("the renderer starts");
-    activity.recv(recv_route()).received(landed(path, bytes));
+    let activity = Activity::spawn(out, names).expect("the renderer starts");
+    activity.recv().received(landed(path, bytes));
     drop(activity);
-    String::from_utf8(captured.bytes()).expect("a rendered line is utf-8")
+    String::from_utf8(captured.bytes()).expect("a rendered row is utf-8")
+}
+
+/// A row leads with the clock and the sender, as this home names it, and the peer's file name is last,
+/// so a name can never print a sender of its own before the real one.
+#[test]
+fn receive_row_leads_with_the_sender() {
+    assert_eq!(
+        unclocked(&rendered("photo.bin", 30_000_000)),
+        "00:00  me/laptop sent 28.6 MiB: photo.bin\n"
+    );
+}
+
+/// A sender this home has no name for prints its whole key, so the row breaks after the size and the
+/// file takes a line of its own under the sender. At the widest size the first line is 79 columns.
+#[test]
+fn a_nameless_sender_breaks_after_the_size() {
+    let key = sender().verify_key();
+    let rows = rendered_by(nameless(), "notes.txt", 999 * 1024 * 1024 + 900 * 1024);
+    assert_eq!(
+        unclocked(&rows),
+        format!("00:00  {key} sent 999.9 MiB:\n       notes.txt\n")
+    );
+    assert_eq!(rows.lines().next().map(str::len), Some(79), "{rows}");
+}
+
+/// A name for the sender long enough to leave the file less than its floor puts the file on a line of
+/// its own, so the file keeps room to be read.
+#[test]
+fn a_long_sender_name_puts_the_file_on_its_own_line() {
+    let rows = rendered_by(
+        named("alice/a-machine-with-a-very-long-name-indeed-yes-it-is"),
+        "notes.txt",
+        3,
+    );
+    assert_eq!(
+        unclocked(&rows),
+        "00:00  alice/a-machine-with-a-very-long-name-indeed-yes-it-is sent 3 B:\n       notes.txt\n"
+    );
 }
 
 /// A peer-named path carrying a newline, a carriage return, and an ESC sequence reaches the writer as
-/// visible escapes on ONE line, service-qualified. The bytes are the assertion: no raw control byte and
-/// exactly one line terminator, the renderer's own.
+/// visible escapes on ONE line. The bytes are the assertion: no raw control byte and exactly one line
+/// terminator, the renderer's own.
 #[test]
 fn a_hostile_received_path_is_escaped_in_the_rendered_bytes() {
     let line = rendered("evil\nname\u{1b}[31m\r.txt", 7);
@@ -129,12 +199,9 @@ fn a_hostile_received_path_is_escaped_in_the_rendered_bytes() {
         "the peer's newline forged a second line: {line:?}"
     );
     assert_eq!(
-        line,
-        format!(
-            "recv: received evil\\nname\\u{{1b}}[31m\\r.txt (7 bytes) {}\n",
-            from_sender()
-        ),
-        "the line is service-qualified and every control character is escaped"
+        unclocked(&line),
+        "00:00  me/laptop sent 7 B: evil\\nname\\u{1b}[31m\\r.txt\n",
+        "every control character is escaped"
     );
 }
 
@@ -143,11 +210,8 @@ fn a_hostile_received_path_is_escaped_in_the_rendered_bytes() {
 #[test]
 fn a_path_that_reorders_or_hides_text_is_escaped() {
     assert_eq!(
-        rendered("a\u{85}b\u{202e}c\u{200b}d", 1),
-        format!(
-            "recv: received a\\u{{85}}b\\u{{202e}}c\\u{{200b}}d (1 bytes) {}\n",
-            from_sender()
-        ),
+        unclocked(&rendered("a\u{85}b\u{202e}c\u{200b}d", 1)),
+        "00:00  me/laptop sent 1 B: a\\u{85}b\\u{202e}c\\u{200b}d\n",
     );
 }
 
@@ -156,53 +220,51 @@ fn a_path_that_reorders_or_hides_text_is_escaped() {
 fn a_path_of_blank_letters_is_escaped() {
     let name: String = BLANK_LETTERS.iter().collect();
     assert_eq!(
-        rendered(&name, 1),
-        format!(
-            "recv: received \\u{{115f}}\\u{{1160}}\\u{{3164}}\\u{{ffa0}}\\u{{2800}} (1 bytes) {}\n",
-            from_sender()
-        ),
+        unclocked(&rendered(&name, 1)),
+        "00:00  me/laptop sent 1 B: \\u{115f}\\u{1160}\\u{3164}\\u{ffa0}\\u{2800}\n",
     );
 }
 
-/// A long peer-named path cannot flood the line: the path renders at most [`MAX_ESCAPED`]
-/// characters and marks the cut.
+/// A long peer-named path cannot flood the row: it is cut to the room its line has left and marked.
 #[test]
-fn a_long_received_path_is_capped() {
-    let long = "a".repeat(MAX_ESCAPED * 4);
-    let expected = format!(
-        "recv: received {}... (9 bytes) {}\n",
-        "a".repeat(MAX_ESCAPED),
-        from_sender()
-    );
-    assert_eq!(rendered(&long, 9), expected);
-}
-
-/// Two receive routes on one node name themselves: the same path lands on two lines that say which
-/// route received it.
-#[test]
-fn each_route_leads_its_own_line() {
-    let (out, captured) = capture();
-    let activity = Activity::spawn(out).expect("the renderer starts");
-    activity
-        .recv("alice".parse().expect("a valid service name"))
-        .received(landed("notes.txt", 3));
-    activity
-        .recv("bob".parse().expect("a valid service name"))
-        .received(landed("notes.txt", 4));
-    drop(activity);
+fn a_long_received_path_is_cut_to_its_room() {
+    let long = "a".repeat(1024);
     assert_eq!(
-        String::from_utf8(captured.bytes()).expect("the lines are utf-8"),
-        format!(
-            "alice: received notes.txt (3 bytes) {from}\nbob: received notes.txt (4 bytes) {from}\n",
-            from = from_sender()
-        ),
+        unclocked(&rendered(&long, 9)),
+        format!("00:00  me/laptop sent 9 B: {}\u{2026}\n", "a".repeat(50)),
     );
+}
+
+/// A file name of wide glyphs fills at most the room its line has, counted at two columns for every
+/// scalar that is not ASCII, so it can never wrap at column 80 and start a forged row with the text
+/// after it. Each sample ends in a whole forged row; none reaches a line of its own.
+#[test]
+fn a_wide_peer_name_is_capped_by_display_width() {
+    let forged = "00:48  me/boss sent 3.2 MiB: invoice.pdf";
+    for wide in [
+        "\u{6587}\u{4ef6}".repeat(40),
+        "\u{ff21}\u{ff22}".repeat(40),
+        "\u{200b}".repeat(80),
+        "\u{1f600}".repeat(40),
+        "a".repeat(80),
+    ] {
+        let name = format!("{wide}{forged}");
+        for names in [named("me/laptop"), nameless()] {
+            let rows = rendered_by(names, &name, 3_300_000);
+            for line in rows.lines() {
+                assert!(columns(line) < 80, "{line}");
+                assert!(!line.starts_with("00:48"), "a forged row: {rows}");
+            }
+            assert!(!rows.contains(forged), "{rows}");
+        }
+    }
 }
 
 /// The bound, with the writer wedged: the renderer holds the first line inside a write that does not
 /// return, the queue takes exactly its bound, and every report past it is dropped and counted, all
 /// without the reporting thread ever waiting. Released, the writer receives exactly the lines that were
-/// queued, in order, and then one notice counting the lines it lost.
+/// queued, in order, and then one notice counting the lines it lost. The queued rows render under one
+/// read of the book.
 #[test]
 fn a_wedged_writer_never_blocks_a_report_and_the_queue_holds_its_bound() {
     const BACKLOG: usize = 4;
@@ -212,8 +274,16 @@ fn a_wedged_writer_never_blocks_a_report_and_the_queue_holds_its_bound() {
     let (entered_tx, entered) = mpsc::channel();
     let (release, release_rx) = mpsc::channel();
     out.stall = Some((entered_tx, release_rx));
-    let activity = Activity::with_backlog(out, BACKLOG).expect("the renderer starts");
-    let sink = activity.recv(recv_route());
+    // Counts the book's reads: one for the wedged row, then one for the whole queued batch.
+    let reads = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&reads);
+    let book = named("me/laptop");
+    let book: Book = Box::new(move || {
+        counted.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        book()
+    });
+    let activity = Activity::with_backlog(out, book, BACKLOG).expect("the renderer starts");
+    let sink = activity.recv();
 
     // The first line reaches the writer and wedges it, so everything after it can only queue.
     sink.received(landed("first", 1));
@@ -246,14 +316,18 @@ fn a_wedged_writer_never_blocks_a_report_and_the_queue_holds_its_bound() {
     let _ = release.send(());
     drop(sink);
     drop(activity);
-    let lines = String::from_utf8(captured.bytes()).expect("the lines are utf-8");
-    let from = from_sender();
-    let expected: Vec<String> = core::iter::once(format!("recv: received first (1 bytes) {from}"))
-        .chain((0..BACKLOG).map(|n| format!("recv: received queued-{n} (1 bytes) {from}")))
+    let lines = unclocked(&String::from_utf8(captured.bytes()).expect("the lines are utf-8"));
+    let expected: Vec<String> = core::iter::once("00:00  me/laptop sent 1 B: first".to_owned())
+        .chain((0..BACKLOG).map(|n| format!("00:00  me/laptop sent 1 B: queued-{n}")))
         .chain(core::iter::once(format!(
-            "{OVERFLOW} activity lines dropped while the output was stalled"
+            "warning: {OVERFLOW} activity lines dropped while the output was stalled"
         )))
         .collect();
+    assert_eq!(
+        reads.load(core::sync::atomic::Ordering::Relaxed),
+        2,
+        "the book is read once for each batch the renderer drains, never once a row"
+    );
     assert_eq!(
         lines.lines().collect::<Vec<_>>(),
         expected,
@@ -268,10 +342,10 @@ fn a_wedged_writer_never_blocks_a_report_and_the_queue_holds_its_bound() {
 #[test]
 fn a_drop_with_no_later_line_is_reported_while_the_node_runs() {
     let (out, captured) = capture();
-    let activity = Activity::spawn(out).expect("the renderer starts");
-    let line = &format!("recv: received last (1 bytes) {}\n", from_sender());
-    let notice = "1 activity line dropped while the output was stalled\n";
-    activity.recv(recv_route()).received(landed("last", 1));
+    let activity = Activity::spawn(out, named("me/laptop")).expect("the renderer starts");
+    let line = "00:00  me/laptop sent 1 B: last\n";
+    let notice = "warning: 1 activity line dropped while the output was stalled\n";
+    activity.recv().received(landed("last", 1));
     wait_for_bytes(&captured, line);
     // Past the line's own drain: the renderer has checked the count once and is waiting for work.
     thread::sleep(Duration::from_millis(100));
@@ -282,8 +356,8 @@ fn a_drop_with_no_later_line_is_reported_while_the_node_runs() {
     wait_for_bytes(&captured, &both);
     drop(activity);
     assert_eq!(
-        captured.bytes(),
-        both.as_bytes(),
+        unclocked(&String::from_utf8(captured.bytes()).expect("utf-8")),
+        both,
         "the notice is said once, after the line"
     );
 }
@@ -293,7 +367,7 @@ fn wait_for_bytes(captured: &Captured, expected: &str) {
     let deadline = std::time::Instant::now() + PATIENCE;
     loop {
         let written = captured.written.lock().expect("the capture lock").clone();
-        if written == expected.as_bytes() {
+        if unclocked(&String::from_utf8_lossy(&written)) == expected {
             return;
         }
         assert!(
@@ -303,4 +377,12 @@ fn wait_for_bytes(captured: &Captured, expected: &str) {
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// The most columns `text` can fill in any terminal, counted here apart from the code under test: one per
+/// ASCII scalar, two per any other.
+fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|scalar| if scalar.is_ascii() { 1 } else { 2 })
+        .sum()
 }

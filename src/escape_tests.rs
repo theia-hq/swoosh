@@ -367,15 +367,26 @@ fn peer_text_takes_a_detail_line_when_the_room_is_under_the_floor() {
     assert_eq!(
         beside(0, &words, "unavailable: down", ")"),
         format!(
-            "{}: reached, but refused\n  unavailable: down",
+            "{}: reached, but refused\n  reason   unavailable: down",
             "a".repeat(50)
         )
     );
-    let long = "x".repeat(200);
-    let detail = beside(0, &words, &long, ")");
+}
+
+/// Peer text on a detail line of its own is labelled as a row, `  reason   <text>`, so it never reads as
+/// swoosh's own sentence, and its value is cut to the 68 columns the label leaves, short of the edge.
+#[test]
+fn peer_text_on_a_detail_line_is_a_labelled_row() {
+    let words = format!("{}: reached, but refused (", "a".repeat(50));
+    let detail = beside(0, &words, &"x".repeat(200), ")");
     let (_, last) = detail.split_once('\n').unwrap();
+    let value = last
+        .strip_prefix("  reason   ")
+        .expect("the detail line is labelled `reason`");
+    assert_eq!(columns(value), 68);
+    assert!(value.ends_with(CELL_CUT));
     assert_eq!(columns(last), 2 + DETAIL_ROOM);
-    assert!(last.ends_with(CELL_CUT));
+    assert!(columns(last) < 80);
 }
 
 /// Text that fits is whole and unmarked; text that does not keeps its leading glyphs and ends in the mark.

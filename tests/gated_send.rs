@@ -358,7 +358,12 @@ fn the_product_binding_renders_a_line_only_when_given_a_renderer() {
 /// each, and read the renderer's writer.
 async fn binding_proof() {
     let written = Arc::new(Mutex::new(Vec::new()));
-    let activity = Activity::spawn(LogCapture(Arc::clone(&written))).unwrap();
+    // A home with no name for any key: the row carries the pusher's whole key.
+    let activity = Activity::spawn(
+        LogCapture(Arc::clone(&written)),
+        Box::new(swoosh::contacts::Contacts::default),
+    )
+    .unwrap();
     let loud_dir = out_dir_tagged("bind-loud");
     let hush_dir = out_dir_tagged("bind-hush");
     let host = Node::new(MemTransport::bind(), NoDiscovery);
@@ -399,11 +404,10 @@ async fn binding_proof() {
         assert_eq!(wait_for_file(&dir.join(hostile)).await, payload);
     }
 
-    // The line ends with the pusher's key as the gate proved it, whole: this is the line that tells an
-    // operator who sent the file.
+    // The row leads with the pusher's key as the gate proved it, whole: this is the row that tells an
+    // operator who sent the file. The file follows on a line of its own; the clock leads and is not read.
     let pusher = member.node_id().verify_key().unwrap();
-    let expected =
-        format!("loud: received evil\\nname\\u{{1b}}[31m\\r.txt (1500 bytes) from {pusher}\n");
+    let expected = format!("  {pusher} sent 1.5 KiB:\n       evil\\nname\\u{{1b}}[31m\\r.txt\n");
     for _ in 0..200 {
         if !written.lock().unwrap().is_empty() {
             break;
@@ -413,8 +417,8 @@ async fn binding_proof() {
     // Held long enough for a second line, had the quiet route produced one, to reach the writer too.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        String::from_utf8_lossy(&written.lock().unwrap()),
-        expected,
+        String::from_utf8_lossy(&written.lock().unwrap()).get(5..),
+        Some(expected.as_str()),
         "the route bound with the renderer prints one escaped line naming the pusher, and the quiet route none"
     );
 

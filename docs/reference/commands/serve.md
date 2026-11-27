@@ -40,8 +40,8 @@ Under a name you give (web=tcp:localhost:3000):
 Every `serve` also answers a few internal routes no service list names, such as `control.serve`, which your
 devices use to stop it. Bare `swoosh status` lists them under `internal routes` while `serve` runs.
 Each file a receive service lands prints one line on stderr, such as
-`inbox: received notes.txt (1500 bytes) from ed01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq`.
-The key after `from` is the machine that sent the file.
+`00:47  me/laptop sent 1.5 KiB: notes.txt`: the time, the sender, the size, then the file name. A sender with
+no name here shows its whole key, and the file name goes on the next line.
 The sender chooses the name, so control characters in it are shown escaped. If stderr falls behind, some
 lines are dropped and a line says how many.
 The banner gives this machine's name, when it has one, and its key, how peers reach it under `reach`, and what it serves. With

@@ -440,6 +440,18 @@ impl fmt::Display for Date {
     }
 }
 
+/// `secs` since the epoch in this machine's local time zone, or `None` when the system cannot say.
+pub fn local_time(secs: u64) -> Option<libc::tm> {
+    let time = libc::time_t::try_from(secs).ok()?;
+    // SAFETY: `tm` is plain C data (integers and, on some platforms, a pointer the call sets), so all-zero is
+    // a valid value for `localtime_r` to overwrite.
+    let mut local: libc::tm = unsafe { core::mem::zeroed() };
+    // SAFETY: both pointers name live, initialized values owned by this frame; `localtime_r` writes only
+    // `local` and is the thread-safe form.
+    let done = unsafe { libc::localtime_r(&time, &mut local) };
+    (!done.is_null()).then_some(local)
+}
+
 /// The day a device standing renews from, when it renews on its own: halfway through its last standing.
 /// `None` for a standing too short to renew on its own, or one whose key came in its invite.
 pub fn renew_by(until: u64, duration: u64, seeded: bool) -> Option<u64> {
