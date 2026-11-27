@@ -14,7 +14,7 @@ Usage: swoosh leave [OPTIONS]
 you revoked it, to use it again: it prints the new key, which `swoosh invite <name> <key>` takes where
 your root is kept.
 
-**Things to know.** `leave` removes this machine's record from your root and its list of your devices,
+**Things to know.** `leave` prints the root it left, whole, and removes this machine's record from your root and its list of your devices,
 and keeps every revocation it learned. Your root still lists the machine until you revoke it there with
 `swoosh revoke me/<name>`. `--new-key` keeps the old key in `machine/` and its links file in the home,
 each dated, and the links this machine made under the old key stop working. It refuses while `swoosh serve`

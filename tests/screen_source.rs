@@ -227,6 +227,30 @@ fn a_lock_line_names_its_method_and_spells_touch_id() {
     }
 }
 
+/// A root's key prints bare, `root:<key>`, never after the word `root`: `root root:` read as a stutter, and
+/// named a `root:` line `status` no longer prints. Each site still owed is listed by its file and the unit
+/// that owes it, and a listed site that no longer holds the phrase fails, so the list only shrinks.
+#[test]
+fn no_line_says_root_root() {
+    // The first root's made line is SW6's; serve's admitting line is SW4g's.
+    const OWED: [&str; 2] = ["root.rs", "bin/swoosh/commands/serve.rs"];
+    let mut seen = [false; OWED.len()];
+    for (file, text) in shipped() {
+        for (line, literal) in scan(&text).literals {
+            if !literal.contains("root root:") {
+                continue;
+            }
+            match OWED.iter().position(|owed| *owed == file) {
+                Some(at) => seen[at] = true,
+                None => panic!("{file}:{line}: `root root:` in {literal:?}"),
+            }
+        }
+    }
+    for (owed, seen) in OWED.iter().zip(seen) {
+        assert!(seen, "{owed} no longer says `root root:`: drop its row");
+    }
+}
+
 /// The Touch ID dialog names the command that asked, and only words fixed at build time reach it: the one
 /// call that names the command takes `&'static str`, the static holds one, and no shipped file makes one of a
 /// `String` (`leak`), so a peer's text or a typed word cannot become `'static`. And one call in all of `src/`

@@ -120,6 +120,34 @@ fn carrying(seed: [u8; 32], name: &str) -> String {
 }
 
 /// Every file under `dir`, with its bytes.
+/// The check every join prints after the root's key, ending in the command that undoes the join.
+const CHECK: &str = "An invite alone does not prove who sent it.\n\
+                     On the machine that keeps your root, check that swoosh status shows that key.\n\
+                     If it does not, leave this root:\n  swoosh leave\n";
+
+/// What a change of root prints while `serve` runs: what it cut, and what it did not.
+const SESSIONS: &str = "Sessions this machine admitted under the root it no longer trusts end now,\n\
+                        including one you reached it through as a device of that root.\n\
+                        A session through a link this machine issued stays open.";
+
+/// What a join under a running `serve` adds after the check.
+const SERVING: &str = "A swoosh serve running here admits that root's devices now.";
+
+/// What a switch prints first: the root it left, whole, by `seed`.
+fn left(seed: u8) -> String {
+    format!(
+        "This machine no longer trusts the root it had:\n  root:{}\n\n",
+        root(seed)
+    )
+}
+
+/// `captured` holds the screen law.
+fn hold(captured: &str) {
+    if let Err(breach) = crate::screen::law::holds(captured) {
+        panic!("{breach}\n{captured}");
+    }
+}
+
 fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -232,10 +260,10 @@ async fn run(home: &Home, setup: Setup<'_>) -> Ran {
             },
         )
         .await;
-    Ran {
-        result,
-        err: String::from_utf8(err).unwrap(),
-    }
+    let err = String::from_utf8(err).unwrap();
+    // Every screen a join prints holds the law, but the lines still owed theirs.
+    crate::screen::owed::hold_but_owed(&err);
+    Ran { result, err }
 }
 
 /// `swoosh join` with `invite` on stdin.
@@ -394,7 +422,7 @@ async fn bare_join_at_a_terminal_prints_the_key_and_the_invite_command() {
     );
     assert_eq!(lines[2], "Then paste the invite here:");
     assert!(
-        lines[3].starts_with("joined root"),
+        lines[3].starts_with("This machine is now me/laptop, a device of this root, until "),
         "the invite is read after the lines: {}",
         ran.err
     );
@@ -616,15 +644,8 @@ async fn a_switch_to_a_new_root_ignores_the_old_standings_date() {
     .await;
     ran.joined();
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(OTHER)));
-    assert!(
-        ran.err.contains(&format!(
-            "this machine now trusts root root:{} (was root:{}).",
-            root(OTHER),
-            root(ROOT)
-        )),
-        "{}",
-        ran.err
-    );
+    assert!(ran.err.starts_with(&left(ROOT)), "{}", ran.err);
+    hold(&ran.err);
 }
 
 #[tokio::test]
@@ -781,29 +802,108 @@ async fn join_prints_the_lock_line_once() {
     assert!(!second.err.contains(line), "{}", second.err);
 }
 
+/// The signed screen, amended (A3): the outcome names no root as yours before the check, the root prints
+/// once, whole, as `status` prints it and as the pin holds it, and the check names `swoosh leave` alone on
+/// its line. Red when `root root:` returns, the key prints twice, or the check loses its command.
 #[tokio::test]
-async fn join_says_what_it_joined_and_how_to_check_it() {
+async fn join_result_is_the_signed_screen() {
     let home = scratch("lines");
     let until = now() + 90 * DAY;
     let ran = join(&home, &bound(ROOT, node(OWN), "laptop", until)).await;
     ran.joined();
     let root = root(ROOT);
     assert!(
-        ran.err.contains(&format!(
-            "joined root root:{root}: this machine is its device until {}.",
+        ran.err.starts_with(&format!(
+            "This machine is now me/laptop, a device of this root, until {}:\n  root:{root}\n\n{CHECK}",
             swoosh::root::Date(until)
         )),
         "{}",
         ran.err
     );
+    assert_eq!(ran.err.matches(&root.to_string()).count(), 1, "{}", ran.err);
+    // No line says `your` before the check: the root is no one's until the person has compared it.
+    let (before, _) = ran.err.split_once("An invite alone").unwrap();
+    assert!(!before.contains("your"), "{}", ran.err);
+    assert!(!ran.err.contains("root root:"), "{}", ran.err);
+    assert!(!ran.err.contains(SERVING), "no serve runs: {}", ran.err);
+    hold(&ran.err);
+}
+
+/// A name long enough to take the head past 80 wraps it before its date, at the same indent, so the head
+/// still ends in the colon the key follows. Red when the head passes 80.
+#[tokio::test]
+async fn a_long_name_wraps_the_head_before_its_date() {
+    let home = scratch("long-name");
+    let name = "a-device-named-past-the-screen";
+    let until = now() + 90 * DAY;
+    let ran = join(&home, &bound(ROOT, node(OWN), name, until)).await;
+    ran.joined();
     assert!(
-        ran.err.contains(&format!(
-            "Check that root:{root} is the root: line on the machine that keeps your root; the invite alone \
-             does not prove who sent it."
+        ran.err.starts_with(&format!(
+            "This machine is now me/{name}, a device of this root,\nuntil {}:\n  root:{}\n",
+            swoosh::root::Date(until),
+            root(ROOT)
         )),
         "{}",
         ran.err
     );
+    hold(&ran.err);
+}
+
+/// A first join under a running `serve` says, after the check, that the serve admits the new root's devices
+/// already, since it reads the pin at every admission: the check is then the person's only gate. Red when
+/// the line goes.
+#[tokio::test]
+async fn a_first_join_under_serve_says_it_admits_that_root_now() {
+    let home = scratch("first-serving");
+    let _serving = swoosh::testkit::serving(&home, None);
+    let ran = join(&home, &bound(ROOT, node(OWN), "laptop", now() + 90 * DAY)).await;
+    ran.joined();
+    assert!(
+        ran.err.contains(&format!("{CHECK}\n{SERVING}\n")),
+        "{}",
+        ran.err
+    );
+}
+
+/// A switch prints the old root first, whole, then the sessions a running `serve` ended under it, then the
+/// new root and the same check, so the key just above the check is the one to compare (A3.4); and a running
+/// `serve`, which admits the new root's devices at once, is said after the check. Red when either root
+/// prints twice or `root root:` returns.
+#[tokio::test]
+async fn a_switch_under_serve_prints_both_roots_once_then_the_check() {
+    let home = scratch("switch-serving");
+    device_of(&home, ROOT, now() + 365 * DAY).await;
+    let _serving = swoosh::testkit::serving(&home, None);
+    let until = now() + 90 * DAY;
+    let ran = join_with(
+        &home,
+        &bound(OTHER, node(OWN), "laptop", until),
+        &["--switch"],
+    )
+    .await;
+    ran.joined();
+    let left = left(ROOT);
+    let (head, _) = left.split_at(left.len() - 1);
+    assert_eq!(
+        ran.err,
+        format!(
+            "{head}\n{}\n\nThis machine is now me/laptop, a device of this root, until {}:\n  root:{}\n\n\
+             {CHECK}\nA swoosh serve running here admits that root's devices now.\n",
+            SESSIONS,
+            swoosh::root::Date(until),
+            root(OTHER)
+        )
+    );
+    for seed in [ROOT, OTHER] {
+        assert_eq!(
+            ran.err.matches(&root(seed).to_string()).count(),
+            1,
+            "{}",
+            ran.err
+        );
+    }
+    hold(&ran.err);
 }
 
 #[tokio::test]
@@ -1214,15 +1314,7 @@ async fn each_unfinished_act_is_finished_by_its_verb() {
     let ran = join(&switching, &for_me()).await;
     ran.joined();
     assert!(matches!(read(&switching).await, Standing::Device { pin, .. } if pin == root(ROOT)));
-    assert!(
-        ran.err.contains(&format!(
-            "this machine now trusts root root:{} (was root:{}).",
-            root(ROOT),
-            root(OTHER)
-        )),
-        "{}",
-        ran.err
-    );
+    assert!(ran.err.starts_with(&left(OTHER)), "{}", ran.err);
 
     // A leave, stopped after its standing went and before its pin did.
     let leaving = scratch("stopped-leave");

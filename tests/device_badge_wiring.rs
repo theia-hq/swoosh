@@ -191,7 +191,7 @@ fn a_bound_invite_keeps_the_devices_key_and_verifies_at_the_root() {
         stderr(&joined)
     );
     assert!(
-        stderr(&joined).contains(&format!("Check that root:{root} is the root: line")),
+        stderr(&joined).contains(&format!("\n  root:{root}\n")),
         "join prints the full root for the out-of-band compare: {}",
         stderr(&joined)
     );

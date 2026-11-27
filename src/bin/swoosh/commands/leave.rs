@@ -18,6 +18,8 @@ use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::root::Date;
 use swoosh::standing::{Standing, StandingError};
 
+use crate::screen::{Block, Cell, Screen};
+
 /// Stop being one of your devices. `--new-key` also gives this machine a new key.
 #[derive(Debug, Args)]
 #[command(
@@ -123,21 +125,31 @@ impl LeaveCmd {
             Was::Damaged { root: None } | Was::Unpinned => None,
         };
         if let Some(root) = left {
-            let listed = match (&was, name) {
-                (Was::Device { until, .. }, Some(name)) => format!(
-                    " Your root still lists it as me/{name} until {}: revoke it there with swoosh revoke \
-                     me/{name}.",
-                    Date(*until)
-                ),
-                _ => String::new(),
-            };
-            writeln!(
-                err,
-                "this machine no longer trusts root root:{root}.{listed}"
-            )?;
+            // The left root's key on its own line, then what a running `serve` cut under it, so `that root`
+            // has its referent; then where your root still lists this machine, with the revoke that ends it.
+            let key = format!("root:{root}");
+            let mut screen = Screen::default().block(
+                Block::default()
+                    .text("This machine no longer trusts this root:".to_owned())
+                    .row([Cell::Token(&key)]),
+            );
             if serving {
-                writeln!(err, "{}", super::join::sessions_end(root))?;
+                screen = screen.block(super::join::sessions_end());
             }
+            if let (Was::Device { until, .. }, Some(name)) = (&was, name) {
+                screen = screen.block(
+                    Block::default()
+                        .text(format!(
+                            "Your root still lists this machine as me/{name} until {}.",
+                            Date(*until)
+                        ))
+                        .text("To revoke it, run this where your root is kept:".to_owned())
+                        .command(format!("swoosh revoke me/{name}")),
+                );
+            }
+            let mut printed = Vec::new();
+            screen.write(&mut printed)?;
+            err.write_all(&printed)?;
         }
 
         if let Some(new_key) = new_key {

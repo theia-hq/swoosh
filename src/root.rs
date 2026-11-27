@@ -216,7 +216,7 @@ pub enum RootError {
         pin: NodeId,
     },
     /// The root was revoked on this machine.
-    #[error("root root:{} was revoked on this machine; recovery is a new root", crate::credential::short(.root))]
+    #[error("root:{} was revoked on this machine; recovery is a new root", crate::credential::short(.root))]
     Revoked {
         /// The revoked root.
         root: NodeId,

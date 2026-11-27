@@ -595,5 +595,9 @@ impl<W: io::Write> StateLine<'_, W> {
 pub(crate) mod law;
 
 #[cfg(test)]
+#[path = "screen/owed_tests.rs"]
+pub(crate) mod owed;
+
+#[cfg(test)]
 #[path = "screen_tests.rs"]
 mod tests;
