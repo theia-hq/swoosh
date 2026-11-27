@@ -244,25 +244,29 @@ fn a_screen_a_test_writes_is_held_to_the_law() {
     }
 }
 
+/// A writer that keeps each write apart, and shows style when its flag says so.
+struct Counted(Vec<Vec<u8>>, bool);
+
+impl io::Write for Counted {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.push(buf.to_vec());
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Paint for Counted {
+    fn styled(&self) -> bool {
+        self.1
+    }
+}
+
 /// A screen is built whole and written once, styled or not, so an early-closing reader or a line logged
 /// beside it cannot tear it.
 #[test]
 fn a_screen_is_one_write() {
-    struct Counted(Vec<Vec<u8>>, bool);
-    impl io::Write for Counted {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.push(buf.to_vec());
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    impl Paint for Counted {
-        fn styled(&self) -> bool {
-            self.1
-        }
-    }
     let screen = Screen::default()
         .block(Block::titled("swoosh is serving"))
         .block(Block::titled("serving").row([Cell::Token("web"), Cell::Risk("anyone")]))
@@ -282,4 +286,24 @@ fn a_screen_is_one_write() {
     };
     crate::commands::through_serve::final_path(failed, &mut out).unwrap();
     assert_eq!(out.0.len(), 2, "{:?}", out.0);
+}
+
+/// A refusal's bytes are built by `error_lines` alone and written in one write, styled or not, so a test
+/// that holds `error_lines` to the law holds what a person sees: a chain with detail lines included.
+#[test]
+fn error_lines_is_what_print_error_writes() {
+    let refused = eyre::eyre!("could not reach me/laptop\n  On me/laptop, run swoosh serve.")
+        .wrap_err("send ended");
+    for styled in [false, true] {
+        let mut out = Counted(Vec::new(), styled);
+        crate::print_error(&refused, &mut out);
+        let lines = crate::error_lines(&refused, &out);
+        assert_eq!(out.0, [lines.into_bytes()], "styled {styled}");
+        assert_eq!(out.0[0].contains(&0x1b), styled);
+    }
+    let plain = crate::error_lines(&refused, &Vec::new());
+    assert_eq!(
+        plain,
+        "error: send ended: could not reach me/laptop\n  On me/laptop, run swoosh serve.\n"
+    );
 }

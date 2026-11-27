@@ -179,11 +179,26 @@ impl Dialing {
                 .await
             }
         };
-        Ran {
-            ended,
-            out: String::from_utf8(out).unwrap(),
-            err: String::from_utf8(err).unwrap(),
+        let (out, err) = (
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        );
+        // Every run here is held to the screen law on the bytes a person would see: what it printed, and
+        // a refusal as the composition root prints it. A `Reported` one is already on `err`.
+        for captured in [&out, &err] {
+            if let Err(breach) = crate::screen::law::holds(captured) {
+                panic!("{breach}\n{captured}");
+            }
         }
+        if let Err(report) = &ended
+            && !report.is::<super::Reported>()
+        {
+            let lines = crate::error_lines(report, &Vec::new());
+            if let Err(breach) = crate::screen::law::read(&lines) {
+                panic!("{breach}\n{lines}");
+            }
+        }
+        Ran { ended, out, err }
     }
 }
 

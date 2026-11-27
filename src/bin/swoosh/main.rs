@@ -447,8 +447,14 @@ fn print_error(report: &eyre::Report, err: &mut impl screen::Paint) {
     // Never `eprintln!`, which panics when the write fails: stderr can be a socket whose writing
     // `forward -` has already ended with its stdout, and the run must still exit 1.
     // One write, so a line logged beside it cannot land inside it.
-    let error = screen::Style::ERROR.paint("error:", &*err);
-    let _ = err.write_all(format!("{error} {report:#}\n").as_bytes());
+    let _ = err.write_all(error_lines(report, &*err).as_bytes());
+}
+
+/// The bytes [`print_error`] writes for `report` on `on`, and nothing else builds them, so a test holds a
+/// refusal to the screen law on exactly what a person sees: plain on a writer that shows no style.
+fn error_lines(report: &eyre::Report, on: &impl screen::Paint) -> String {
+    let error = screen::Style::ERROR.paint("error:", on);
+    format!("{error} {report:#}\n")
 }
 
 /// Parse `argv`. A `forward` missing only its local end is refused with [`forward::NO_LOCAL_END`], which says

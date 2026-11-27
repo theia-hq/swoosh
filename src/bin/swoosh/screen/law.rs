@@ -1,6 +1,7 @@
 //! The screen law's two mechanical predicates, case-and-period and width, applied by a line's shape so no
 //! line is an exception. [`Screen::write`](super::Screen::write) holds every block a test writes to them;
-//! [`read`] holds a screen given as plain text, its shapes recognised from the text.
+//! [`read`] holds a screen given as plain text, its shapes recognised from the text, and [`holds`] a run's
+//! captured output the same way.
 
 use core::fmt;
 
@@ -14,7 +15,7 @@ const WHOLE_KEY: usize = 56;
 
 /// Which rule a line broke: every rule but [`Rule::Width`] is the case-and-period predicate's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Rule {
+pub(crate) enum Rule {
     /// Two sentences never share a line.
     TwoSentences,
     /// The clause after `error:` or `warning:` starts lowercase, unless it starts with a name.
@@ -31,9 +32,9 @@ pub(super) enum Rule {
 
 /// A line that broke the law, and the rule it broke.
 #[derive(Debug)]
-pub(super) struct Breach {
+pub(crate) struct Breach {
     /// The rule it broke.
-    pub(super) rule: Rule,
+    pub(crate) rule: Rule,
     line: String,
 }
 
@@ -50,9 +51,15 @@ pub(super) fn hold<'l>(lines: impl IntoIterator<Item = (Shape, &'l str)>) -> Res
     width(&lines)
 }
 
+/// Hold what a test captured a run printing, its stdout or its stderr, as [`read`] holds a screen: the
+/// bytes a person sees, so a line composed at print or passed through from elsewhere is held too.
+pub(crate) fn holds(captured: &str) -> Result<(), Breach> {
+    read(captured)
+}
+
 /// Hold a screen given as plain text. A line is a command when it is indented and its first word is
 /// `swoosh` or a flag; any other line is prose, which the predicates read by its text.
-pub(super) fn read(screen: &str) -> Result<(), Breach> {
+pub(crate) fn read(screen: &str) -> Result<(), Breach> {
     hold(screen.lines().map(|line| {
         let body = line.trim_start();
         let indented = body.len() < line.len();
