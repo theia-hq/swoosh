@@ -7,7 +7,7 @@ use core::time::Duration;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use keystore::{Health, KeyFile, Method, Stored};
+use keystore::{Health, Method, Stored};
 
 // The touch itself is built only by the hardware tests, which run on a Mac.
 #[cfg(target_os = "macos")]
@@ -16,6 +16,8 @@ use super::{
     Reason, Route, SSH_VARIABLES, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere, Touched,
     USE_MACHINE_KEY, USE_ROOT, open, over_ssh, route,
 };
+use crate::home::Home;
+use crate::key_file::KeyFile;
 use crate::passphrase::Asked;
 use crate::testkit::Counting;
 use crate::testkit::touch_id::{
@@ -34,6 +36,11 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// The home at `dir`.
+fn home_at(dir: PathBuf) -> Home {
+    Home::resolve(Some(dir)).unwrap()
+}
+
 /// `bytes` written owner-only at `path`, as the key store requires.
 fn private(path: &std::path::Path, bytes: &[u8]) {
     use std::os::unix::fs::PermissionsExt as _;
@@ -44,9 +51,9 @@ fn private(path: &std::path::Path, bytes: &[u8]) {
 
 /// The root fixture, kept in a home: its key file and its locked form.
 fn root(tag: &str) -> (KeyFile, keystore::Locked) {
-    let path = scratch(tag).join("root.key");
-    private(&path, &ROOT_PASSPHRASE_AND_TOUCH_ID);
-    loaded(KeyFile::strict(path))
+    let dir = scratch(tag);
+    private(&dir.join("root.key"), &ROOT_PASSPHRASE_AND_TOUCH_ID);
+    loaded(KeyFile::root(&home_at(dir)))
 }
 
 /// `bytes` as this machine's key in a home, beside a root when `root_kept`.
@@ -55,9 +62,8 @@ fn machine(tag: &str, bytes: &[u8], root_kept: bool) -> (KeyFile, keystore::Lock
     if root_kept {
         private(&home.join("root.key"), b"a root kept here");
     }
-    let path = home.join("machine").join("key");
-    private(&path, bytes);
-    loaded(KeyFile::new(path))
+    private(&home.join("machine").join("key"), bytes);
+    loaded(KeyFile::machine(&home_at(home)))
 }
 
 fn loaded(file: KeyFile) -> (KeyFile, keystore::Locked) {
@@ -142,12 +148,18 @@ fn the_key_stores_refusals_read_as_a_touch_ends() {
         path: PathBuf::from("key"),
         source: keystore::TouchIdError::Unavailable,
     };
-    assert!(matches!(Touched::from(Err(unavailable)), Touched::NotHere));
+    assert!(matches!(
+        Touched::from(Err(any_file().refuse(unavailable))),
+        Touched::NotHere
+    ));
     let unlock = keystore::Error::Unlock {
         path: PathBuf::from("key"),
         method: Method::TouchId,
     };
-    assert!(matches!(Touched::from(Err(unlock)), Touched::Failed(_)));
+    assert!(matches!(
+        Touched::from(Err(any_file().refuse(unlock))),
+        Touched::Failed(_)
+    ));
     assert!(matches!(Touched::from(Ok(None)), Touched::Opened(None)));
 }
 
@@ -155,10 +167,15 @@ fn the_key_stores_refusals_read_as_a_touch_ends() {
 /// touch's end. Each refusal below carries what the enclave said, built here as the key store lets a
 /// dependent build it, so every arm of the mapping is guarded off a Mac and without a finger.
 fn refused(source: keystore::TouchIdError) -> Touched {
-    Touched::from(Err(keystore::Error::TouchId {
+    Touched::from(Err(any_file().refuse(keystore::Error::TouchId {
         path: PathBuf::from("key"),
         source,
-    }))
+    })))
+}
+
+/// A machine key file in a home nothing writes, for a refusal built by hand.
+fn any_file() -> KeyFile {
+    KeyFile::machine(&home_at(std::env::temp_dir().join("swoosh-touch-any")))
 }
 
 /// What the enclave said, for a refusal that must carry it.
@@ -191,15 +208,43 @@ fn a_lock_the_enclave_turns_down_reads_as_not_here() {
     assert!(matches!(touched, Touched::NotHere), "{touched:?}");
 }
 
-/// The enclave's own failure reads as a failure, carried whole with what the enclave said. Red when it
-/// reads as a refusal a person made, or the cause is dropped.
+/// The enclave's own failure reads as a failure, in swoosh's words alone: what the enclave said stays at
+/// `debug`. Red when it reads as a refusal a person made, or the enclave's text reaches the line.
 #[test]
-fn an_enclave_failure_reads_as_a_failure_with_its_cause() {
+fn an_enclave_failure_reads_as_a_failure_in_swooshs_words() {
     let touched = refused(keystore::TouchIdError::Enclave(enclave("it broke")));
     let Touched::Failed(why) = touched else {
         panic!("{touched:?}");
     };
-    assert!(format!("{why:#}").contains("it broke"), "{why:#}");
+    assert_eq!(
+        format!("{why:#}"),
+        "Touch ID could not open this machine's key"
+    );
+}
+
+/// A change whose touch ended in a refusal of the key file, not of the touch, says that refusal in its own
+/// words: Touch ID is named only where the touch itself failed. Red when a key file refusal reads as a touch
+/// that did not open, or prints the key store's text.
+#[test]
+fn a_change_refused_by_its_key_file_says_the_files_words() {
+    let file = any_file();
+    let lines = super::Lines::of(Asked::MachineKey, &file, true);
+    let io = keystore::Error::Io {
+        path: PathBuf::from("/elsewhere/key"),
+        source: std::io::Error::other("the disk went away"),
+    };
+    let refused =
+        super::changed(Touched::Failed(eyre::Report::new(file.refuse(io))), &lines).unwrap_err();
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "could not access this machine's key file\n  file   {}",
+            crate::escape::peer_cell(
+                &file.path().to_string_lossy(),
+                crate::escape::room("  file   ".len())
+            )
+        )
+    );
 }
 
 /// A live lock at this Mac is touched, and the key it opens is the answer: no passphrase is asked.
@@ -285,7 +330,7 @@ fn a_failed_touch_says_so_then_asks_the_passphrase() {
     assert_eq!(prompt.events(), 1);
     assert_eq!(
         prompt.said()[1],
-        "Touch ID did not open your root: the unwrap refused"
+        "Touch ID did not open your root\n  failure   the unwrap refused"
     );
 }
 
@@ -388,8 +433,7 @@ fn a_build_with_no_enclave_says_nothing_of_touch_id() {
 /// A file with no `touch-id` lock goes straight to its passphrase, whatever the Mac says.
 #[test]
 fn a_file_with_no_touch_id_lock_asks_its_passphrase() {
-    let path = scratch("passphrase-only").join("machine").join("key");
-    let file = KeyFile::new(&path);
+    let file = KeyFile::machine(&home_at(scratch("passphrase-only")));
     let under =
         keystore::Passphrase::try_from(zeroize::Zeroizing::new(PASSPHRASE.to_owned())).unwrap();
     file.write(&secret(0x11), keystore::Protection::Passphrase(&under))
@@ -511,7 +555,7 @@ fn a_two_lock_machine_key_falls_to_its_passphrase() {
 fn the_terminal_touch_locks_then_opens_a_key() {
     use crate::passphrase::{Prompt as _, Terminal};
 
-    let file = KeyFile::new(scratch("hardware-opens").join("machine").join("key"));
+    let file = KeyFile::machine(&home_at(scratch("hardware-opens")));
     let made = Touch {
         file: file.clone(),
         reason: Reason::Change("make a test key (touch to allow)"),
@@ -539,7 +583,7 @@ fn the_terminal_touch_locks_then_opens_a_key() {
 fn the_terminal_touch_reads_a_cancel_as_declined() {
     use crate::passphrase::{Prompt as _, Terminal};
 
-    let file = KeyFile::new(scratch("hardware-cancel").join("machine").join("key"));
+    let file = KeyFile::machine(&home_at(scratch("hardware-cancel")));
     let made = Touch {
         file: file.clone(),
         reason: Reason::Change("make a test key (touch to allow)"),
@@ -563,7 +607,7 @@ fn the_terminal_touch_reads_a_cancel_as_declined() {
 fn the_terminal_touch_times_out_after_a_minute() {
     use crate::passphrase::{Prompt as _, Terminal};
 
-    let file = KeyFile::new(scratch("hardware-timeout").join("machine").join("key"));
+    let file = KeyFile::machine(&home_at(scratch("hardware-timeout")));
     let made = Touch {
         file: file.clone(),
         reason: Reason::Change("make a test key (touch to allow)"),
@@ -585,9 +629,10 @@ fn the_terminal_touch_times_out_after_a_minute() {
 /// `cargo test --lib -- --ignored the_terminal_act`.
 #[cfg(target_os = "macos")]
 mod hardware_acts {
-    use keystore::{KeyFile, Method, Protection, Stored};
+    use keystore::{Method, Protection, Stored};
 
-    use super::{PASSPHRASE, Reason, Touch, TouchAct, Touched, scratch, secret};
+    use super::{PASSPHRASE, Reason, Touch, TouchAct, Touched, home_at, scratch, secret};
+    use crate::key_file::KeyFile;
     use crate::passphrase::{Prompt as _, Terminal};
 
     fn passphrase(text: &str) -> keystore::Passphrase {
@@ -596,14 +641,14 @@ mod hardware_acts {
 
     /// A machine key in a fresh home, written under `protection`.
     fn written(tag: &str, protection: Protection<'_>) -> KeyFile {
-        let file = KeyFile::new(scratch(tag).join("machine").join("key"));
+        let file = KeyFile::machine(&home_at(scratch(tag)));
         file.write(&secret(0x61), protection).unwrap();
         file
     }
 
     /// A machine key in a fresh home, sealed by a first touch under `touch-id` alone.
     fn touched(tag: &str) -> KeyFile {
-        let file = KeyFile::new(scratch(tag).join("machine").join("key"));
+        let file = KeyFile::machine(&home_at(scratch(tag)));
         let made = Touch {
             file: file.clone(),
             reason: Reason::Change("make a test key (touch to allow)"),
@@ -673,7 +718,7 @@ mod hardware_acts {
 fn the_waiting_line_names_the_dialogs_act() {
     let passphrase =
         || keystore::Passphrase::try_from(zeroize::Zeroizing::new(PASSPHRASE.to_owned())).unwrap();
-    let file = KeyFile::new(scratch("waiting-line").join("machine").join("key"));
+    let file = KeyFile::machine(&home_at(scratch("waiting-line")));
     let lines = super::Lines::of(Asked::MachineKey, &file, false);
     let root = super::Lines::of(Asked::Root, &file, true);
     let acts = [

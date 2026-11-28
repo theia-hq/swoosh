@@ -20,12 +20,12 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
-use keystore::KeyFile;
 use nauthy::{Denylist, Link, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 
 use crate::escape::EscapedPath;
 use crate::home::Home;
+use crate::key_file::{KeyFile, Kind};
 
 /// What this machine is to a root, classified from its home's records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,8 +63,8 @@ pub enum StandingError {
     Damaged(Disagreement),
     /// This machine's own key file could not be read, so a pin naming it could not be told apart from
     /// a root.
-    #[error("could not read this machine's key")]
-    OwnKey(#[source] keystore::Error),
+    #[error(transparent)]
+    OwnKey(crate::key_file::Refused),
     /// This machine's key file names, in its header, a key nobody can hold.
     #[error(transparent)]
     UnusableKey(#[from] crate::identity::UnusableKey),
@@ -89,6 +89,17 @@ pub enum StandingError {
         #[source]
         source: io::Error,
     },
+}
+
+/// A revocations read that failed, as a standing's refusal: a refusal of this machine's key file is its own
+/// lines ([`OwnKey`](StandingError::OwnKey)), never the tail of the revocations' lead after a colon.
+impl From<crate::revoked::RevokedError> for StandingError {
+    fn from(error: crate::revoked::RevokedError) -> Self {
+        match error {
+            crate::revoked::RevokedError::Key(refused) => Self::OwnKey(refused),
+            error => Self::Revoked(error),
+        }
+    }
 }
 
 /// What disagrees in a damaged home, in the words a person reads.
@@ -289,7 +300,7 @@ impl Standing {
     /// Both entry points retain the same pin, revocation, root and badge-subject checks. Only the source
     /// of the machine identity differs: a local read loads it, an endpoint already has it.
     async fn read_with_own(home: &Home, own: Option<NodeId>) -> Result<Self, StandingError> {
-        let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
+        let revoked = crate::revoked::open(home).map_err(StandingError::from)?;
         let pin = match read_pin(home).await? {
             Some(key) if own == Some(key) => {
                 return Err(StandingError::Damaged(Disagreement::OwnKeyPinned { key }));
@@ -313,8 +324,8 @@ impl Standing {
         if !exists(&path).await? {
             return Ok(None);
         }
-        let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
-        Ok(root_key(path)
+        let revoked = crate::revoked::open(home).map_err(StandingError::from)?;
+        Ok(root_key(home)
             .ok()
             .filter(|root| is_revoked(&revoked, *root)))
     }
@@ -381,7 +392,7 @@ fn is_revoked(revoked: &Denylist, key: NodeId) -> bool {
 
 /// This machine's own key, from its key file's header. `None` when the home has no key yet.
 fn own_key(home: &Home) -> Result<Option<NodeId>, StandingError> {
-    let file = KeyFile::new(home.key());
+    let file = KeyFile::machine(home);
     let stored = file.load().map_err(StandingError::OwnKey)?;
     Ok(stored
         .map(|stored| crate::identity::key_of(&file, &stored))
@@ -395,7 +406,7 @@ async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, St
     if !exists(&path).await? {
         return Ok(None);
     }
-    let root = root_key(path)?;
+    let root = root_key(home)?;
     Ok((!is_revoked(revoked, root)).then_some(root))
 }
 
@@ -404,21 +415,34 @@ async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, St
 /// loose modes or another owner as [`Home::check_key_file`](crate::home::Home::check_key_file) names them,
 /// and a path that is not a regular file as that. One that could not be read is a read error. So a sound
 /// key with loose modes never reads as a torn one.
-fn root_key(path: PathBuf) -> Result<NodeId, StandingError> {
-    let file = KeyFile::strict(&path);
-    match file.load() {
+fn root_key(home: &Home) -> Result<NodeId, StandingError> {
+    let file = KeyFile::root(home);
+    let path = file.path().to_path_buf();
+    let refused = match file.load() {
         // A header no key could be is a file whose bytes are not a root key.
-        Ok(Some(stored)) => crate::identity::key_of(&file, &stored).map_err(|_| {
-            StandingError::Damaged(Disagreement::UnreadableRoot { path: path.clone() })
-        }),
-        Err(keystore::Error::Io { source, .. }) => Err(StandingError::Read { path, source }),
-        Err(keystore::Error::Permissive { .. } | keystore::Error::Owner { .. }) => {
+        Ok(Some(stored)) => {
+            return crate::identity::key_of(&file, &stored).map_err(|_| {
+                StandingError::Damaged(Disagreement::UnreadableRoot { path: path.clone() })
+            });
+        }
+        Ok(None) => {
+            return Err(StandingError::Damaged(Disagreement::UnreadableRoot {
+                path,
+            }));
+        }
+        Err(refused) => refused,
+    };
+    match refused.kind() {
+        Kind::Permissive | Kind::Owner => {
             Err(StandingError::Loose(crate::home::loose_key_file(path)))
         }
-        Err(keystore::Error::NotAFile { .. }) => Err(StandingError::NotAFile { path }),
-        Ok(None) | Err(_) => Err(StandingError::Damaged(Disagreement::UnreadableRoot {
-            path,
-        })),
+        Kind::NotAFile => Err(StandingError::NotAFile { path }),
+        _ => match refused.into_io() {
+            Ok(source) => Err(StandingError::Read { path, source }),
+            Err(_) => Err(StandingError::Damaged(Disagreement::UnreadableRoot {
+                path,
+            })),
+        },
     }
 }
 

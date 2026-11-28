@@ -248,7 +248,7 @@ async fn read(home: &Home) -> Standing {
 }
 
 fn stored_key(home: &Home) -> NodeId {
-    swoosh::testkit::stored_key(&KeyFile::new(home.key()))
+    swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(home))
 }
 
 /// Keep `ROOT` in `home`: a plain 32-byte key file, which the standing reads by its key without a prompt.
@@ -415,7 +415,9 @@ async fn leave_new_key_on_an_unpinned_home_replaces_the_key() {
     assert_eq!(ran.out, format!("{key}\n"), "stdout is the new key alone");
     let kept = home.machine().join("key.replaced-2026-09-25");
     assert_eq!(
-        swoosh::testkit::stored_key(&KeyFile::new(&kept)),
+        swoosh::testkit::stored_key(
+            &swoosh::key_file::KeyFile::machine(&home).beside("key.replaced-2026-09-25")
+        ),
         node(OWN),
         "the old key is kept aside"
     );

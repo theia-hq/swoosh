@@ -32,6 +32,10 @@ pub enum RevokedError {
     /// Another user owns the file, or others can write it.
     #[error(transparent)]
     Loose(#[from] LooseFile),
+    /// This machine's key file, read so an add never revokes this machine's own key, could not be read.
+    /// Its refusal is its own lines, so it takes no lead before a colon.
+    #[error(transparent)]
+    Key(#[from] crate::key_file::Refused),
     /// A line of the file is not an entry.
     #[error("{} line {line} is not a revocation", EscapedPath(path))]
     Parse {
@@ -157,11 +161,8 @@ pub fn add(
 /// This machine's key, from its key file's header; `None` when it has none, or the header is not a usable
 /// key.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RevokedError> {
-    let file = keystore::KeyFile::new(home.key());
-    let stored = file.load().map_err(|error| RevokedError::Io {
-        path: home.key(),
-        source: io::Error::other(error),
-    })?;
+    let file = crate::key_file::KeyFile::machine(home);
+    let stored = file.load()?;
     Ok(stored.and_then(|stored| {
         crate::identity::key_of(&file, &stored)
             .ok()?

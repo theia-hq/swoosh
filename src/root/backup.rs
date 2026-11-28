@@ -15,6 +15,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use super::{KEY_FILE, LIST_FILE, RootError, header_key, read_header, read_key, read_list};
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
+use crate::key_file::KeyFile;
 use crate::standing::Standing;
 
 /// Why a root could not be copied.
@@ -116,7 +117,7 @@ pub async fn backup(home: &Home, dir: &Path) -> Result<Copied, BackupError> {
     }
     // The key is kept only when it is this machine's, byte for byte: a damaged or a different key in the copy
     // is replaced, never reported as copied.
-    let key_bytes = read_key(&home.root_key())?;
+    let key_bytes = read_key(&KeyFile::root(home))?;
     let copied = match held.key.as_deref() {
         None => Copied::New,
         Some(kept) if kept == key_bytes.as_slice() => Copied::Kept,
@@ -132,7 +133,7 @@ pub async fn backup(home: &Home, dir: &Path) -> Result<Copied, BackupError> {
     drop(home_lock);
     // Read back by its header alone, and its list verified under the root: the copy is this root's.
     let key = dir.join(KEY_FILE);
-    let back = read_header(&key).and_then(|locked| header_key(&key, &locked));
+    let back = read_header(&KeyFile::copy(dir)).and_then(|locked| header_key(&key, &locked));
     if !matches!(back, Ok(back) if back == root) || read_list(home, Some(dir), pin).is_err() {
         return Err(BackupError::ReadBack {
             dir: dir.to_path_buf(),
@@ -207,11 +208,11 @@ fn copy_of_this_root(dir: &Path, root: bifrost::NodeId) -> Result<Held, BackupEr
     let pin = root.verify_key().map_err(RootError::from)?;
     if keyed {
         let key = dir.join(KEY_FILE);
-        let header = read_header(&key).and_then(|locked| header_key(&key, &locked));
+        let header = read_header(&KeyFile::copy(dir)).and_then(|locked| header_key(&key, &locked));
         if !matches!(header, Ok(header) if header == root) {
             return Err(not_empty());
         }
-        held.key = Some(read_key(&key)?);
+        held.key = Some(read_key(&KeyFile::copy(dir))?);
     }
     if listed {
         held.list = super::read_list_at(&dir.join(LIST_FILE), pin)

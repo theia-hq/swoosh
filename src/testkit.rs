@@ -401,7 +401,7 @@ pub mod hand_signed {
 ///
 /// When there is no key file, or it cannot be read.
 #[allow(clippy::expect_used)]
-pub fn stored_key(file: &keystore::KeyFile) -> NodeId {
+pub fn stored_key(file: &crate::key_file::KeyFile) -> NodeId {
     let stored = file
         .load()
         .expect("the key file reads")

@@ -24,6 +24,10 @@ pub use lock::{
     serve_running,
 };
 
+/// The name of a root's key file, kept in a home or in a copy's directory: always sealed, and of the root
+/// kind.
+pub const ROOT_KEY: &str = "root.key";
+
 /// The node home: the directory every file this node owns lives in.
 ///
 /// Construct it once at the composition root from the `--home`/`SWOOSH_HOME` selection ([`Home::resolve`]),
@@ -185,7 +189,7 @@ impl Home {
     /// `<home>/root.key`: your root, locked with its passphrase, when it is kept on this machine. The home's
     /// own [`devices`](Self::devices) is the list beside it: the root is the two together.
     pub fn root_key(&self) -> PathBuf {
-        self.dir.join("root.key")
+        self.dir.join(ROOT_KEY)
     }
 
     /// Whether a root is kept on this machine: something is at [`root_key`](Self::root_key). The one test

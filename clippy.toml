@@ -15,4 +15,7 @@ disallowed-methods = [
     { path = "nauthy::Link::mint", reason = "a key signs only through Root, NodeSigner or the test kit" },
     { path = "nauthy::Link::mint_bound", reason = "a key signs only through Root, NodeSigner or the test kit" },
     { path = "nauthy::Link::mint_authority_bound", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    # A key file is opened only through `src/key_file.rs`, whose refusal is in swoosh's words; its
+    # `KeyFile::unlock` carries the one `#[allow(clippy::disallowed_methods)]`.
+    { path = "keystore::Locked::unlock", reason = "open a key through key_file::KeyFile::unlock, which words its refusal" },
 ]

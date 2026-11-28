@@ -224,6 +224,10 @@ All notable changes to swoosh, newest first.
   `serve` runs.
 - **No service can be named `control`, `lookup`, `me`, `root` or `anyone`.** Every command that takes a service
   name refuses them with exit 2, and so does `serve.toml`, including its `off` list.
+- **Key-file refusals use swoosh's own words.** Refusals for a key file that cannot be read, is open to other
+  users, belongs to another user, is damaged or is not one this build reads, and for a wrong passphrase, now print
+  a head and a `file` row. A loose file also prints `chmod 600 -- <file>`. These used to print the key store's own
+  text. A copy's key file that is a link is now refused.
 
 ### Fixed
 - **`share` refuses a link to a service whose saved definition is invalid.**

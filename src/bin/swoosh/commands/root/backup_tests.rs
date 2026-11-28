@@ -332,3 +332,27 @@ async fn root_backup_into_an_unreadable_directory_says_why_once() {
         )
     );
 }
+
+/// A home whose own `root.key` is a link to the key file kept elsewhere still backs up: a home's files follow
+/// their links, and only a copy's key file is refused as one. Red when the read of the home's key stops
+/// following it.
+#[tokio::test]
+async fn root_backup_follows_a_homes_own_linked_root_key() {
+    let home = scratch("backup-linked");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let kept = home.dir().with_extension("kept");
+    let _ = std::fs::remove_dir_all(&kept);
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let target = kept.join("root.key");
+    std::fs::rename(home.root_key(), &target).unwrap();
+    std::os::unix::fs::symlink(&target, home.root_key()).unwrap();
+    let dir = stick(&home);
+    let (result, _) = backup(&home, &dir).await;
+    result.unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("root.key")).unwrap(),
+        std::fs::read(&target).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&kept);
+}

@@ -108,12 +108,12 @@ fn lock_help_lists_exactly_the_lockmethod_values() {
 #[tokio::test]
 async fn lock_puts_a_passphrase_on_a_plain_key() {
     let home = scratch("lock-sets");
-    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
+    let key = swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(&home));
     let (result, err) = lock(&home, &["passphrase"], &mut Counting::new([LONG])).await;
     result.unwrap();
     assert_eq!(locks(&home), [Method::Passphrase]);
     assert_eq!(
-        swoosh::testkit::stored_key(&KeyFile::new(home.key())),
+        swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(&home)),
         key,
         "lock never changes the key"
     );
@@ -138,7 +138,11 @@ async fn lock_changes_an_existing_one_after_the_current_one() {
     let mut prompt = Counting::new(["wrong one", "wrong two", "wrong three", OTHER]);
     let (refused, _) = lock(&home, &["passphrase"], &mut prompt).await;
     let refusal = format!("{:#}", refused.unwrap_err());
-    assert_eq!(refusal, "that passphrase does not open this machine's key.");
+    assert_eq!(
+        refusal,
+        "that passphrase does not open this machine's key\n  \
+         If you are sure it is right, the key file may be damaged."
+    );
     assert_eq!(prompt.events(), 3, "no new passphrase is asked");
     assert!(snapshot(home.dir()) == before, "nothing changed");
 
@@ -239,8 +243,8 @@ async fn lock_refuses_a_passphrase_below_the_minimum() {
 }
 
 /// No prompt and no passphrase refusal names a file in the home: a prompt says which key, never where it is
-/// kept. Red when a line prints `passphrase for <path>:` or the key store's `could not unlock the key file
-/// <path>`.
+/// kept, and the refusal is the one byte string a wrong passphrase and a damaged file share. Red when a line
+/// prints `passphrase for <path>:` or the key store's `could not unlock the key file <path>`.
 #[tokio::test]
 async fn no_prompt_or_passphrase_refusal_names_a_key_file() {
     let home = scratch("lock-no-path");
@@ -252,8 +256,13 @@ async fn no_prompt_or_passphrase_refusal_names_a_key_file() {
     for args in [&["passphrase"][..], &["passphrase", "--remove"][..]] {
         let (refused, err) = lock(&home, args, &mut Counting::new(["a", "b", "c"])).await;
         let refusal = format!("{:#}", refused.unwrap_err());
+        assert_eq!(
+            refusal,
+            "that passphrase does not open this machine's key\n  \
+             If you are sure it is right, the key file may be damaged."
+        );
         assert!(!refusal.contains(&home_dir), "{refusal}");
-        assert!(!refusal.contains("key file"), "{refusal}");
+        assert!(!refusal.contains("could not unlock"), "{refusal}");
         assert!(!err.contains(&home_dir), "{err}");
     }
     let resolved = swoosh::identity::resolve_with(
@@ -263,7 +272,11 @@ async fn no_prompt_or_passphrase_refusal_names_a_key_file() {
     );
     let refusal = format!("{:#}", resolved.err().expect("three wrong ones refuse"));
     assert!(!refusal.contains(&home_dir), "{refusal}");
-    assert_eq!(refusal, "that passphrase does not open this machine's key.");
+    assert_eq!(
+        refusal,
+        "that passphrase does not open this machine's key\n  \
+         If you are sure it is right, the key file may be damaged."
+    );
 }
 
 /// A prompt with nobody at a terminal.
@@ -502,7 +515,7 @@ const UNREAD: &str = "\
 warning: this command could not confirm the key file
   swoosh status shows what is there.
   file   /h/machine/key
-  read   could not access the key file /h/machine/key: denied
+  read   could not access this machine's key file
 ";
 
 /// Every outcome `lock` can have prints its own lines, byte for byte, through the screen law: a made key alone
@@ -529,7 +542,7 @@ fn each_result_prints_its_ruled_lines() {
     let unread = || {
         Now::Unread(Unread {
             path: "/h/machine/key".to_owned(),
-            read: "could not access the key file /h/machine/key: denied".to_owned(),
+            read: "could not access this machine's key file".to_owned(),
         })
     };
     let rows: Vec<(Locked, String)> = vec![
@@ -775,7 +788,7 @@ async fn lock_after_a_missed_make_shows_the_made_key() {
     );
     let (result, err) = lock(&home, &["passphrase"], &mut Counting::new([LONG])).await;
     result.unwrap();
-    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
+    let key = swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(&home));
     assert_eq!(
         err,
         format!("Made this machine's key, locked with a passphrase:\n  {key}\n")
@@ -798,12 +811,17 @@ fn a_file_this_command_cannot_confirm_refuses_as_a_screen() {
         (
             eyre::Report::new(Unconfirmed {
                 path: path.clone(),
-                read: Some(keystore::Error::Absent { path: path.clone() }),
+                read: Some(
+                    swoosh::key_file::KeyFile::machine(
+                        &swoosh::home::Home::resolve(Some("/h".into())).unwrap(),
+                    )
+                    .absent(),
+                ),
             }),
             "error: this command could not confirm the key file\n  \
              swoosh status shows what is there.\n  \
              file   /h/machine/key\n  \
-             read   there is no key file at /h/machine/key\n"
+             read   could not use this machine's key file\n"
                 .to_owned(),
         ),
         (
@@ -1223,14 +1241,13 @@ async fn bare_lock_writes_and_asks_nothing() {
     }
 }
 
-/// A key file the read cannot read refuses on stderr, exit 1, naming the file and the read's own error, and
-/// no command to look with, since `status` reads the same file. Red when it names `swoosh status`, or prints
-/// a screen of locks.
+/// A key file the read cannot read refuses on stderr, exit 1, naming the file and the head of the read's
+/// refusal in swoosh's words, and no command to look with, since `status` reads the same file. Red when it
+/// names `swoosh status`, prints a screen of locks, or the key store's own text.
 #[tokio::test]
 async fn bare_lock_on_an_unreadable_key_file_refuses() {
     let home = scratch("lock-read-unreadable");
     std::fs::write(home.key(), b"not a key file").unwrap();
-    let error = KeyFile::new(home.key()).load().unwrap_err();
     let (result, out, err) = run(&home, &[], &mut Counting::refusing()).await;
     assert!(
         result
@@ -1250,7 +1267,10 @@ async fn bare_lock_on_an_unreadable_key_file_refuses() {
     let expected = format!(
         "error: this command could not read the key file\n{}{}",
         row("file", &home.key().display().to_string()),
-        row("read", &swoosh::escape::causes(&error))
+        row(
+            "read",
+            "this machine's key file is not one this build reads"
+        )
     );
     assert_eq!(err, expected);
     assert!(!err.contains("swoosh status"), "{err}");

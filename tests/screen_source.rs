@@ -9,6 +9,8 @@
 //! takes off, and say Touch ID the way a person does. And a fifth: the Touch ID dialog takes only words fixed
 //! at build time. And a sixth: every command a shipped line or a help page names is one the binary has. And a
 //! seventh: a revoke's lines that say it landed here are written only where a read-back proof prints them.
+//! And an eighth: only the key file seam names the key store's file and error types, so every refusal of a
+//! key file is worded there.
 //!
 //! Test files, inline `mod tests` blocks and comments are skipped: only what ships is read.
 
@@ -143,6 +145,8 @@ fn the_styling_type_takes_only_static_text() {
 const LOCK_REMOVALS: &[(&str, usize)] = &[
     // `lock passphrase --remove`, and `lock touch-id --remove` opened by the passphrase.
     ("identity.rs", 2),
+    // The seam every removal goes through: its own method, and the key store's it calls.
+    ("key_file.rs", 2),
     // `root lock touch-id --remove`.
     ("root/lock.rs", 1),
     // `lock touch-id --remove` opened by the touch itself.
@@ -165,6 +169,47 @@ fn only_a_removal_takes_a_lock_off() {
         .map(|&(file, calls)| (file.to_owned(), calls))
         .collect();
     assert_eq!(found, expected, "a new call that takes a lock off");
+}
+
+/// The key store's file and error types are named only in `key_file.rs`, the seam whose refusals print
+/// swoosh's words: a path (`keystore::KeyFile`, `keystore::Error`) or an import (`use keystore::{KeyFile}`)
+/// anywhere else in shipped code is a site that can print the key store's own text. Red when one returns.
+#[test]
+fn only_key_file_names_keystore_keyfile() {
+    let mut found: Vec<(String, &str)> = Vec::new();
+    for (file, text) in shipped() {
+        if file == "key_file.rs" {
+            continue;
+        }
+        let code = scan(&text).code;
+        for name in ["KeyFile", "Error"] {
+            if keystore_names(&code, name) {
+                found.push((file.clone(), name));
+            }
+        }
+    }
+    assert_eq!(
+        found,
+        Vec::<(String, &str)>::new(),
+        "a key file site outside the seam"
+    );
+}
+
+/// Whether `code` names `keystore::<name>`, by its path or in a `use keystore::{..}` group.
+fn keystore_names(code: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let path = format!("keystore::{name}");
+    let by_path = code
+        .match_indices(&path)
+        .any(|(at, _)| !code[at + path.len()..].starts_with(ident) && !code[..at].ends_with(ident));
+    let by_group = code.match_indices("keystore::{").any(|(at, open)| {
+        let rest = &code[at + open.len()..];
+        let group = rest.split('}').next().unwrap_or("");
+        group
+            .split(',')
+            .any(|item| item.split_whitespace().next() == Some(name))
+    });
+    by_path || by_group
 }
 
 /// No act drops a lock as a step of adding another: the type that chose to (`Then`) and the end that said the

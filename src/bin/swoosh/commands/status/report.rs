@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bifrost::NodeId;
-use keystore::{Health, KeyFile, Stored};
+use keystore::{Health, Stored};
 use nauthy::{Denylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME, Source};
 use swoosh::credential::short;
@@ -22,6 +22,7 @@ use swoosh::escape::{Escaped, EscapedPath};
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::identity::Locks;
+use swoosh::key_file::KeyFile;
 use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::{Date, Inspected, Root, RootPlace};
 use swoosh::root_key::RootKey;
@@ -75,7 +76,7 @@ pub(crate) async fn run_to(
     out: &mut impl Paint,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
-    let key = KeyFile::new(home.key()).load()?;
+    let key = KeyFile::machine(home).load()?;
     if print == Print::Key {
         let Some(key) = key else {
             eyre::bail!(NO_KEY);
@@ -83,7 +84,7 @@ pub(crate) async fn run_to(
         writeln!(
             out,
             "{}",
-            swoosh::identity::key_of(&KeyFile::new(home.key()), &key)?
+            swoosh::identity::key_of(&KeyFile::machine(home), &key)?
         )?;
         return Ok(());
     }
@@ -194,14 +195,14 @@ impl Report {
         now: u64,
         prompt: &impl Prompt,
     ) -> eyre::Result<Self> {
-        let root = match KeyFile::strict(home.root_key()).load() {
+        let root = match KeyFile::root(home).load() {
             Ok(Some(stored @ Stored::Locked(_))) => Some(Locks::of(&stored, prompt)),
             _ => None,
         };
         let mut report = Self {
             key: key
                 .map(|key| {
-                    swoosh::identity::key_of(&KeyFile::new(home.key()), key)
+                    swoosh::identity::key_of(&KeyFile::machine(home), key)
                         .map(|node| (node, Locks::of(key, prompt)))
                 })
                 .transpose()?,
@@ -266,7 +267,7 @@ impl Report {
             locks @ (Locks::TouchId(Some(Health::Dead)) | Locks::Both(Some(Health::Dead))),
         )) = report.key
         {
-            let file = KeyFile::new(home.key());
+            let file = KeyFile::machine(home);
             let passphrase = matches!(locks, Locks::Both(_));
             report.nags.push(Nag::Given(
                 touch::Lines::of(Asked::MachineKey, &file, passphrase).dead(),
@@ -347,7 +348,7 @@ impl Report {
                 if let Some(Locks::TouchId(Some(Health::Dead)) | Locks::Both(Some(Health::Dead))) =
                     self.root
                 {
-                    let file = KeyFile::strict(home.root_key());
+                    let file = KeyFile::root(home);
                     self.nags.push(Nag::Given(
                         touch::Lines::of(Asked::Root, &file, true).dead(),
                     ));

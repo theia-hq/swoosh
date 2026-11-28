@@ -346,7 +346,7 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
     let root_key = root.key();
     match KeyFile::strict(home.root_key()).load().unwrap() {
         Some(Stored::Locked(_)) => assert_eq!(
-            crate::testkit::stored_key(&KeyFile::strict(home.root_key())),
+            crate::testkit::stored_key(&crate::key_file::KeyFile::root(&home)),
             root_key
         ),
         other => panic!("the root key is sealed, of the root kind: {other:?}"),
@@ -770,16 +770,26 @@ async fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
         TestRoot::seeded(ROOT).sign_update(&records(0, vec![own_row()], Vec::new(), Vec::new())),
     )
     .unwrap();
+    // The fixture reaches the case: the key store reads it as a device key's file in a root's slot, which
+    // swoosh's words do not tell apart from any other file it cannot read.
+    assert!(
+        matches!(
+            KeyFile::strict(dir.join("root.key")).load(),
+            Err(keystore::Error::Format {
+                source: keystore::FormatError::WrongKind { .. },
+                ..
+            })
+        ),
+        "the fixture is a device key's file"
+    );
 
     let mut prompt = Counting::refusing();
     let (refused, _) = present(&home, RootPlace::Dir(dir), RootVerb::Invite, &mut prompt).await;
     assert!(
         matches!(
-            refused,
-            Err(RootError::KeyFile(keystore::Error::Format {
-                source: keystore::FormatError::WrongKind { .. },
-                ..
-            }))
+            &refused,
+            Err(RootError::KeyFile(refused))
+                if refused.kind() == crate::key_file::Kind::Format { method: None }
         ),
         "{refused:?}"
     );

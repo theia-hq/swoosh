@@ -15,6 +15,7 @@ use swoosh::home::Home;
 use swoosh::identity::{
     Gone, Locked, Locks, Methods, Now, Root, TouchIdNotAdded, Unconfirmed, Why,
 };
+use swoosh::key_file::Refused;
 use swoosh::passphrase::{Prompt, Terminal};
 
 use crate::commands::through_serve::Reported;
@@ -143,15 +144,12 @@ impl Enclave {
     };
 }
 
-/// The refusal where the key file cannot be read, drawn on `err`: the file and the read's error, each escaped
-/// whole and last on its line. It names no command to look with, since `status` reads the same file.
-fn unreadable(
-    path: &std::path::Path,
-    error: &keystore::Error,
-    err: &mut impl Paint,
-) -> eyre::Report {
+/// The refusal where the key file cannot be read, drawn on `err`: the file and the first line of the read's
+/// refusal, in swoosh's words, each escaped whole and last on its line. It names no command to look with,
+/// since `status` reads the same file.
+fn unreadable(path: &std::path::Path, error: &Refused, err: &mut impl Paint) -> eyre::Report {
     let path = path.to_string_lossy();
-    let read = swoosh::escape::causes(error);
+    let read = error.head();
     let block = Block::default()
         .head(
             Style::ERROR,
@@ -160,7 +158,8 @@ fn unreadable(
         )
         .column(ROW_COLUMN)
         .row([Cell::Word("file"), Cell::Token(&path)])
-        .row([Cell::Word("read"), Cell::Token(&read)]);
+        // The refusal's head is swoosh's own words, with no path or foreign text in it.
+        .row([Cell::Word("read"), Cell::Escaped(&read)]);
     match Screen::default().block(block).write(err) {
         Ok(()) => Reported.into(),
         Err(error) => error.into(),
@@ -370,10 +369,7 @@ pub(crate) fn root_locks(locks: Locks) -> &'static str {
 fn refused(report: eyre::Report, err: &mut impl Paint) -> eyre::Report {
     let screen = if let Some(unconfirmed) = report.downcast_ref::<Unconfirmed>() {
         let path = unconfirmed.path.to_string_lossy().into_owned();
-        let read = unconfirmed
-            .read
-            .as_ref()
-            .map(|error| swoosh::escape::causes(error));
+        let read = unconfirmed.read.as_ref().map(Refused::head);
         let block = unconfirmable(
             Block::default().head(
                 Style::ERROR,
@@ -418,15 +414,15 @@ fn refused(report: eyre::Report, err: &mut impl Paint) -> eyre::Report {
 const STATUS_SHOWS: &str = "  swoosh status shows what is there.";
 
 /// `block`, with what is said where the key file cannot be confirmed: where `status` shows it, the file, and
-/// the read's error where one failed. The rows' values are the file's path and system text, each escaped
-/// whole and last on its line.
+/// the head of the read's refusal where one failed. The file's path is escaped whole; the refusal's head is
+/// swoosh's own words. Each is last on its line.
 fn unconfirmable<'a>(block: Block<'a>, path: &'a str, read: Option<&'a str>) -> Block<'a> {
     let block = block
         .text(STATUS_SHOWS.to_owned())
         .column(ROW_COLUMN)
         .row([Cell::Word("file"), Cell::Token(path)]);
     match read {
-        Some(read) => block.row([Cell::Word("read"), Cell::Token(read)]),
+        Some(read) => block.row([Cell::Word("read"), Cell::Escaped(read)]),
         None => block,
     }
 }

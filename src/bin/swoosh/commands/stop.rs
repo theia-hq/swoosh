@@ -252,7 +252,7 @@ impl Yours {
             .map(|device| device.label.clone())
             .collect();
         let contacts = store.contacts().clone();
-        let file = keystore::KeyFile::new(home.key());
+        let file = swoosh::key_file::KeyFile::machine(home);
         let key = file
             .load()
             .ok()

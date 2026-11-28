@@ -11,12 +11,13 @@
 
 use std::path::{Path, PathBuf};
 
-use keystore::{KeyFile, Method, NewLock, Passphrase, Unlock};
+use keystore::{Method, NewLock, Passphrase, Unlock};
 use tightbeam::identity::AsVerifyKey as _;
 
-use super::{KEY_FILE, RootError, header_key, read_header};
+use super::{RootError, header_key, read_header};
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
+use crate::key_file::KeyFile;
 use crate::passphrase::{Asked, Prompt};
 use crate::standing::Standing;
 use crate::touch::{self, Touch, TouchAct, TouchHere};
@@ -68,7 +69,8 @@ pub async fn lock(
     let current = target.prove(prompt)?;
     let new = crate::passphrase::choose(prompt, target.asked).map_err(prompt_error)?;
     let _home_lock = target.home_lock(home).await?;
-    KeyFile::strict(&target.path)
+    target
+        .file
         .add_lock(
             Some(Unlock::Passphrase(&current)),
             NewLock::Passphrase(&new),
@@ -111,7 +113,7 @@ pub async fn lock_touch_id(
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock.into());
     }
-    let file = KeyFile::strict(&target.path);
+    let file = target.file.clone();
     let lines = touch::Lines::of(target.asked, &file, true);
     if !remove {
         prompt.warn(touch::ROOT_BESIDE_PASSPHRASE);
@@ -157,7 +159,7 @@ pub enum TouchIdChange {
 struct Target<'a> {
     /// The copy's directory, `None` for the root kept here (a `<dir>` that is the home included).
     dir: Option<&'a Path>,
-    path: PathBuf,
+    file: KeyFile,
     asked: Asked<'a>,
     locked: keystore::Locked,
 }
@@ -169,24 +171,24 @@ impl<'a> Target<'a> {
         // `home.lock`.
         let dir = dir.filter(|dir| !is_home(dir, home));
         let standing = Standing::read(home).await.map_err(RootError::from)?;
-        let (path, asked) = match (dir, standing) {
-            (None, Standing::HoldsRoot { .. }) => (home.root_key(), Asked::Root),
+        let (file, asked) = match (dir, standing) {
+            (None, Standing::HoldsRoot { .. }) => (KeyFile::root(home), Asked::Root),
             (None, Standing::InterruptedMint { root_key }) => {
                 return Err(RootError::Unfinished { root: root_key }.into());
             }
             (None, Standing::Device { .. }) => return Err(RootLockError::NotHere),
             (None, Standing::Unpinned) => return Err(RootLockError::NoRoot),
-            (Some(dir), _) => (dir.join(KEY_FILE), Asked::Copy(dir)),
+            (Some(dir), _) => (KeyFile::copy(dir), Asked::Copy(dir)),
         };
         if let Some(dir) = dir
-            && !path.is_file()
+            && !file.path().is_file()
         {
             return Err(RootLockError::NoCopy {
                 dir: dir.to_path_buf(),
             });
         }
-        let locked = read_header(&path)?;
-        let key = header_key(&path, &locked)?;
+        let locked = read_header(&file)?;
+        let key = header_key(file.path(), &locked)?;
         // A copy is held to the root this machine trusts, as every use of a copy is (`present`'s rule); and a
         // root revoked here is changed nowhere.
         let pin = match standing {
@@ -200,14 +202,14 @@ impl<'a> Target<'a> {
             return Err(RootError::Mismatch { root: key, pin }.into());
         }
         let revoked = crate::revoked::open(home)
-            .map_err(crate::standing::StandingError::Revoked)
+            .map_err(crate::standing::StandingError::from)
             .map_err(RootError::from)?;
         if revoked.is_revoked_key(&key.verify_key().map_err(RootError::from)?) {
             return Err(RootError::Revoked { root: key }.into());
         }
         Ok(Self {
             dir,
-            path,
+            file,
             asked,
             locked,
         })
@@ -216,7 +218,9 @@ impl<'a> Target<'a> {
     /// Prove the root's passphrase, asking up to three times, and hand it back for the change.
     fn prove(&self, prompt: &mut impl Prompt) -> Result<Passphrase, RootLockError> {
         let ((), current) = crate::passphrase::unlock(prompt, self.asked, |passphrase| {
-            self.locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
+            self.file
+                .unlock(&self.locked, Unlock::Passphrase(passphrase))
+                .map(drop)
         })
         .map_err(prompt_error)?;
         Ok(current)
@@ -246,7 +250,7 @@ fn prompt_error(report: eyre::Report) -> RootLockError {
 /// Whether this machine's key has a `touch-id` lock, read from its header.
 fn machine_key_opens_by_touch(home: &Home) -> bool {
     matches!(
-        KeyFile::new(home.key()).load(),
+        KeyFile::machine(home).load(),
         Ok(Some(keystore::Stored::Locked(key)))
             if key.methods().any(|method| method == Method::TouchId)
     )

@@ -28,7 +28,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
-use keystore::{Health, KeyFile, Passphrase, Stored, Unlock};
+use keystore::{Health, Passphrase, Stored, Unlock};
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
 use tightbeam::identity::AsVerifyKey as _;
@@ -39,6 +39,7 @@ use super::{
 };
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
+use crate::key_file::{KeyFile, Kind};
 use crate::passphrase::{Asked, Prompt};
 use crate::roster::Epoch;
 use crate::standing::Standing;
@@ -191,13 +192,14 @@ pub async fn restore(
     // changed during the prompt refuses before the lock. Agreeing reads prove nothing about the key store's
     // read between them (storage can serve other bytes to each open), so these bytes are staged and opened
     // again under the lock before they are published.
-    let key_bytes = read_key(&key_file)?;
+    let file = KeyFile::copy(dir);
+    let key_bytes = read_key(&file)?;
     between_reads();
-    let locked = read_header(&key_file)?;
+    let locked = read_header(&file)?;
     let root = header_key(&key_file, &locked)?;
     let pin = root.verify_key().map_err(RootError::from)?;
     let revoked = crate::revoked::open(home)
-        .map_err(crate::standing::StandingError::Revoked)
+        .map_err(crate::standing::StandingError::from)
         .map_err(RootError::from)?;
     if revoked.is_revoked_key(&pin) {
         return Err(RootError::Revoked { root }.into());
@@ -254,10 +256,10 @@ pub async fn restore(
     // An unlock proves the header, so the key opened is this root's. The passphrase is kept to prove the
     // bytes published.
     let (secret, passphrase) = crate::passphrase::unlock(prompt, Asked::Copy(dir), |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase))
+        file.unlock(&locked, Unlock::Passphrase(passphrase))
     })
     .map_err(|report| RestoreError::Prompt(format!("{report:#}")))?;
-    if read_key(&key_file)? != key_bytes {
+    if read_key(&file)? != key_bytes {
         return Err(RestoreError::Changed {
             dir: dir.to_path_buf(),
         });
@@ -389,18 +391,20 @@ impl Staged {
         root: NodeId,
         passphrase: &Passphrase,
     ) -> Result<Option<Self>, RootError> {
+        let file = KeyFile::root(home).beside(&format!("{KEY_FILE}.tmp.restore"));
         let staged = Self {
-            path: home.dir().join(format!("{KEY_FILE}.tmp.restore")),
+            path: file.path().to_path_buf(),
         };
         crate::config::write_private_atomic(home_lock, &staged.path, bytes)
             .map_err(super::io_at(&staged.path))?;
-        let opens = match KeyFile::strict(&staged.path).load() {
+        let opens = match file.load() {
             // An unlock proves the header, and the header names the root.
             Ok(Some(Stored::Locked(locked))) => {
                 header_key(&staged.path, &locked).is_ok_and(|key| key == root)
-                    && locked.unlock(Unlock::Passphrase(passphrase)).is_ok()
+                    && file.unlock(&locked, Unlock::Passphrase(passphrase)).is_ok()
             }
-            Ok(Some(Stored::Plain(_)) | None) | Err(keystore::Error::Format { .. }) => false,
+            Ok(Some(Stored::Plain(_)) | None) => false,
+            Err(error) if matches!(error.kind(), Kind::Format { .. }) => false,
             // A file this run wrote that cannot be read back is the home failing, not the copy changing.
             Err(error) => return Err(error.into()),
         };

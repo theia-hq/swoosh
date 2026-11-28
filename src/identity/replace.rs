@@ -9,9 +9,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Protection, Stored};
+use keystore::{Protection, Stored};
 
 use crate::home::Home;
+use crate::key_file::KeyFile;
 use crate::passphrase::Prompt;
 
 /// What [`NewKey::put`] did.
@@ -24,6 +25,9 @@ pub struct Replaced {
     /// Where the old key's links were kept, when there were any.
     pub links_kept: Option<PathBuf>,
 }
+
+/// The name a new key is staged under, beside this machine's key, until it is put in place.
+pub(crate) const STAGED: &str = "key.new";
 
 /// The refusal when the new key is to be locked and nobody is at a terminal to choose its passphrase.
 pub const CHOOSE_NEEDS_TERMINAL: &str = "the new key is locked like the old one, and choosing its passphrase \
@@ -49,8 +53,8 @@ impl NewKey {
     /// Choose the new passphrase if the old key was locked, and write the new key at
     /// `<home>/machine/key.new`.
     pub fn stage(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Self> {
-        let path = home.key();
-        let old = KeyFile::new(&path).load()?;
+        let file = KeyFile::machine(home);
+        let old = file.load()?;
         let locked = matches!(old, Some(Stored::Locked(_)));
         if locked && !prompt.terminal() {
             eyre::bail!("{CHOOSE_NEEDS_TERMINAL}");
@@ -68,15 +72,15 @@ impl NewKey {
             .map_or(Protection::Plain, Protection::Passphrase);
         let secret = keystore::Secret::generate()?;
         super::make_machine_dir(home)?;
-        let staged = home.machine().join("key.new");
-        remove(&staged)?;
+        let staged = file.beside(STAGED);
+        remove(staged.path())?;
         let new = Self {
             key: secret.with_bytes(NodeId::from_ed25519_secret),
             had_old: old.is_some(),
-            staged,
+            staged: staged.path().to_path_buf(),
             put: false,
         };
-        KeyFile::new(&new.staged).write(&secret, protection)?;
+        staged.write(&secret, protection)?;
         Ok(new)
     }
 

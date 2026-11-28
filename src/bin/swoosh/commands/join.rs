@@ -15,7 +15,7 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use clap::Args;
-use keystore::{KeyFile, Stored};
+use keystore::Stored;
 use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::invite::{Invite, PREFIX};
 use swoosh::joining::Join;
@@ -77,7 +77,7 @@ impl JoinCmd {
 
         // The invite, alone.
         let root = invite.standing.root().node_id()?;
-        let file = KeyFile::new(home.key());
+        let file = swoosh::key_file::KeyFile::machine(home);
         let stored = file.load()?;
         let stored_key = stored
             .as_ref()
