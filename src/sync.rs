@@ -738,7 +738,7 @@ async fn dialable(
     home: &Home,
     listed: impl IntoIterator<Item = Device>,
 ) -> eyre::Result<Vec<Device>> {
-    let file = keystore::KeyFile::new(home.key());
+    let file = crate::key_file::KeyFile::machine(home);
     let own = file
         .load()?
         .map(|stored| crate::identity::key_of(&file, &stored))

@@ -1,4 +1,5 @@
-//! `root forget`'s syncs under `home.lock`: a file of the copy swapped for a pipe never blocks them.
+//! `root forget`'s syncs and reads under `home.lock`: a file of the copy swapped for a pipe never blocks them,
+//! and one swapped for a link is never read through.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use core::time::Duration;
@@ -61,5 +62,45 @@ fn the_directorys_sync_never_blocks_on_a_pipe() {
     pipe(&at);
     let synced = bounded(move || sync_dir(&at).is_err());
     assert!(synced, "a pipe is no directory");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A copy's file read as bytes is opened without following a link: a `root.key` swapped for a link after the
+/// key file's own check refuses as the copy's key file being a link, and its list as the copy changed; the
+/// home's own `root.key` still reads through its link. Red when either copy open follows the link, or the
+/// home's stops following.
+#[test]
+fn a_link_swapped_in_is_never_read_through() {
+    use crate::key_file::{KeyFile, Kind};
+    use crate::root::{RootError, read_key};
+
+    let dir = scratch("no-follow");
+    let target = dir.join("elsewhere");
+    std::fs::write(&target, b"bytes a link would lead to").unwrap();
+    let stick = dir.join("stick");
+    std::fs::create_dir_all(&stick).unwrap();
+    std::os::unix::fs::symlink(&target, stick.join("root.key")).unwrap();
+    std::os::unix::fs::symlink(&target, stick.join("devices")).unwrap();
+
+    let read = read_key(&KeyFile::copy(&stick)).unwrap_err();
+    assert!(
+        matches!(&read, RootError::KeyFile(link) if link.kind() == Kind::Link),
+        "{read:?}"
+    );
+    let opened = super::open_regular(&stick.join("root.key"), &stick).unwrap_err();
+    assert!(
+        matches!(&opened, ForgetError::Root(RootError::KeyFile(link)) if link.kind() == Kind::Link),
+        "{opened:?}"
+    );
+    let list = super::open_regular(&stick.join("devices"), &stick).unwrap_err();
+    assert!(matches!(&list, ForgetError::Changed { .. }), "{list:?}");
+
+    // A home's own `root.key` follows its link, as every file of a home does.
+    let home = crate::home::Home::resolve(Some(dir.clone())).unwrap();
+    std::os::unix::fs::symlink(&target, home.root_key()).unwrap();
+    assert_eq!(
+        read_key(&KeyFile::root(&home)).unwrap(),
+        b"bytes a link would lead to"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

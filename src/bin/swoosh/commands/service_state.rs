@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 
 use bifrost::NodeId;
-use keystore::KeyFile;
 use nauthy::Service;
 use swoosh::home::{Home, HomeWrite, ProcessId, ResidentPresence, ServeLock};
 use swoosh::identity;
@@ -305,7 +304,7 @@ impl ShareTarget {
     }
 
     fn stored_key(home: &Home) -> eyre::Result<Option<NodeId>> {
-        let file = KeyFile::new(home.key());
+        let file = swoosh::key_file::KeyFile::machine(home);
         file.load()?
             .as_ref()
             .map(|stored| identity::key_of(&file, stored))

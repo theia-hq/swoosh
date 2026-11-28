@@ -22,10 +22,12 @@ use core::time::Duration;
 use std::ffi::OsString;
 use std::sync::OnceLock;
 
-use keystore::{Health, KeyFile, Locked, Method, NewLock, Passphrase, Protection, Stored, Unlock};
+use keystore::{Health, Locked, Method, NewLock, Passphrase, Protection, Unlock};
 
-use crate::escape::EscapedPath;
-use crate::identity::Whose;
+use crate::escape::{Escaped, EscapedPath};
+// Named `Whose` in the dead-lock lines below; `key_file::Whose` is not imported here.
+use crate::identity::KeyFor as Whose;
+use crate::key_file::{KeyFile, Kind, Refused};
 use crate::passphrase::{Asked, Prompt};
 
 /// How long a touch is waited for: long enough to read the dialog and reach a keyboard's sensor, short
@@ -216,30 +218,38 @@ pub(crate) fn changed(touched: Touched, lines: &Lines<'_>) -> eyre::Result<()> {
         Touched::Declined | Touched::NotHere => {
             eyre::bail!("Touch ID did not open {}; nothing changed", lines.key())
         }
-        Touched::Failed(why) => Err(why.wrap_err(format!("Touch ID did not open {}", lines.key()))),
+        Touched::Failed(why) => Err(eyre::eyre!("{}", lines.failed(&why))),
         Touched::TimedOut => eyre::bail!("{TIMED_OUT}"),
     }
 }
 
 /// [`changed`], but for an act whose write is in place though the key store answered a failure after it
-/// (its directory not synced): that is a written result, its failure's chain handed back to be said beside it.
+/// (its directory not synced): that is a written result, its failure's `failure` row handed back to be said
+/// beside it.
 ///
 /// # Errors
 ///
 /// As [`changed`], for every other end.
 pub(crate) fn landed(touched: Touched, lines: &Lines<'_>) -> eyre::Result<Option<String>> {
     match touched {
-        Touched::Failed(why) if unsynced(&why) => Ok(Some(format!("{why:#}"))),
+        Touched::Failed(why) if unsynced(&why) => Ok(Some(failure(&why))),
         other => changed(other, lines).map(|()| None),
     }
 }
 
 /// Whether `why` is the key store's answer that a write is in place but its directory was not synced.
 pub(crate) fn unsynced(why: &eyre::Report) -> bool {
-    matches!(
-        why.downcast_ref::<keystore::Error>(),
-        Some(keystore::Error::Unsynced { .. })
-    )
+    why.downcast_ref::<Refused>()
+        .is_some_and(|refused| refused.unsynced().is_some())
+}
+
+/// A touch's failure as the one line a `failure` row holds: a refusal of the key file in swoosh's words,
+/// else the failure's own chain, for a failure that is not the key store's. The row escapes it.
+pub(crate) fn failure(why: &eyre::Report) -> String {
+    match why.downcast_ref::<Refused>() {
+        Some(refused) => refused.failure(),
+        None => format!("{why:#}"),
+    }
 }
 
 /// The variables an ssh session sets, read in this order. Present and not empty, any of them means no touch.
@@ -412,7 +422,8 @@ pub enum Touched {
     /// The lock does not open on this Mac now, as the enclave said after the dialog.
     NotHere,
     /// Anything else: the enclave failed, the unwrap refused (a lock someone else made with this Mac's
-    /// enclave reads live and fails here), or the act's own write.
+    /// enclave reads live and fails here), or the act's own write. The key store's answers are a
+    /// [`Refused`].
     Failed(eyre::Report),
     /// Nobody touched in time: the key store closed the dialog, and the act wrote nothing.
     TimedOut,
@@ -433,7 +444,7 @@ impl Touch {
     /// # Errors
     ///
     /// The key store's refusal, the touch's own included.
-    pub(crate) fn run(self) -> Result<Option<keystore::Secret>, keystore::Error> {
+    pub(crate) fn run(self) -> Result<Option<keystore::Secret>, Refused> {
         let Self { file, reason, act } = self;
         // Rendered here, once, to the words the key store takes.
         let reason = reason.to_string();
@@ -449,13 +460,7 @@ impl Touch {
         match act {
             // The file is read again here, on this thread: its unlock proves its own header, so the key it
             // returns is the one this file holds now, which `open` checks against the header the caller read.
-            TouchAct::Open => match file.load()? {
-                Some(Stored::Locked(locked)) => locked.unlock(touch).map(Some),
-                Some(Stored::Plain(_)) | None => Err(keystore::Error::NoLock {
-                    path: file.path().to_path_buf(),
-                    method: Method::TouchId,
-                }),
-            },
+            TouchAct::Open => file.reopen(touch).map(Some),
             TouchAct::Write(secret) => file
                 .write(
                     &secret,
@@ -480,19 +485,16 @@ impl Touch {
 /// The key store's answer, as a touch's end. Only the refusals a person can tell apart are named; the rest is
 /// a failure, carried whole. A timeout is named so it never reads as a failure, which falls to the
 /// passphrase: nobody touched for a minute, so nobody is there to type one.
-impl From<Result<Option<keystore::Secret>, keystore::Error>> for Touched {
-    fn from(answer: Result<Option<keystore::Secret>, keystore::Error>) -> Self {
+impl From<Result<Option<keystore::Secret>, Refused>> for Touched {
+    fn from(answer: Result<Option<keystore::Secret>, Refused>) -> Self {
         match answer {
             Ok(opened) => Self::Opened(opened),
-            Err(keystore::Error::TouchId { source, .. }) => match source {
-                keystore::TouchIdError::Declined(_) => Self::Declined,
-                keystore::TouchIdError::TimedOut(_) => Self::TimedOut,
-                keystore::TouchIdError::NotHere(_) | keystore::TouchIdError::Unavailable => {
-                    Self::NotHere
-                }
-                other => Self::Failed(eyre::Report::new(other)),
+            Err(refused) => match refused.kind() {
+                Kind::Declined => Self::Declined,
+                Kind::TimedOut => Self::TimedOut,
+                Kind::NotHere => Self::NotHere,
+                _ => Self::Failed(eyre::Report::new(refused)),
             },
-            Err(other) => Self::Failed(eyre::Report::new(other)),
         }
     }
 }
@@ -641,7 +643,7 @@ pub fn open(
         }
     }
     let (secret, _) = crate::passphrase::unlock(prompt, asked, |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase))
+        file.unlock(locked, Unlock::Passphrase(passphrase))
     })?;
     Ok(secret)
 }
@@ -806,8 +808,17 @@ impl<'a> Lines<'a> {
         format!("Touch ID was cancelled; {} was not opened", self.key())
     }
 
+    /// A touch that failed: a refusal of the key file in its own words, since only a failure of the touch
+    /// itself says Touch ID did not open the key; else that, with the failure escaped, last on its row.
     fn failed(&self, why: &eyre::Report) -> String {
-        format!("Touch ID did not open {}: {why:#}", self.key())
+        if let Some(refused) = why.downcast_ref::<Refused>() {
+            return refused.to_string();
+        }
+        format!(
+            "Touch ID did not open {}\n  failure   {}",
+            self.key(),
+            Escaped(&format!("{why:#}"))
+        )
     }
 }
 

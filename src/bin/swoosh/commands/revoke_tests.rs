@@ -1687,7 +1687,11 @@ async fn revoke_a_root_on_the_holder_needs_the_passphrase_before_it_deletes() {
         "nor the third one",
     ]);
     let ran = revoke_root_with(&home, ROOT, Some(&prefix(ROOT)), wrong, true).await;
-    assert_eq!(ran.refusal(), "that passphrase does not open your root.");
+    assert_eq!(
+        ran.refusal(),
+        "that passphrase does not open your root\n  \
+         If you are sure it is right, the key file may be damaged."
+    );
     assert_eq!(ran.prompts, 3, "three tries");
     assert!(
         ran.tape.at("<confirm>") < ran.tape.at("<prompt>"),

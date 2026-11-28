@@ -1444,7 +1444,7 @@ async fn a_dead_key_lock_still_says_how_to_mend_it() {
         let out = status_reading(&home, keystore::Health::Dead).await;
         let dead = swoosh::touch::Lines::of(
             swoosh::passphrase::Asked::MachineKey,
-            &KeyFile::new(home.key()),
+            &swoosh::key_file::KeyFile::machine(&home),
             passphrase,
         )
         .dead();

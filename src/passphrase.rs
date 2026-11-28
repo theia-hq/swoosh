@@ -29,6 +29,7 @@ use rand::Rng as _;
 use zeroize::Zeroizing;
 
 use crate::escape::EscapedPath;
+use crate::key_file::{Kind, Refused};
 use crate::touch::{Touch, TouchHere, Touched};
 
 /// The longest passphrase line read, in bytes. A cap, so a stuck key or a pasted file cannot grow the
@@ -103,7 +104,8 @@ impl Asked<'_> {
         }
     }
 
-    /// The line after a passphrase that does not open the key, and the refusal after the last try.
+    /// The line after a passphrase that does not open the key, before it is asked again. The refusal after
+    /// the last try is the key file's own ([`Refused`]).
     fn wrong(self) -> String {
         match self {
             Self::Root => "that passphrase does not open your root.".to_owned(),
@@ -195,26 +197,28 @@ pub struct Wrong {
 pub fn unlock<T>(
     prompt: &mut impl Prompt,
     asked: Asked<'_>,
-    mut open: impl FnMut(&Passphrase) -> Result<T, keystore::Error>,
+    mut open: impl FnMut(&Passphrase) -> Result<T, Refused>,
 ) -> eyre::Result<(T, Passphrase)> {
-    for tried in 1..=TRIES {
+    let mut tried = 1;
+    loop {
         let passphrase = prompt.unlock(asked)?;
         match open(&passphrase) {
             Ok(opened) => return Ok((opened, passphrase)),
-            Err(keystore::Error::Unlock { .. }) if tried < TRIES => prompt.say(&asked.wrong()),
-            Err(keystore::Error::Unlock { .. }) => {
+            Err(refused) if matches!(refused.kind(), Kind::Unlock(_)) && tried < TRIES => {
+                prompt.say(&asked.wrong());
+                tried += 1;
+            }
+            // The last try's refusal is the key file's, one byte string for a wrong passphrase and a damaged
+            // file.
+            Err(refused) if matches!(refused.kind(), Kind::Unlock(_)) => {
                 return Err(Wrong {
-                    line: asked.wrong(),
+                    line: refused.to_string(),
                 }
                 .into());
             }
             Err(other) => return Err(other.into()),
         }
     }
-    Err(Wrong {
-        line: asked.wrong(),
-    }
-    .into())
 }
 
 /// Choose a new passphrase for `asked` in up to [`TRIES`] rounds, saying why each refused round did not take.

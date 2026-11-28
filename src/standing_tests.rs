@@ -635,3 +635,42 @@ fn a_stopped_join_or_leave_names_the_verb_that_finishes_it() {
         )
     );
 }
+
+/// A refusal of this machine's key file is its own lines under a standing and under a revocations write,
+/// never the tail of a lead after a colon: read for the standing, read so an add never revokes this
+/// machine's own key, and a revocations refusal that carries it. Red when a lead comes back before it.
+#[tokio::test]
+async fn a_refused_own_key_file_prints_its_own_lines() {
+    let home = home("own-key-refused");
+    std::fs::remove_file(home.key()).expect("remove the key file");
+    std::fs::create_dir(home.key()).expect("a directory where the key file goes");
+    let expected = format!(
+        "this machine's key file is not a regular file\n  file   {}",
+        crate::escape::peer_cell(
+            &home.key().to_string_lossy(),
+            crate::escape::room("  file   ".len())
+        )
+    );
+    let standing = Standing::read(&home)
+        .await
+        .expect_err("the key file is a directory");
+    assert!(matches!(standing, StandingError::OwnKey(_)), "{standing:?}");
+    assert_eq!(format!("{:#}", eyre::Report::new(standing)), expected);
+
+    let added = crate::revoked::add(
+        &crate::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(
+            other().verify_key().expect("a usable key"),
+        )],
+    )
+    .expect_err("the key file is a directory");
+    assert!(
+        matches!(added, crate::revoked::RevokedError::Key(_)),
+        "{added:?}"
+    );
+    assert_eq!(crate::escape::causes(&added), expected);
+    let shown = format!("{:#}", eyre::Report::new(StandingError::from(added)));
+    assert_eq!(shown, expected);
+    let _ = std::fs::remove_dir_all(home.dir());
+}

@@ -8,7 +8,6 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Args;
-use keystore::KeyFile;
 use swoosh::home::Home;
 use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::Restored;
@@ -92,7 +91,7 @@ impl RestoreSync {
         // A dead lock gets the line every use of it says, check on an added fingerprint and all: the command
         // it names sets a lock that opens under every finger enrolled now.
         if touch_id_dead {
-            let file = KeyFile::strict(home.root_key());
+            let file = swoosh::key_file::KeyFile::root(home);
             writeln!(err, "{}", Lines::of(Asked::Root, &file, true).dead())?;
         }
         if machine_key_touch_id_alone {

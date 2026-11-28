@@ -1186,7 +1186,10 @@ async fn invite_states_its_effect_after_the_unlock() {
     .await;
     let refusal = ran.refusal();
     assert!(
-        refusal.contains("that passphrase does not open your root."),
+        refusal.contains(
+            "that passphrase does not open your root\n  \
+             If you are sure it is right, the key file may be damaged."
+        ),
         "{refusal}"
     );
     assert_eq!(ran.prompts, 3);
@@ -1904,7 +1907,7 @@ async fn every_making_verb_prints_only_its_artifact_on_stdout() {
     )
     .await
     .unwrap();
-    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
+    let key = swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(&home));
     assert_eq!(String::from_utf8(out).unwrap(), format!("{key}\n"));
     assert!(!err.is_empty(), "the lines about it go to stderr");
 }
@@ -2021,7 +2024,7 @@ async fn a_root_on_this_machine_is_root_key_beside_devices() {
             .all(|name| !name.ends_with('/') || name == "machine/"),
         "no directory but machine/: {names:?}"
     );
-    let root = swoosh::testkit::stored_key(&KeyFile::strict(home.root_key()));
+    let root = swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::root(&home));
     let list = swoosh::roster::held(&home, root.verify_key().unwrap()).unwrap();
     assert_eq!(
         list.epoch(),

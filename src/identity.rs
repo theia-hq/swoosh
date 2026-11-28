@@ -34,12 +34,13 @@
 //! ([`make_machine_dir`]): a copy of the key acts as this machine.
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Protection, Stored, Unlock};
+use keystore::{Protection, Stored, Unlock};
 use tightbeam::identity::AsNodeId as _;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::escape::EscapedPath;
 use crate::home::Home;
+use crate::key_file::{self, KeyFile, Kind, Refused};
 use crate::passphrase::{Asked, Prompt, Terminal};
 use crate::touch::{self, Touch, TouchAct, TouchHere};
 
@@ -184,7 +185,7 @@ pub fn peek(home: &Home) -> eyre::Result<Option<NodeId>> {
 /// # Errors
 ///
 /// The key file could not be read.
-pub fn locks(home: &Home, prompt: &impl Prompt) -> Result<Option<Locks>, keystore::Error> {
+pub fn locks(home: &Home, prompt: &impl Prompt) -> Result<Option<Locks>, Refused> {
     Ok(key_file(home)
         .load()?
         .map(|stored| Locks::of(&stored, prompt)))
@@ -220,7 +221,7 @@ pub fn key_of(file: &KeyFile, stored: &Stored) -> Result<NodeId, UnusableKey> {
         Stored::Plain(secret) => Ok(secret.with_bytes(NodeId::from_ed25519_secret)),
         Stored::Locked(locked) => locked.public_key().node_id().map_err(|_| UnusableKey {
             path: file.path().to_path_buf(),
-            whose: Whose::of(file),
+            whose: KeyFor::of(file),
         }),
     }
 }
@@ -230,16 +231,16 @@ pub fn key_of(file: &KeyFile, stored: &Stored) -> Result<NodeId, UnusableKey> {
 /// copy of a root to trust is the person's call, so the root's line names none either.
 fn unusable_line(unusable: &UnusableKey) -> String {
     match unusable.whose {
-        Whose::Machine => format!(
+        KeyFor::Machine => format!(
             "this machine's key file at {} is damaged and holds no usable key; start this machine over with a \
              new key: swoosh leave --new-key",
             EscapedPath(&unusable.path)
         ),
-        Whose::MachineKeepingRoot => format!(
+        KeyFor::MachineKeepingRoot => format!(
             "this machine's key file at {} is damaged and holds no usable key.",
             EscapedPath(&unusable.path)
         ),
-        Whose::Root => format!(
+        KeyFor::Root => format!(
             "the root key file at {} is damaged and holds no usable key.",
             EscapedPath(&unusable.path)
         ),
@@ -253,12 +254,12 @@ pub struct UnusableKey {
     /// The key file.
     pub path: std::path::PathBuf,
     /// Whose key the file is for.
-    pub whose: Whose,
+    pub whose: KeyFor,
 }
 
 /// Whose key a damaged key file was for, as its line needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Whose {
+pub enum KeyFor {
     /// This machine's, in a home that keeps no root: `leave --new-key` sets it aside.
     Machine,
     /// This machine's, beside a root kept in its home, which `leave` never leaves.
@@ -267,14 +268,14 @@ pub enum Whose {
     Root,
 }
 
-impl Whose {
+impl KeyFor {
     /// Whose key `file` is for. This machine's key is `<home>/machine/key` and a root kept in that home is
     /// `<home>/root.key`, looked for where `leave` looks, so the line never names the command that refusal
     /// turns away. A root that cannot be ruled out counts as kept: the line then names no command.
     pub fn of(file: &KeyFile) -> Self {
-        match file.kind() {
-            keystore::Kind::Strict => Self::Root,
-            keystore::Kind::Standard => {
+        match file.whose() {
+            key_file::Whose::Root | key_file::Whose::Copy(_) => Self::Root,
+            key_file::Whose::Machine => {
                 let absent = file
                     .path()
                     .parent()
@@ -301,8 +302,9 @@ pub enum Locked {
         key: NodeId,
         /// What it opens with.
         now: Methods,
-        /// The failure the key store answered after the file was in place (its directory not synced, say), as
-        /// its chain reads: the file read back holds the key, so it is made, and the failure is said beside it.
+        /// The failure the key store answered after the file was in place (its directory not synced, say), in
+        /// the words of its `failure` row ([`Refused::failure`]): the file read back holds the key, so it is
+        /// made, and the failure is said beside it.
         failed: Option<String>,
     },
     /// Locks were put on the key beside the ones it had: its first, on a plain key.
@@ -355,14 +357,14 @@ impl Now {
             Ok(locks) => Self::Read(locks),
             Err(error) => Self::Unread(Unread {
                 path: file.path().to_string_lossy().into_owned(),
-                read: crate::escape::causes(&error),
+                read: error.head(),
             }),
         }
     }
 }
 
-/// A key file that could not be read back, as a line names it: its path's text and the read's own cause
-/// chain, each printed through the escaper.
+/// A key file that could not be read back, as a line names it: its path's text and the first line of the
+/// read's refusal, in swoosh's words, each printed through the escaper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unread {
     /// The key file's path, as text.
@@ -381,7 +383,7 @@ pub struct Unconfirmed {
     pub path: std::path::PathBuf,
     /// The read's error, where a read failed.
     #[source]
-    pub read: Option<keystore::Error>,
+    pub read: Option<Refused>,
 }
 
 /// The refusal when the key file this command wrote under `home.lock` is gone when read back: something that
@@ -401,7 +403,7 @@ pub struct Gone {
 pub struct TouchIdNotAdded {
     /// The key made.
     pub key: NodeId,
-    /// The failure after the write, as its chain reads.
+    /// The failure after the write, in the words of its `failure` row.
     pub failed: String,
 }
 
@@ -474,12 +476,10 @@ impl Locks {
     /// # Errors
     ///
     /// The file cannot be read, or is gone: something outside swoosh, which takes no `home.lock`, removed it.
-    fn after(file: &KeyFile, prompt: &impl Prompt) -> Result<Self, keystore::Error> {
+    fn after(file: &KeyFile, prompt: &impl Prompt) -> Result<Self, Refused> {
         match file.load()? {
             Some(stored) => Ok(Self::of(&stored, prompt)),
-            None => Err(keystore::Error::Absent {
-                path: file.path().to_path_buf(),
-            }),
+            None => Err(file.absent()),
         }
     }
 
@@ -652,7 +652,7 @@ async fn set_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<L
         prompt.warn("");
         return Ok(added(Methods::Passphrase, before, now, root, failed));
     }
-    let current = prove_passphrase(prompt, &locked)?;
+    let current = prove_passphrase(prompt, &file, &locked)?;
     let new = crate::passphrase::choose(prompt, Asked::MachineKey)?;
     let _home_lock = crate::home::HomeWrite::take(home).await?;
     let before = Locks::after(&file, prompt)?;
@@ -704,7 +704,7 @@ async fn remove_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Resul
         touch::TAKES_LAST_LOCK_OFF
     });
     prompt.warn("");
-    let current = prove_passphrase(prompt, &locked)?;
+    let current = prove_passphrase(prompt, &file, &locked)?;
     let _home_lock = crate::home::HomeWrite::take(home).await?;
     let failed =
         written(file.remove_lock(Unlock::Passphrase(&current), keystore::Method::Passphrase))?;
@@ -835,7 +835,7 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
             }
             // A blank line, so the prompts stand apart from what was said before them.
             prompt.warn("");
-            let current = prove_passphrase(prompt, &locked)?;
+            let current = prove_passphrase(prompt, &file, &locked)?;
             TouchAct::BesidePassphrase { current }
         }
     };
@@ -886,7 +886,7 @@ async fn remove_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<
     }
     prompt.warn(touch::TAKES_TOUCH_ID_OFF);
     prompt.warn("");
-    let current = prove_passphrase(prompt, &locked)?;
+    let current = prove_passphrase(prompt, &file, &locked)?;
     let _home_lock = crate::home::HomeWrite::take(home).await?;
     let failed =
         written(file.remove_lock(Unlock::Passphrase(&current), keystore::Method::TouchId))?;
@@ -896,11 +896,13 @@ async fn remove_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<
 /// Prove the passphrase on this machine's key, asking up to three times, and hand it back for the change.
 fn prove_passphrase(
     prompt: &mut impl Prompt,
+    file: &KeyFile,
     locked: &keystore::Locked,
 ) -> eyre::Result<keystore::Passphrase> {
     // Proven before anything new is asked, so a mistyped one fails at once.
     let ((), current) = crate::passphrase::unlock(prompt, Asked::MachineKey, |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
+        file.unlock(locked, Unlock::Passphrase(passphrase))
+            .map(drop)
     })?;
     Ok(current)
 }
@@ -933,7 +935,7 @@ pub const TOUCH_ID_ALONE_BESIDE_ROOT: &str = "this machine's key needs a passphr
 /// says nothing here; every use of it says why.
 fn root_opens_by_touch(home: &Home) -> bool {
     matches!(
-        KeyFile::strict(home.root_key()).load(),
+        KeyFile::root(home).load(),
         Ok(Some(Stored::Locked(root))) if holds_touch_id(&root)
     )
 }
@@ -1007,7 +1009,7 @@ enum Found {
     /// `home.lock`.
     Theirs,
     /// A file that cannot be read, with the read's error, or this run's key under no lock this build knows.
-    Unconfirmed(Option<keystore::Error>),
+    Unconfirmed(Option<Refused>),
 }
 
 impl Drawn {
@@ -1036,12 +1038,13 @@ impl Drawn {
 
     /// The key written under a passphrase, with no touch, the write answering `wrote`: made where the file read
     /// back is this run's, a failure that came after it said beside it; over no file, the write's own failure.
-    fn made(&self, file: &KeyFile, wrote: Option<keystore::Error>) -> eyre::Result<Locked> {
+    fn made(&self, file: &KeyFile, wrote: Option<Refused>) -> eyre::Result<Locked> {
         match (self.found(file), wrote) {
+            // A file read back as this run's was published, so a failure the write answered came after it.
             (Found::Mine(now), wrote) => Ok(Locked::Made {
                 key: self.key,
                 now,
-                failed: wrote.map(|error| crate::escape::causes(&error)),
+                failed: wrote.map(|error| error.failure()),
             }),
             (Found::Absent, Some(error)) => Err(error.into()),
             (Found::Absent, None) => Err(gone(file)),
@@ -1128,7 +1131,7 @@ fn sealed_then_touched(
 ) -> eyre::Result<Locked> {
     let now = match Locks::after(file, prompt) {
         Ok(now) => now,
-        Err(keystore::Error::Absent { .. }) => return Err(gone(file)),
+        Err(error) if error.kind() == Kind::Absent => return Err(gone(file)),
         Err(error) => return Err(unconfirmed(file, Some(error))),
     };
     if now.has(keystore::Method::TouchId) {
@@ -1156,23 +1159,26 @@ fn sealed_then_touched(
 }
 
 /// A write's answer, as a result takes it: done, or done with the failure the key store answered after the
-/// file was in place (its directory not synced), as its chain reads, to be said beside the result.
+/// file was in place (its directory not synced), in the words of its `failure` row, to be said beside the
+/// result.
 ///
 /// # Errors
 ///
 /// Any other failure: the write did not land.
-fn written(answer: Result<(), keystore::Error>) -> Result<Option<String>, keystore::Error> {
+fn written(answer: Result<(), Refused>) -> Result<Option<String>, Refused> {
     match answer {
         Ok(()) => Ok(None),
-        Err(error @ keystore::Error::Unsynced { .. }) => Ok(Some(crate::escape::causes(&error))),
-        Err(error) => Err(error),
+        Err(error) => error
+            .unsynced()
+            .map_or(Err(error), |failed| Ok(Some(failed))),
     }
 }
 
-/// The failure a touch answered, as its chain reads, for a result whose file shows the act landed anyway.
+/// The failure a touch answered, as its `failure` row says it, for a result whose file shows the act landed
+/// anyway.
 fn failure(touched: &touch::Touched) -> Option<String> {
     match touched {
-        touch::Touched::Failed(why) => Some(format!("{why:#}")),
+        touch::Touched::Failed(why) => Some(touch::failure(why)),
         touch::Touched::Opened(_)
         | touch::Touched::Declined
         | touch::Touched::NotHere
@@ -1181,7 +1187,7 @@ fn failure(touched: &touch::Touched) -> Option<String> {
 }
 
 /// The refusal for a touch that did not land on a make: its cause as the head, then `detail`, the fact of
-/// what the key was left with, and after a failure its own chain, on a line of its own. `None` for a touch
+/// what the key was left with, and after a failure its `failure` words, on a line of their own. `None` for a touch
 /// that landed.
 fn missed(touched: touch::Touched, detail: &str) -> Option<eyre::Report> {
     let head = match touched {
@@ -1189,9 +1195,11 @@ fn missed(touched: touch::Touched, detail: &str) -> Option<eyre::Report> {
         touch::Touched::Declined => "Touch ID was cancelled",
         touch::Touched::NotHere => "Touch ID did not open the new lock on this Mac",
         touch::Touched::TimedOut => touch::TIMED_OUT,
-        // The failure's chain on its own line after the fact, as the person reads the fact first.
+        // The failure's `failure` row words on their own line after the fact, as the person reads the fact
+        // first.
         touch::Touched::Failed(why) => {
-            return Some(eyre::eyre!("Touch ID failed\n  {detail}\n  {why:#}"));
+            let why = touch::failure(&why);
+            return Some(eyre::eyre!("Touch ID failed\n  {detail}\n  {why}"));
         }
     };
     Some(eyre::eyre!("{head}\n  {detail}"))
@@ -1206,7 +1214,7 @@ fn gone(file: &KeyFile) -> eyre::Report {
 }
 
 /// [`Unconfirmed`], for `file`, with the read's error where one failed.
-fn unconfirmed(file: &KeyFile, read: Option<keystore::Error>) -> eyre::Report {
+fn unconfirmed(file: &KeyFile, read: Option<Refused>) -> eyre::Report {
     Unconfirmed {
         path: file.path().to_path_buf(),
         read,
@@ -1249,7 +1257,7 @@ pub const CHOOSE_FOR_KEY_NEEDS_TERMINAL: &str =
 
 /// The home's key file.
 fn key_file(home: &Home) -> KeyFile {
-    KeyFile::new(home.key())
+    KeyFile::machine(home)
 }
 
 /// The key the file holds, unlocked, or `None` only when nothing is at the path.
@@ -1283,9 +1291,9 @@ fn mint(home: &Home, file: &KeyFile) -> eyre::Result<Secret> {
     };
     make_machine_dir(home)?;
     file.write(&secret, Protection::Plain)
-        .map_err(|error| match &error {
-            keystore::Error::Io { source, .. } => cannot(source),
-            _ => eyre::Report::new(error),
+        .map_err(|error| match error.into_io() {
+            Ok(source) => cannot(&source),
+            Err(error) => eyre::Report::new(error),
         })?;
     Ok(Secret(secret))
 }
@@ -1427,21 +1435,24 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
     make_machine_dir(home)?;
     match file.adopt(&secret, Protection::Plain) {
         Ok(()) => Ok(()),
-        Err(keystore::Error::Different { path, existing, .. }) => {
+        Err(error) => {
+            let Kind::Different(existing) = error.kind() else {
+                return Err(error.into());
+            };
             // The key store names no key, so the existing one is spelled here, through the bridge: a sealed
             // file's header is only a claim, and one no key could be is refused naming the file.
+            let path = file.path();
             let existing = existing.node_id().map_err(|_| UnusableKey {
-                path: path.clone(),
-                whose: Whose::of(&file),
+                path: path.to_path_buf(),
+                whose: KeyFor::of(&file),
             })?;
             eyre::bail!(
                 "this machine is already {existing}; joining this would replace it with {incoming}. {} \
              holds the only copy of that key: nobody can issue another. To replace it: swoosh leave \
              --new-key",
-                EscapedPath(&path),
+                EscapedPath(path),
             )
         }
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -1466,7 +1477,7 @@ pub fn replace_made(
     }
     let mut copy = Zeroizing::new(*seed);
     let secret = keystore::Secret::take(&mut copy);
-    let staged = KeyFile::new(home.machine().join("key.new"));
+    let staged = file.beside(replace::STAGED);
     replace::remove(staged.path())?;
     staged.write(&secret, Protection::Plain)?;
     std::fs::rename(staged.path(), file.path())?;

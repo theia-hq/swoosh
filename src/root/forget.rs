@@ -26,6 +26,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use super::{KEY_FILE, LIST_FILE, RootError, header_key, read_header, read_list};
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
+use crate::key_file::KeyFile;
 use crate::passphrase::{Asked, Prompt};
 use crate::standing::Standing;
 
@@ -331,7 +332,8 @@ pub async fn forget(
     // anything is asked; the unlock proves the key.
     // The bytes this check opens are kept: the copy confirmed under the lock is these, byte for byte.
     let (_, opened_bytes) = open_key(&key, dir)?;
-    let locked = read_header(&key)?;
+    let file = KeyFile::copy(dir);
+    let locked = read_header(&file)?;
     let claimed = header_key(&key, &locked)?;
     if claimed != root {
         return Err(ForgetError::AnotherRoot {
@@ -341,7 +343,7 @@ pub async fn forget(
         });
     }
     let opened = crate::passphrase::unlock(prompt, Asked::Copy(dir), |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase))
+        file.unlock(&locked, Unlock::Passphrase(passphrase))
     });
     let secret = match opened {
         Ok((secret, _)) => secret,
@@ -463,15 +465,29 @@ fn open_key(path: &Path, dir: &Path) -> Result<(std::fs::File, Vec<u8>), ForgetE
 }
 
 /// The file of the copy at `path`, opened without blocking, so a pipe swapped in returns at once instead of
-/// holding `home.lock`; anything but a regular file, which check 3 found there, is the copy changed.
+/// holding `home.lock`, and without following a link; anything but a regular file, which check 3 found there,
+/// is the copy changed, but a link at its key file is that file's own link refusal.
 fn open_regular(path: &Path, dir: &Path) -> Result<std::fs::File, ForgetError> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
+    // No link is followed: one swapped in after the checks is the copy's key file as a link, or the copy
+    // changed.
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .open(path)
-        .map_err(super::io_at(path))?;
+        .map_err(|error| -> ForgetError {
+            if error.raw_os_error() != Some(libc::ELOOP) {
+                return super::io_at(path)(error).into();
+            }
+            let key = KeyFile::copy(dir);
+            match key.as_link() {
+                Some(link) if key.path() == path => RootError::KeyFile(link).into(),
+                _ => ForgetError::Changed {
+                    dir: dir.to_path_buf(),
+                },
+            }
+        })?;
     if !file.metadata().map_err(super::io_at(path))?.is_file() {
         return Err(ForgetError::Changed {
             dir: dir.to_path_buf(),

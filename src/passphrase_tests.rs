@@ -11,6 +11,12 @@ use super::{
 };
 use crate::testkit::Counting;
 
+/// The key file a refusal is worded for: this machine's, in a home nothing reads.
+fn opener() -> crate::key_file::KeyFile {
+    let home = crate::home::Home::resolve(Some(std::env::temp_dir().join("swoosh-passphrase-any")));
+    crate::key_file::KeyFile::machine(&home.unwrap())
+}
+
 fn text(text: &str) -> Zeroizing<String> {
     Zeroizing::new(text.to_owned())
 }
@@ -52,7 +58,7 @@ fn an_unlock_takes_any_passphrase_the_file_opens_under() {
     };
     let mut prompt = Counting::new(["abc"]);
     let (opened, _) = unlock(&mut prompt, Asked::MachineKey, |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase))
+        opener().unlock(&locked, Unlock::Passphrase(passphrase))
     })
     .expect("a short passphrase opens the key it seals");
     assert_eq!(opened.public_key(), secret.public_key());
@@ -104,7 +110,7 @@ fn a_wrong_passphrase_asks_again_up_to_three_times() {
 
     let mut prompt = Counting::new(["one", "two", "three", "the right passphrase"]);
     let refused = unlock(&mut prompt, Asked::MachineKey, |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase))
+        opener().unlock(&locked, Unlock::Passphrase(passphrase))
     })
     .expect_err("three wrong passphrases refuse");
     assert_eq!(prompt.events(), TRIES);
@@ -114,14 +120,15 @@ fn a_wrong_passphrase_asks_again_up_to_three_times() {
     );
     assert_eq!(
         refused.to_string(),
-        "that passphrase does not open this machine's key."
+        "that passphrase does not open this machine's key\n  \
+         If you are sure it is right, the key file may be damaged."
     );
     assert_eq!(std::fs::read(&path).expect("read"), before);
 
     // The right one on the last try opens it.
     let mut prompt = Counting::new(["one", "two", "the right passphrase"]);
     unlock(&mut prompt, Asked::Root, |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase))
+        opener().unlock(&locked, Unlock::Passphrase(passphrase))
     })
     .expect("the third try opens");
     assert_eq!(

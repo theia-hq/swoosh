@@ -27,8 +27,9 @@ pub(super) fn home(tag: &str) -> (Home, PathBuf) {
     (home, dir)
 }
 
-/// A wrong-size `key` is corrupt or foreign: reading it fails closed with the size named, and
-/// `Persisted` never mints a fresh key over the file (the old silent-overwrite bug this guards).
+/// A wrong-size `key` is corrupt or foreign: reading it fails closed in swoosh's words (the size the parser
+/// read stays at `debug`), and `Persisted` never mints a fresh key over the file (the old silent-overwrite
+/// bug this guards).
 #[tokio::test]
 async fn a_wrong_size_key_file_refuses_and_is_never_overwritten() {
     let (home, dir) = home("wrong-size");
@@ -48,10 +49,9 @@ async fn a_wrong_size_key_file_refuses_and_is_never_overwritten() {
         .await
         .err()
         .expect("a 16-byte key file must be refused, not replaced");
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("16 bytes") && message.contains("32"),
-        "the refusal names the actual and expected sizes: {message}"
+    assert_eq!(
+        format!("{error:#}"),
+        "this machine's key file is not one this build reads"
     );
     assert_eq!(
         std::fs::read(&path).expect("the corrupt file is still there"),
@@ -63,9 +63,10 @@ async fn a_wrong_size_key_file_refuses_and_is_never_overwritten() {
         .await
         .err()
         .expect("an outward dial must refuse a corrupt key file too, not dial ephemerally");
-    assert!(
-        format!("{error:#}").contains("16 bytes"),
-        "the read-only path names the size too: {error:#}"
+    assert_eq!(
+        format!("{error:#}"),
+        "this machine's key file is not one this build reads",
+        "the read-only path refuses alike"
     );
     assert_eq!(
         std::fs::read(&path).expect("the corrupt file survives the read-only path"),
@@ -204,7 +205,11 @@ async fn a_failed_write_leaves_the_store_untouched() {
 async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let (home, dir) = home("too-open");
+    // A home at a short path, so its row prints whole and its command fits its line.
+    let dir = std::path::PathBuf::from(format!("/tmp/swoosh-open({})", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the scratch home");
+    let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
     let path = home.key();
     super::make_machine_dir(&home).expect("the key's dir");
     let seed = [5u8; 32];
@@ -215,14 +220,13 @@ async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
         .await
         .err()
         .expect("a group/world-readable key must be refused");
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("group or other"),
-        "the refusal explains why: {message}"
-    );
-    assert!(
-        message.contains(&format!("chmod 600 {}", path.display())),
-        "the refusal hints the fix: {message}"
+    // The scratch path holds parentheses, so the command quotes it.
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "this machine's key file gives other users access\n  file   {0}\n\nTo fix it:\n  chmod 600 -- '{0}'",
+            path.display()
+        )
     );
     assert_eq!(
         std::fs::read(&path).expect("the too-open key is untouched"),
@@ -293,7 +297,7 @@ pub(super) async fn sealed(home: &Home, passphrase: &'static str) -> bifrost::No
         ),
         "{locked:?}"
     );
-    crate::testkit::stored_key(&keystore::KeyFile::new(home.key()))
+    crate::testkit::stored_key(&crate::key_file::KeyFile::machine(home))
 }
 
 /// A sealed key opens under its passphrase, for a serving verb and an outward dial alike, as the node it
@@ -357,7 +361,7 @@ async fn inspecting_a_sealed_key_asks_for_nothing() {
 
     let inspected = super::inspect(&home).expect("inspect a sealed home");
     assert_eq!(inspected, super::Inspected::Found(node));
-    let stored = keystore::KeyFile::new(home.key()).load().unwrap();
+    let stored = crate::key_file::KeyFile::machine(&home).load().unwrap();
     let Some(Stored::Locked(locked)) = stored else {
         panic!("the key stays locked");
     };
@@ -489,7 +493,7 @@ fn root_with_touch_id(home: &Home) {
 
 /// The methods of this machine's key's locks.
 fn locks(home: &Home) -> Vec<Method> {
-    match keystore::KeyFile::new(home.key())
+    match crate::key_file::KeyFile::machine(home)
         .load()
         .expect("load")
         .expect("a key")
@@ -1328,7 +1332,7 @@ fn landing_as(fixture: &'static [u8]) -> impl FnMut(&crate::touch::Touch) + 'sta
 
 /// What `home`'s key file holds, as the result reads it, Touch ID reading live.
 fn now_in(home: &Home) -> super::Locks {
-    let stored = keystore::KeyFile::new(home.key())
+    let stored = crate::key_file::KeyFile::machine(home)
         .load()
         .expect("load")
         .expect("a key");
@@ -1436,10 +1440,10 @@ async fn each_cell_has_its_own_outcome() {
         let locked = super::lock(&home, method, remove, &mut prompt)
             .await
             .unwrap_or_else(|error| panic!("{tag}: {error:#}"));
-        let key = keystore::KeyFile::new(home.key())
+        let key = crate::key_file::KeyFile::machine(&home)
             .load()
             .expect("load")
-            .map(|_| crate::testkit::stored_key(&keystore::KeyFile::new(home.key())));
+            .map(|_| crate::testkit::stored_key(&crate::key_file::KeyFile::machine(&home)));
         let expected =
             answer(key.unwrap_or_else(|| bifrost::NodeId::from_ed25519_secret(&[0; 32])));
         assert_eq!(locked, expected, "{tag}");
@@ -1556,7 +1560,7 @@ async fn a_make_is_made_only_over_this_runs_key() {
     assert_eq!(
         locked,
         super::Locked::Made {
-            key: crate::testkit::stored_key(&keystore::KeyFile::new(mine.key())),
+            key: crate::testkit::stored_key(&crate::key_file::KeyFile::machine(&mine)),
             now: Methods::TouchId,
             failed: Some("the directory was not synced".to_owned()),
         }
@@ -1702,10 +1706,9 @@ async fn a_file_this_command_cannot_read_back_claims_nothing() {
         panic!("an unconfirmed add: {locked:?}");
     };
     assert_eq!(unread.path, added.key().to_string_lossy());
-    assert!(
-        unread.read.contains("not in a format this build reads"),
-        "{}",
-        unread.read
+    assert_eq!(
+        unread.read,
+        "this machine's key file is not one this build reads"
     );
     let _ = std::fs::remove_dir_all(&added_dir);
 }
@@ -1722,7 +1725,7 @@ fn a_dead_touch_id_lock_reads_dead_from_its_header() {
     let read = |bytes: &[u8], health: Option<keystore::Health>| {
         let (home, dir) = home(&format!("dead-header-{}-{health:?}", bytes.len()));
         placed(&home, bytes);
-        let stored = keystore::KeyFile::new(home.key())
+        let stored = crate::key_file::KeyFile::machine(&home)
             .load()
             .expect("load")
             .expect("a key");
@@ -1769,7 +1772,7 @@ async fn a_sealed_make_that_times_out_keeps_its_last_line() {
             .at_this_mac(keystore::Health::Live)
             .touching([miss(tag)]);
         let refused = lock_touch_id(&first, &mut prompt).await.unwrap_err();
-        let key = crate::testkit::stored_key(&keystore::KeyFile::new(first.key()));
+        let key = crate::testkit::stored_key(&crate::key_file::KeyFile::machine(&first));
         assert_eq!(
             format!("{refused:#}"),
             refusal(
@@ -1832,7 +1835,7 @@ async fn a_sealed_make_that_times_out_keeps_its_last_line() {
             }
         } else {
             super::Locked::Made {
-                key: crate::testkit::stored_key(&keystore::KeyFile::new(home.key())),
+                key: crate::testkit::stored_key(&crate::key_file::KeyFile::machine(&home)),
                 now: Methods::Both,
                 failed: Some("the directory was not synced".to_owned()),
             }
@@ -1857,7 +1860,7 @@ async fn lock_after_a_missed_make_says_made() {
     assert_eq!(
         locked,
         super::Locked::Made {
-            key: crate::testkit::stored_key(&keystore::KeyFile::new(home.key())),
+            key: crate::testkit::stored_key(&crate::key_file::KeyFile::machine(&home)),
             now: Methods::Passphrase,
             failed: None,
         }
@@ -1882,7 +1885,7 @@ async fn a_passphrase_removal_over_a_touch_id_that_does_not_open_says_nothing_fi
             .expect_err("refused");
         let lines = crate::touch::Lines::of(
             crate::passphrase::Asked::MachineKey,
-            &keystore::KeyFile::new(home.key()),
+            &crate::key_file::KeyFile::machine(&home),
             true,
         );
         let said = match health {
@@ -1919,19 +1922,24 @@ fn a_write_in_place_but_unsynced_is_a_written_result() {
         path: PathBuf::from("/h/machine/key"),
         source: std::io::Error::other("the disk went away"),
     };
-    let failed = super::written(Err(unsynced())).expect("in place");
-    assert!(failed.is_some_and(|failed| failed.contains("the disk went away")));
+    let at =
+        crate::key_file::KeyFile::machine(&crate::home::Home::resolve(Some("/h".into())).unwrap());
+    let failed = super::written(Err(at.refuse(unsynced()))).expect("in place");
+    assert_eq!(
+        failed.as_deref(),
+        Some("the directory holding the key file could not be synced to disk: the disk went away")
+    );
     assert!(super::written(Ok(())).expect("done").is_none());
     assert!(
-        super::written(Err(keystore::Error::Absent {
+        super::written(Err(at.refuse(keystore::Error::Absent {
             path: PathBuf::from("/h/machine/key")
-        }))
+        })))
         .is_err()
     );
 
     let (home, dir) = home("unsynced-first-key");
     super::make_machine_dir(&home).expect("the key's dir");
-    let file = keystore::KeyFile::new(home.key());
+    let file = crate::key_file::KeyFile::machine(&home);
     let secret = keystore::Secret::generate().unwrap();
     let passphrase =
         keystore::Passphrase::try_from(zeroize::Zeroizing::new(LONG.to_owned())).unwrap();
@@ -1963,7 +1971,9 @@ async fn an_added_lock_whose_write_is_unsynced_is_added_with_its_failure() {
     };
     let mut prompt = Counting::new([PASSPHRASE])
         .at_this_mac(keystore::Health::Live)
-        .touching([Touched::Failed(eyre::Report::new(unsynced))]);
+        .touching([Touched::Failed(eyre::Report::new(
+            crate::key_file::KeyFile::machine(&home).refuse(unsynced),
+        ))]);
     let locked = lock_touch_id(&home, &mut prompt).await.expect("added");
     let super::Locked::Added {
         failed: Some(failed),
@@ -1983,7 +1993,7 @@ async fn an_added_lock_whose_write_is_unsynced_is_added_with_its_failure() {
 async fn a_seal_in_place_but_unsynced_says_so_on_its_result() {
     let (home, dir) = home("sealed-unsynced");
     sealed(&home, PASSPHRASE).await;
-    let file = keystore::KeyFile::new(home.key());
+    let file = crate::key_file::KeyFile::machine(&home);
     let prompt = Counting::new([]).at_this_mac(keystore::Health::Live);
     let locked = super::sealed_then_touched(
         Touched::Opened(None),

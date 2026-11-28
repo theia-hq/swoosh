@@ -471,7 +471,7 @@ async fn bare_join_at_a_terminal_on_a_fresh_home_takes_a_keyed_invite() {
         "{}",
         ran.err
     );
-    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
+    let key = swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(&home));
     assert_eq!(key, carried, "the invite's key is this machine's key");
     assert!(!home.machine().join("key.new").exists());
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
@@ -491,7 +491,7 @@ async fn the_key_bare_join_prints_outlives_a_paste_that_never_comes() {
     )
     .await;
     let _ = first.refusal();
-    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
+    let key = swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(&home));
     assert!(
         first
             .err
@@ -911,7 +911,7 @@ async fn a_key_carrying_invite_becomes_this_machines_key() {
     let home = empty("carrying");
     let seed = [0x78; 32];
     join(&home, &carrying(seed, "runner")).await.joined();
-    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
+    let key = swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(&home));
     assert_eq!(key, NodeId::from_ed25519_secret(&seed));
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
 }

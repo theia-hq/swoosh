@@ -665,7 +665,7 @@ pub async fn own_name(home: &Home) -> String {
     if let Some(label) = own_label(home).await {
         return format!("me/{label}");
     }
-    let file = keystore::KeyFile::new(home.key());
+    let file = crate::key_file::KeyFile::machine(home);
     file.load()
         .ok()
         .flatten()
@@ -679,7 +679,7 @@ pub async fn own_name(home: &Home) -> String {
 /// The name `me` gives this machine, when it gives one: only the name a verified list of your devices
 /// holds, never the unsigned name an invite carried, so a command built on it never names another device.
 pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
-    let file = keystore::KeyFile::new(home.key());
+    let file = crate::key_file::KeyFile::machine(home);
     let own = crate::identity::key_of(&file, &file.load().ok().flatten()?).ok()?;
     let store = ContactsStore::open(home).await.ok()?;
     store

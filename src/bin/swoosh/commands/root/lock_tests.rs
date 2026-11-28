@@ -39,14 +39,16 @@ fn content(home: &Home) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-/// Whether the root key at `path` opens under `passphrase`.
+/// Whether the root key at `path`, a `root.key`, opens under `passphrase`.
 fn opens(path: &Path, passphrase: &str) -> bool {
-    let Some(Stored::Locked(locked)) = KeyFile::strict(path).load().unwrap() else {
+    let file = swoosh::key_file::KeyFile::copy(path.parent().unwrap());
+    let Some(Stored::Locked(locked)) = file.load().unwrap() else {
         panic!("a sealed root key");
     };
     let passphrase =
         keystore::Passphrase::try_from(zeroize::Zeroizing::new(passphrase.to_owned())).unwrap();
-    locked.unlock(Unlock::Passphrase(&passphrase)).is_ok()
+    file.unlock(&locked, Unlock::Passphrase(&passphrase))
+        .is_ok()
 }
 
 /// A copy of `ROOT` beside `home`.
@@ -564,4 +566,60 @@ fn a_root_lock_usage_error_prints_root_locks_usage() {
     assert!(rendered.contains("swoosh root lock"), "{rendered}");
     let rendered = crate::usage(&["revoke"], "x").render().to_string();
     assert!(rendered.contains("swoosh revoke"), "{rendered}");
+}
+
+/// A path as a refusal's row prints it: escaped, and cut to the room its row leaves.
+fn cell(path: &Path) -> String {
+    swoosh::escape::peer_cell(
+        &path.to_string_lossy(),
+        swoosh::escape::room("  file   ".len()),
+    )
+}
+
+/// Three wrong passphrases on a copy end on the copy's final line, its `copy` row naming the typed directory,
+/// and change nothing. Red when the line names another key, drops the row, or moves off its words.
+#[tokio::test]
+async fn root_lock_in_a_dir_with_a_wrong_passphrase_ends_on_the_copys_line() {
+    let home = scratch("root-lock-dir-wrong");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    let kept = std::fs::read(dir.join("root.key")).unwrap();
+    let wrong = "not the root's passphrase at all";
+    let (result, _) = root_lock(&home, Some(&dir), &mut Counting::new([wrong, wrong, wrong])).await;
+    assert_eq!(
+        format!("{:#}", result.unwrap_err()),
+        format!(
+            "that passphrase does not open the copy\n  copy   {}\n  \
+             If you are sure it is right, the key file may be damaged.",
+            cell(&dir)
+        )
+    );
+    assert_eq!(std::fs::read(dir.join("root.key")).unwrap(), kept);
+}
+
+/// A copy whose `root.key` is a link to this machine's own root is refused before anything is asked: a lock
+/// change follows the link, so it would change the root kept here while the line said it changed the copy.
+/// Red when the root kept here changes, a passphrase is asked, or the line moves off its words.
+#[tokio::test]
+async fn root_lock_refuses_a_copy_whose_key_file_is_a_link() {
+    let home = scratch("root-lock-dir-link");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    std::fs::remove_file(dir.join("root.key")).unwrap();
+    std::os::unix::fs::symlink(home.root_key(), dir.join("root.key")).unwrap();
+    let kept = std::fs::read(home.root_key()).unwrap();
+    let mut prompt = Counting::new([PASS, FRESH]);
+    let (result, _) = root_lock(&home, Some(&dir), &mut prompt).await;
+    assert_eq!(
+        format!("{:#}", result.unwrap_err()),
+        format!(
+            "the copy's key file is a link\n  copy   {}\n  file   {}\n  \
+             The key file must be the file itself, not a link to it.",
+            cell(&dir),
+            cell(&dir.join("root.key"))
+        )
+    );
+    assert_eq!(prompt.events(), 0);
+    assert_eq!(std::fs::read(home.root_key()).unwrap(), kept);
+    assert!(opens(&home.root_key(), PASS));
 }

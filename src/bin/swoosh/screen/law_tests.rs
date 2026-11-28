@@ -116,6 +116,30 @@ fn the_local_refusal_holds_the_law() {
     }
 }
 
+/// Every refusal of a key file, for each whose, as `main` prints it, holds the law: a lowercase head after
+/// `error:`, rows at indent two, details capital with a period, a command alone at indent two. The code's
+/// own lines, not a copy. Red when any of them breaks case, period, indent or width.
+#[test]
+fn every_key_file_refusal_holds_the_law() {
+    use swoosh::key_file::KeyFile;
+
+    let home = swoosh::home::Home::resolve(Some("/h".into())).expect("a home");
+    for file in [
+        KeyFile::machine(&home),
+        KeyFile::root(&home),
+        KeyFile::copy(std::path::Path::new("/Volumes/STICK")),
+    ] {
+        for refused in file.every_refusal() {
+            let mut screen = Vec::new();
+            crate::print_error(&eyre::Report::new(refused), &mut screen);
+            let screen = String::from_utf8(screen).expect("the refusal is UTF-8");
+            if let Err(breach) = read(&screen) {
+                panic!("{breach}\n{screen}");
+            }
+        }
+    }
+}
+
 /// The lines said before and around a lock act, which the library prints itself since it asks inside
 /// itself: every before-line, every waiting line, every prompt (its trailing space trimmed) and the two
 /// refusals of a lock act, held to the law as written, the code's own lines, not a copy of them; the
@@ -125,7 +149,9 @@ fn the_local_refusal_holds_the_law() {
 fn the_lock_lines_hold_the_law() {
     use swoosh::touch::{self, Act};
 
-    let file = keystore::KeyFile::new(std::env::temp_dir().join("swoosh-law-lines").join("key"));
+    let home =
+        swoosh::home::Home::resolve(Some(std::env::temp_dir().join("swoosh-law-lines"))).unwrap();
+    let file = swoosh::key_file::KeyFile::machine(&home);
     let mut lines: Vec<String> = [
         touch::MAKES_UNDER_PASSPHRASE,
         touch::MAKES_UNDER_TOUCH_ID,

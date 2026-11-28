@@ -1029,7 +1029,7 @@ fn read_stdin(stdin: impl Read) -> eyre::Result<Link> {
 
 /// This machine's key, when it has one. Read only: a revoke never makes one.
 fn own_key(home: &Home) -> eyre::Result<Option<VerifyKey>> {
-    let file = keystore::KeyFile::new(home.key());
+    let file = swoosh::key_file::KeyFile::machine(home);
     let stored = file.load().map_err(|error| eyre::eyre!(error))?;
     Ok(match stored {
         Some(stored) => Some(swoosh::identity::key_of(&file, &stored)?.verify_key()?),

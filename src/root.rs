@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Protection, Stored};
+use keystore::{Protection, Stored};
 use nauthy::{Link, RevocationId, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
@@ -37,6 +37,7 @@ use crate::codec::{
 use crate::contacts::DeviceLabel;
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite, ServeLock};
+use crate::key_file::{KeyFile, Kind, Refused};
 use crate::passphrase::{Asked, Prompt};
 use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{
@@ -58,7 +59,7 @@ pub use restore::{RestoreError, Restored, Synced, restore};
 pub use retire::{finish as finish_retire, retire};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
-pub const KEY_FILE: &str = "root.key";
+pub const KEY_FILE: &str = crate::home::ROOT_KEY;
 
 /// The last list of your devices the root signed, beside its key in a copy.
 pub const LIST_FILE: &str = "devices";
@@ -186,9 +187,9 @@ pub enum RootError {
         /// The root being made.
         root: NodeId,
     },
-    /// The root's key file could not be read or unlocked.
+    /// The root's key file could not be read or unlocked, in swoosh's words.
     #[error(transparent)]
-    KeyFile(#[from] keystore::Error),
+    KeyFile(#[from] Refused),
     /// A key file's header names a key nobody can hold.
     #[error(transparent)]
     UnusableKey(#[from] crate::identity::UnusableKey),
@@ -505,7 +506,7 @@ struct Act {
 impl fmt::Debug for Root {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Root")
-            .field("key_file", &self.act.key_file())
+            .field("key_file", &self.act.key_file().path())
             .finish_non_exhaustive()
     }
 }
@@ -761,7 +762,7 @@ impl Root {
             let _ = writeln!(out, "{OWN_KEY_REVOKED}");
         }
         // A touch where the root has a `touch-id` lock that can be asked for here, else its passphrase.
-        let file = KeyFile::strict(act.key_file());
+        let file = act.key_file();
         let secret = crate::touch::open(
             prompt,
             &file,
@@ -1270,10 +1271,10 @@ impl Act {
     }
 
     /// The root's key file.
-    fn key_file(&self) -> PathBuf {
+    fn key_file(&self) -> KeyFile {
         self.copy
-            .as_ref()
-            .map_or_else(|| self.home.root_key(), |dir| dir.join(KEY_FILE))
+            .as_deref()
+            .map_or_else(|| KeyFile::root(&self.home), KeyFile::copy)
     }
 
     /// The records as this act has them, for a check before the prompt.
@@ -1500,16 +1501,16 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         return Err(RootError::NotADevice);
     }
     let key_file = copy
-        .as_ref()
-        .map_or_else(|| home.root_key(), |dir| dir.join(KEY_FILE));
+        .as_deref()
+        .map_or_else(|| KeyFile::root(home), KeyFile::copy);
     let locked = read_header(&key_file)?;
-    let header = header_key(&key_file, &locked)?;
+    let header = header_key(key_file.path(), &locked)?;
     if let Some(pin) = pin
         && pin != header
     {
         return Err(RootError::Mismatch { root: header, pin });
     }
-    let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
+    let revoked = crate::revoked::open(home).map_err(StandingError::from)?;
     if revoked.is_revoked_key(&header.verify_key()?) {
         return Err(RootError::Revoked { root: header });
     }
@@ -1520,22 +1521,20 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
     })
 }
 
-/// The root's key file at `path`: sealed, and of the root kind.
-fn read_header(path: &Path) -> Result<keystore::Locked, RootError> {
-    let file = KeyFile::strict(path);
+/// The root's key `file`: sealed, and of the root kind.
+fn read_header(file: &KeyFile) -> Result<keystore::Locked, RootError> {
     match file.load() {
         // A sealed root key always keeps its passphrase lock (the key store refuses one without), so any
         // sealed file of the root kind opens at a prompt here.
         Ok(Some(Stored::Locked(locked))) => Ok(locked),
         Ok(Some(Stored::Plain(_))) => Err(RootError::Plain),
-        Ok(None) => Err(RootError::KeyFile(keystore::Error::Absent {
-            path: file.path().to_path_buf(),
-        })),
-        Err(keystore::Error::Format {
-            source: keystore::FormatError::Method { found },
-            ..
-        }) => Err(RootError::Method { found }),
-        Err(error) => Err(error.into()),
+        Ok(None) => Err(file.absent().into()),
+        Err(error) => match error.kind() {
+            Kind::Format {
+                method: Some(found),
+            } => Err(RootError::Method { found }),
+            _ => Err(error.into()),
+        },
     }
 }
 
@@ -1544,7 +1543,7 @@ fn header_key(path: &Path, locked: &keystore::Locked) -> Result<NodeId, RootErro
     locked.public_key().node_id().map_err(|_| {
         RootError::UnusableKey(crate::identity::UnusableKey {
             path: path.to_path_buf(),
-            whose: crate::identity::Whose::Root,
+            whose: crate::identity::KeyFor::Root,
         })
     })
 }
@@ -1553,23 +1552,30 @@ fn header_key(path: &Path, locked: &keystore::Locked) -> Result<NodeId, RootErro
 /// few hundred bytes.
 const KEY_CAP: u64 = 4096;
 
-/// The root key file's bytes at `path`, as stored: locked with its passphrase. Opened without blocking and
+/// The root key file's bytes in `key`, as stored: locked with its passphrase. Opened without blocking and
 /// read from a regular file only, with a cap, so a planted pipe or device can neither block the read nor grow
-/// it.
-fn read_key(path: &Path) -> Result<Vec<u8>, RootError> {
+/// it. A copy's is opened without following a link, so one swapped in after the key file's own check is never
+/// read through; a home's own follows its links, as every file of a home does.
+fn read_key(key: &KeyFile) -> Result<Vec<u8>, RootError> {
     use std::io::Read as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
+    let path = key.path();
     let invalid = || RootError::Io {
         path: path.to_path_buf(),
         source: io::ErrorKind::InvalidData.into(),
     };
+    let link = key.as_link();
     // Non-blocking, so opening a pipe returns at once; the type is then checked on the handle.
+    let no_follow = if link.is_some() { libc::O_NOFOLLOW } else { 0 };
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | no_follow)
         .open(path)
-        .map_err(io_at(path))?;
+        .map_err(|error| match link {
+            Some(link) if error.raw_os_error() == Some(libc::ELOOP) => RootError::KeyFile(link),
+            _ => io_at(path)(error),
+        })?;
     if !file.metadata().map_err(io_at(path))?.is_file() {
         return Err(invalid());
     }
@@ -1681,7 +1687,7 @@ async fn make(
     not_admitting(&home_lock, home)?;
     // An unpinned home keeps no root but a revoked one, which is no root: the new one takes its place.
     remove_file(&key_file)?;
-    KeyFile::strict(&key_file).write(&secret, Protection::Passphrase(&passphrase))?;
+    KeyFile::root(home).write(&secret, Protection::Passphrase(&passphrase))?;
     seam(Seam::Keyed)?;
     let mut root = Root {
         act: Act::new(
@@ -1715,7 +1721,7 @@ async fn finish(
     prompt: &mut impl Prompt,
     out: &mut impl Write,
 ) -> Result<Option<Root>, RootError> {
-    let locked = read_header(&home.root_key())?;
+    let locked = read_header(&KeyFile::root(home))?;
     let pin = root_key.verify_key()?;
     let list = read_list(home, None, pin)?;
     let own = crate::identity::inspect(home)?.key().verify_key()?;
@@ -1745,7 +1751,7 @@ async fn finish(
     // Asked before any line that states an effect, as `present` asks.
     let secret = crate::touch::open(
         prompt,
-        &KeyFile::strict(home.root_key()),
+        &KeyFile::root(home),
         &locked,
         Asked::Root,
         crate::touch::Reason::to_use(crate::touch::USE_ROOT),
@@ -2226,7 +2232,7 @@ impl Book {
     /// or in `held`) and the keys it holds that are rows' keys. A machine's revocations of its own links
     /// never go further.
     fn carry_forward(&mut self, home: &Home, held: Option<&RosterDoc>) -> Result<(), RootError> {
-        let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
+        let revoked = crate::revoked::open(home).map_err(StandingError::from)?;
         let mut known: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
         for id in self.rows.iter().flat_map(|row| row.ids.iter()) {
             known.insert(id.id.as_bytes().to_vec(), id.expires);
@@ -2533,7 +2539,7 @@ fn live_ids(row: &Member, now: u64) -> usize {
 
 /// This machine's key, from its key file's header, when it has one.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RootError> {
-    let file = KeyFile::new(home.key());
+    let file = KeyFile::machine(home);
     match file.load()? {
         Some(stored) => Ok(Some(crate::identity::key_of(&file, &stored)?.verify_key()?)),
         None => Ok(None),

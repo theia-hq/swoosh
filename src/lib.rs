@@ -18,6 +18,7 @@ pub mod home;
 pub mod identity;
 pub mod invite;
 pub mod joining;
+pub mod key_file;
 pub mod learn;
 pub mod link;
 pub mod names;

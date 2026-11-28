@@ -117,7 +117,7 @@ fn row_for(home: &Home, key: VerifyKey) -> Option<swoosh::roster::Member> {
 }
 
 fn own_key(home: &Home) -> bifrost::NodeId {
-    swoosh::testkit::stored_key(&KeyFile::new(home.key()))
+    swoosh::testkit::stored_key(&swoosh::key_file::KeyFile::machine(home))
 }
 
 /// `--replace-key` is gone: a lost machine is replaced, not restored. Red when the flag is kept.
